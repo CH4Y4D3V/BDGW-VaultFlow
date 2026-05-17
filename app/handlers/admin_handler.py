@@ -4,6 +4,7 @@ import asyncio
 import time
 
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import Message
 
@@ -17,8 +18,6 @@ _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
 
-# ── Access control ────────────────────────────────────────────────────────────
-
 def _is_admin(user_id: int) -> bool:
     return (
         user_id == settings.OWNER_ID
@@ -27,10 +26,11 @@ def _is_admin(user_id: int) -> bool:
     )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> None:
-    """Reply with FloodWait-safe retry logic."""
+async def _safe_reply(
+    message: Message,
+    text: str,
+    parse_mode: ParseMode = ParseMode.HTML,
+) -> None:
     for attempt in range(_MAX_RETRIES):
         try:
             await message.reply_text(text, parse_mode=parse_mode)
@@ -41,10 +41,7 @@ async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> 
         except RPCError as e:
             logger.warning(
                 "Failed to send admin reply",
-                extra={
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
+                extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
             )
             if attempt == _MAX_RETRIES - 1:
                 return
@@ -52,10 +49,6 @@ async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> 
 
 
 async def _probe_mongodb() -> tuple[str, float | None]:
-    """
-    Issue a lightweight ping to MongoDB and measure round-trip latency.
-    Returns (status_label, latency_ms | None).
-    """
     try:
         db = DatabaseManager.get_db()
         t0 = time.monotonic()
@@ -63,22 +56,14 @@ async def _probe_mongodb() -> tuple[str, float | None]:
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
         return "🟢 Connected", latency_ms
     except RuntimeError as e:
-        # DatabaseManager not initialised yet
         return f"🔴 Not initialised: {e}", None
     except Exception as e:
         logger.warning("MongoDB ping failed", extra={"ctx_error": str(e)})
         return f"🔴 Error: {e}", None
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
-
 @Client.on_message(filters.command("ping"))
 async def handle_ping(client: Client, message: Message) -> None:
-    """
-    Health-check command.
-    Reports MongoDB connectivity and round-trip latency.
-    Restricted to OWNER, ADMIN, and SUDO users.
-    """
     if not message.from_user or not _is_admin(message.from_user.id):
         return
 
@@ -103,11 +88,6 @@ async def handle_ping(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("status"))
 async def handle_status(client: Client, message: Message) -> None:
-    """
-    Runtime status command.
-    Reports bot identity and key configuration surface (no secrets).
-    Restricted to OWNER, ADMIN, and SUDO users.
-    """
     if not message.from_user or not _is_admin(message.from_user.id):
         return
 
@@ -130,6 +110,8 @@ async def handle_status(client: Client, message: Message) -> None:
         f"<b>Bot:</b> {bot_name} ({bot_display})\n"
         f"<b>Verification Group:</b> <code>{settings.VERIFICATION_GROUP_ID}</code>\n"
         f"<b>Vault Channel:</b> <code>{settings.VAULT_CHANNEL_ID}</code>\n"
+        f"<b>NSFW Group:</b> <code>{settings.NSFW_GROUP_ID}</code>\n"
+        f"<b>Premium Group:</b> <code>{settings.PREMIUM_GROUP_ID}</code>\n"
         f"<b>Owner ID:</b> <code>{settings.OWNER_ID}</code>\n"
         f"<b>Privileged users:</b> {admin_count}\n"
         f"<b>Pending submissions:</b> {pending_count}\n"
@@ -138,7 +120,4 @@ async def handle_status(client: Client, message: Message) -> None:
     )
 
     await _safe_reply(message, text)
-    logger.info(
-        "/status executed",
-        extra={"ctx_user_id": message.from_user.id},
-    )
+    logger.info("/status executed", extra={"ctx_user_id": message.from_user.id})

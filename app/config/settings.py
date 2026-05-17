@@ -34,11 +34,18 @@ class Settings(BaseSettings):
     METRICS_COLLECTION: str = "metrics"
     VAULT_COLLECTION: str = "vault"
     CHANNEL_CONFIG_COLLECTION: str = "channel_config"
+    PENDING_COLLECTION: str = "pending_submissions"
 
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_GROUP_ID: int
     VAULT_CHANNEL_ID: int
+    NSFW_GROUP_ID: int = 0
+    PREMIUM_GROUP_ID: int = 0
     LOG_CHANNEL_ID: int = 0
+
+    # ── Destination display names (used in uploader notifications) ────────────
+    NSFW_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
+    PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
     # ── Access Control ────────────────────────────────────────────────────────
     OWNER_ID: int = 0
@@ -56,6 +63,9 @@ class Settings(BaseSettings):
     MAX_JOBS_PER_CYCLE: int = 100
     RANDOMIZE_POSTING_WINDOW: int = 300
     REPOST_PREVENTION_HOURS: int = 168
+
+    # ── Queue deadline for moderator-queued content ───────────────────────────
+    QUEUE_DEADLINE_HOURS: int = 24
 
     # ── Retries & Backoff ─────────────────────────────────────────────────────
     MAX_RETRY_ATTEMPTS: int = 3
@@ -86,6 +96,14 @@ class Settings(BaseSettings):
     PROCESSED_MEDIA_DIR: str = "./processed"
     WATERMARK_CACHE_DIR: str = "./watermark_cache"
     FFMPEG_TIMEOUT: float = 120.0
+
+    # Watermark logo asset — place your PNG at this path
+    WATERMARK_LOGO_PATH: str = "./assets/watermark/logo.png"
+
+    # Per-destination watermark text (used for text overlay if no logo)
+    WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
+    WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
+
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15

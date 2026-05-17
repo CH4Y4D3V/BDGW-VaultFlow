@@ -11,22 +11,17 @@ logger = get_logger(__name__)
 
 # ── Module-level singletons ───────────────────────────────────────────────────
 
-# Shared MediaIngestionPipeline — its internal album buffer must be long-lived
-# so it is instantiated once at module load, not per-request.
 _pipeline: MediaIngestionPipeline = MediaIngestionPipeline()
 
 # In-memory pending submission registry.
-# Key   : first_msg_id (int) — the primary message ID in the submitter's private chat.
-# Value : (submitter_user_id, messages) — the user's ID and their raw Message objects.
+# Key   : first_msg_id (int)
+# Value : (submitter_user_id, messages)
 #
 # Lifecycle:
-#   register_pending()  → populated on successful forward to verification group
-#   ingest_approved()   → consumed and ingested on moderator approval
-#   reject_pending()    → consumed and discarded on moderator rejection
+#   register_pending() → populated after successful forward to verification group
+#   pop_pending()      → consumed on any moderator action (approve/queue/reject)
 #
-# The registry is intentionally in-process memory.  If the process restarts,
-# any pending submissions are lost — operators must re-submit.  This is
-# acceptable given the interactive nature of the moderation flow.
+# In-process only. Lost on restart — operators must re-submit.
 _pending_submissions: dict[int, tuple[int, list[Message]]] = {}
 
 
@@ -37,11 +32,8 @@ async def register_pending(
     messages: list[Message],
 ) -> int:
     """
-    Store a pending submission in the registry after it has been forwarded to
-    the verification group.
-
-    Returns the registry key (first message ID) that the moderation callback
-    will use to look up and action the submission.
+    Store a pending submission after it has been forwarded to the verification group.
+    Returns the registry key (first message ID).
     """
     if not messages:
         raise ValueError("register_pending requires at least one message")
@@ -60,66 +52,64 @@ async def register_pending(
     return key
 
 
-async def ingest_approved(msg_id: int) -> Optional[int]:
+def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
     """
-    Approve a pending submission:
-    1. Removes it from the pending registry.
-    2. Passes each message to MediaIngestionPipeline for vault archival.
+    Atomically remove and return a pending submission.
+    Used by callback_handler on any moderation action.
 
-    Returns the submitter's user_id on success, or None if no pending entry
-    exists for the given msg_id (already actioned or registry cleared).
+    Returns (submitter_user_id, messages) or None if not found.
+    This is the single consumption point — once popped, the entry is gone.
     """
     entry = _pending_submissions.pop(msg_id, None)
     if entry is None:
         logger.warning(
-            "Approval attempted but pending entry not found",
+            "pop_pending: no entry found",
             extra={"ctx_msg_id": msg_id},
         )
+    return entry
+
+
+async def ingest_approved(msg_id: int) -> Optional[int]:
+    """
+    Legacy path kept for any direct callers.
+    Prefer pop_pending() + moderation_actions.archive_to_vault() in new code.
+
+    Pops the pending entry and runs it through the ingestion pipeline.
+    Returns submitter_user_id or None.
+    """
+    entry = pop_pending(msg_id)
+    if entry is None:
         return None
 
     submitter_user_id, messages = entry
 
-    # Delegate fully to MediaIngestionPipeline — no direct DB writes here.
-    # The pipeline handles album buffering, deduplication, and vault archival.
     for msg in messages:
         source_channel_id = str(msg.chat.id)
         await _pipeline.ingest(msg, source_channel_id)
 
     logger.info(
-        "Submission approved and handed to ingestion pipeline",
-        extra={
-            "ctx_user_id": submitter_user_id,
-            "ctx_msg_id": msg_id,
-            "ctx_count": len(messages),
-        },
+        "Submission approved and ingested (legacy path)",
+        extra={"ctx_user_id": submitter_user_id, "ctx_msg_id": msg_id, "ctx_count": len(messages)},
     )
     return submitter_user_id
 
 
 async def reject_pending(msg_id: int) -> Optional[int]:
     """
-    Reject a pending submission by removing it from the registry.
-    No vault writes are performed.
+    Legacy path kept for any direct callers.
+    Prefer pop_pending() in new code.
 
-    Returns the submitter's user_id on success, or None if no pending entry
-    exists for the given msg_id.
+    Pops and discards the pending entry. No vault writes.
+    Returns submitter_user_id or None.
     """
-    entry = _pending_submissions.pop(msg_id, None)
+    entry = pop_pending(msg_id)
     if entry is None:
-        logger.warning(
-            "Rejection attempted but pending entry not found",
-            extra={"ctx_msg_id": msg_id},
-        )
         return None
 
     submitter_user_id, messages = entry
     logger.info(
-        "Submission rejected and discarded",
-        extra={
-            "ctx_user_id": submitter_user_id,
-            "ctx_msg_id": msg_id,
-            "ctx_count": len(messages),
-        },
+        "Submission rejected and discarded (legacy path)",
+        extra={"ctx_user_id": submitter_user_id, "ctx_msg_id": msg_id},
     )
     return submitter_user_id
 

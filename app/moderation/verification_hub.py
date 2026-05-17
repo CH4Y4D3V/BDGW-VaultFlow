@@ -4,6 +4,7 @@ import asyncio
 from typing import Optional
 
 from pyrogram.client import Client
+from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -14,6 +15,19 @@ logger = get_logger(__name__)
 
 _MAX_RETRIES = 3
 
+# ── Callback data format ──────────────────────────────────────────────────────
+#
+# Step 1 — moderator picks action:
+#   mod_approve:{submitter_id}:{msg_id}
+#   mod_queue:{submitter_id}:{msg_id}
+#   mod_reject:{submitter_id}:{msg_id}
+#
+# Step 2 — moderator picks destination (approve or queue):
+#   mod_dest:{action}:{dest}:{submitter_id}:{msg_id}
+#   action: "approve" | "queue"
+#   dest:   "nsfw"    | "premium"
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 async def forward_to_verification(
     client: Client,
@@ -21,12 +35,10 @@ async def forward_to_verification(
     submitter_user_id: int,
 ) -> bool:
     """
-    Forwards all messages in the submission (single or album) to the
-    verification group, then sends a moderation card with Approve/Reject
-    inline buttons threaded under the last forwarded message.
+    Forward submission to the verification group and post the 3-button
+    moderation card (Approve / Queue / Reject) threaded under it.
 
-    Returns True if all operations succeeded, False on any terminal failure.
-    FloodWait errors are handled internally with asyncio.sleep retries.
+    Returns True on full success, False on any terminal failure.
     """
     if not messages:
         logger.warning(
@@ -36,19 +48,16 @@ async def forward_to_verification(
         return False
 
     group_id = settings.VERIFICATION_GROUP_ID
-    source_chat_id = messages[0].chat.id
     first_msg_id = messages[0].id
 
-    forwarded_ids_in_group: list[int] = []
-
+    forwarded_ids: list[int] = []
     for msg in messages:
-        fwd_msg = await _forward_single(client, msg, group_id, submitter_user_id)
-        if fwd_msg is None:
-            # Terminal failure — a message could not be forwarded
+        fwd = await _forward_single(client, msg, group_id, submitter_user_id)
+        if fwd is None:
             return False
-        forwarded_ids_in_group.append(fwd_msg.id)
+        forwarded_ids.append(fwd.id)
 
-    last_fwd_id = forwarded_ids_in_group[-1]
+    last_fwd_id = forwarded_ids[-1]
     count = len(messages)
     media_label = "album" if count > 1 else "item"
     caption_raw = (messages[0].caption or messages[0].text or "").strip()
@@ -60,20 +69,22 @@ async def forward_to_verification(
         f"📦 Content: {count} {media_label}{preview}"
     )
 
-    keyboard = InlineKeyboardMarkup(
+    keyboard = InlineKeyboardMarkup([
         [
-            [
-                InlineKeyboardButton(
-                    "✅ Approve",
-                    callback_data=f"mod_approve:{submitter_user_id}:{first_msg_id}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Reject",
-                    callback_data=f"mod_reject:{submitter_user_id}:{first_msg_id}",
-                ),
-            ]
+            InlineKeyboardButton(
+                "✅ Approve",
+                callback_data=f"mod_approve:{submitter_user_id}:{first_msg_id}",
+            ),
+            InlineKeyboardButton(
+                "⏳ Queue",
+                callback_data=f"mod_queue:{submitter_user_id}:{first_msg_id}",
+            ),
+            InlineKeyboardButton(
+                "❌ Reject",
+                callback_data=f"mod_reject:{submitter_user_id}:{first_msg_id}",
+            ),
         ]
-    )
+    ])
 
     for attempt in range(_MAX_RETRIES):
         try:
@@ -82,7 +93,7 @@ async def forward_to_verification(
                 text=info_text,
                 reply_to_message_id=last_fwd_id,
                 reply_markup=keyboard,
-                parse_mode="html",
+                parse_mode=ParseMode.HTML,
             )
             logger.info(
                 "Verification card sent",
@@ -97,23 +108,15 @@ async def forward_to_verification(
         except FloodWait as e:
             wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
             logger.warning(
-                "FloodWait sending verification card, sleeping",
-                extra={
-                    "ctx_user_id": submitter_user_id,
-                    "ctx_wait": wait,
-                    "ctx_attempt": attempt + 1,
-                },
+                "FloodWait sending verification card",
+                extra={"ctx_user_id": submitter_user_id, "ctx_wait": wait, "ctx_attempt": attempt + 1},
             )
             await asyncio.sleep(wait)
 
         except RPCError as e:
             logger.error(
                 "RPC error sending verification card",
-                extra={
-                    "ctx_user_id": submitter_user_id,
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
+                extra={"ctx_user_id": submitter_user_id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
             )
             if attempt == _MAX_RETRIES - 1:
                 return False
@@ -128,10 +131,6 @@ async def _forward_single(
     group_id: int,
     submitter_user_id: int,
 ) -> Optional[Message]:
-    """
-    Forwards a single message to the verification group.
-    Returns the forwarded Message or None on terminal failure.
-    """
     for attempt in range(_MAX_RETRIES):
         try:
             result = await client.forward_messages(
@@ -139,31 +138,20 @@ async def _forward_single(
                 from_chat_id=msg.chat.id,
                 message_ids=msg.id,
             )
-            # forward_messages returns Message for single id, List[Message] for iterable
             return result[0] if isinstance(result, list) else result
 
         except FloodWait as e:
             wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
             logger.warning(
-                "FloodWait during message forward, sleeping",
-                extra={
-                    "ctx_user_id": submitter_user_id,
-                    "ctx_msg_id": msg.id,
-                    "ctx_wait": wait,
-                    "ctx_attempt": attempt + 1,
-                },
+                "FloodWait forwarding message",
+                extra={"ctx_msg_id": msg.id, "ctx_wait": wait, "ctx_attempt": attempt + 1},
             )
             await asyncio.sleep(wait)
 
         except RPCError as e:
             logger.error(
-                "RPC error forwarding message to verification group",
-                extra={
-                    "ctx_user_id": submitter_user_id,
-                    "ctx_msg_id": msg.id,
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
+                "RPC error forwarding message",
+                extra={"ctx_msg_id": msg.id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
             )
             if attempt == _MAX_RETRIES - 1:
                 return None
@@ -172,26 +160,52 @@ async def _forward_single(
     return None
 
 
-def parse_callback_data(data: str) -> Optional[tuple[str, int, int]]:
+def parse_callback_data(data: str) -> Optional[dict]:
     """
-    Parses mod callback data of the form:
-        mod_approve:{user_id}:{msg_id}
-        mod_reject:{user_id}:{msg_id}
+    Parse all moderation callback data into a structured dict.
 
-    Returns (action, user_id, msg_id) where action is "approve" or "reject".
-    Returns None if the data is missing, malformed, or contains an unknown action.
+    Step-1 format: mod_{action}:{submitter_id}:{msg_id}
+    Step-2 format: mod_dest:{action}:{dest}:{submitter_id}:{msg_id}
+
+    Returns dict with keys: step, action, submitter_id, msg_id, dest (step-2 only)
+    Returns None on parse failure.
     """
     if not data:
         return None
+
     try:
-        parts = data.split(":", 2)
-        if len(parts) != 3:
-            return None
-        action_raw, user_id_str, msg_id_str = parts
-        # Strip the "mod_" prefix to get the bare action name
-        action = action_raw.removeprefix("mod_")
-        if action not in ("approve", "reject"):
-            return None
-        return action, int(user_id_str), int(msg_id_str)
-    except (ValueError, AttributeError):
+        if data.startswith("mod_dest:"):
+            # mod_dest:{action}:{dest}:{submitter_id}:{msg_id}
+            parts = data.split(":", 4)
+            if len(parts) != 5:
+                return None
+            _, action, dest, submitter_id_str, msg_id_str = parts
+            if action not in ("approve", "queue"):
+                return None
+            if dest not in ("nsfw", "premium"):
+                return None
+            return {
+                "step": 2,
+                "action": action,
+                "dest": dest,
+                "submitter_id": int(submitter_id_str),
+                "msg_id": int(msg_id_str),
+            }
+        else:
+            # mod_{action}:{submitter_id}:{msg_id}
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                return None
+            action_raw, submitter_id_str, msg_id_str = parts
+            action = action_raw.removeprefix("mod_")
+            if action not in ("approve", "queue", "reject"):
+                return None
+            return {
+                "step": 1,
+                "action": action,
+                "submitter_id": int(submitter_id_str),
+                "msg_id": int(msg_id_str),
+            }
+
+    except (ValueError, AttributeError, IndexError):
         return None

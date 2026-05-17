@@ -22,10 +22,28 @@ class JobStatus(str, Enum):
     DEAD = "dead"
 
 
+class ModerationState(str, Enum):
+    """Explicit moderation state machine — replaces boolean flags."""
+    PENDING = "pending"       # Awaiting moderator action
+    APPROVED = "approved"     # Approved for immediate posting
+    QUEUED = "queued"         # Approved for scheduled distribution
+    REJECTED = "rejected"     # Rejected — not archived, not distributed
+    POSTED = "posted"         # Successfully delivered to destination
+    FAILED = "failed"         # Delivery or processing failed
+
+
+class ModerationDestination(str, Enum):
+    """Distribution destination selected by moderator."""
+    NSFW = "nsfw"
+    PREMIUM = "premium"
+
+
 class DistributionPriority(int, Enum):
     LOW = 0
     NORMAL = 1
     HIGH = 2
+    # Moderator-queued content gets priority over random scheduler content
+    MODERATED = 3
 
 
 class WatermarkPosition(str, Enum):
@@ -49,6 +67,8 @@ class QueueJob(BaseModel):
     status: JobStatus = JobStatus.PENDING
     max_retries: int = 3
     execute_after: Optional[datetime] = None
+    # For moderator-queued content: must dispatch before this deadline
+    queue_deadline: Optional[datetime] = None
     watermark_required: bool = False
     watermark_config: Optional[dict] = None
     metadata: dict = Field(default_factory=dict)

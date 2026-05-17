@@ -4,6 +4,7 @@ import asyncio
 from collections import defaultdict
 
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import Message
 
@@ -14,22 +15,19 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Album buffering state ─────────────────────────────────────────────────────
-# Keyed by media_group_id.  Both structures are module-level so they persist
-# across the bot's uptime, matching the lifecycle of the long-running process.
-
 _album_buffer: dict[str, list[Message]] = defaultdict(list)
 _album_tasks: dict[str, asyncio.Task] = {}
 _album_lock = asyncio.Lock()
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_REPLY_RETRIES = 3
 
 
-async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> None:
-    """Reply to a user message with FloodWait-safe retry logic."""
+async def _safe_reply(
+    message: Message,
+    text: str,
+    parse_mode: ParseMode = ParseMode.HTML,
+) -> None:
     for attempt in range(_MAX_REPLY_RETRIES):
         try:
             await message.reply_text(text, parse_mode=parse_mode)
@@ -37,18 +35,14 @@ async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> 
         except FloodWait as e:
             wait = int(e.value) + _FLOOD_BUFFER
             logger.warning(
-                "FloodWait on reply, sleeping",
+                "FloodWait on reply",
                 extra={"ctx_msg_id": message.id, "ctx_wait": wait, "ctx_attempt": attempt + 1},
             )
             await asyncio.sleep(wait)
         except RPCError as e:
             logger.warning(
                 "RPC error replying to user",
-                extra={
-                    "ctx_msg_id": message.id,
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
+                extra={"ctx_msg_id": message.id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
             )
             if attempt == _MAX_REPLY_RETRIES - 1:
                 return
@@ -60,13 +54,6 @@ async def _submit_for_review(
     messages: list[Message],
     user_id: int,
 ) -> None:
-    """
-    Core submission path: register the messages as pending then forward them
-    to the verification group.  Replies to the user with the outcome.
-
-    If the forward fails, the pending entry is rolled back so the state
-    registry stays consistent.
-    """
     reference_message = messages[0]
 
     try:
@@ -80,7 +67,6 @@ async def _submit_for_review(
                 "You'll be notified once a decision is made.",
             )
         else:
-            # Roll back: forward failed, remove the pending entry to avoid orphans
             await submission_service.reject_pending(reference_message.id)
             await _safe_reply(
                 reference_message,
@@ -101,18 +87,9 @@ async def _submit_for_review(
 
 
 async def _flush_album(group_id: str, user_id: int, client: Client) -> None:
-    """
-    Debounce task: waits for MEDIA_GROUP_TIMEOUT_SECONDS after the last
-    message arrives in the album, then flushes the entire buffer.
-
-    If a newer message for the same group arrives before the sleep expires,
-    the current task is cancelled (see handle_media_submission) and this
-    function returns early without touching the buffer.
-    """
     try:
         await asyncio.sleep(settings.MEDIA_GROUP_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
-        # A newer message extended the debounce window — exit cleanly.
         return
 
     async with _album_lock:
@@ -122,25 +99,17 @@ async def _flush_album(group_id: str, user_id: int, client: Client) -> None:
     if not messages:
         return
 
-    # Restore Telegram's native ordering before submission
     messages.sort(key=lambda m: m.id)
 
     logger.info(
         "Album flushed for review",
-        extra={
-            "ctx_group_id": group_id,
-            "ctx_user_id": user_id,
-            "ctx_count": len(messages),
-        },
+        extra={"ctx_group_id": group_id, "ctx_user_id": user_id, "ctx_count": len(messages)},
     )
     await _submit_for_review(client, messages, user_id)
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
-
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
-    """Greet the user and explain the submission flow."""
     if not message.from_user:
         return
 
@@ -152,10 +121,7 @@ async def handle_start(client: Client, message: Message) -> None:
         "to our team for review.\n\n"
         "You'll receive a notification once a decision has been made.",
     )
-    logger.info(
-        "/start received",
-        extra={"ctx_user_id": message.from_user.id},
-    )
+    logger.info("/start received", extra={"ctx_user_id": message.from_user.id})
 
 
 @Client.on_message(
@@ -163,14 +129,6 @@ async def handle_start(client: Client, message: Message) -> None:
     & filters.private
 )
 async def handle_media_submission(client: Client, message: Message) -> None:
-    """
-    Accept media submissions from private chats.
-
-    Single items are forwarded immediately.  Album items are debounced:
-    each new message for the same media_group_id cancels the previous
-    flush task and starts a fresh MEDIA_GROUP_TIMEOUT_SECONDS window,
-    ensuring all parts of an album are collected before forwarding.
-    """
     if not message.from_user:
         return
 
@@ -178,7 +136,6 @@ async def handle_media_submission(client: Client, message: Message) -> None:
     group_id = message.media_group_id
 
     if not group_id:
-        # Single-item submission — no buffering needed
         logger.info(
             "Single media submission received",
             extra={"ctx_user_id": user_id, "ctx_msg_id": message.id},
@@ -186,16 +143,13 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         await _submit_for_review(client, [message], user_id)
         return
 
-    # Album submission: buffer and debounce
     async with _album_lock:
         _album_buffer[group_id].append(message)
 
-        # Cancel the existing debounce task for this group (if any)
         existing_task = _album_tasks.get(group_id)
         if existing_task and not existing_task.done():
             existing_task.cancel()
 
-        # Arm a fresh flush task
         task = asyncio.create_task(
             _flush_album(group_id, user_id, client),
             name=f"album-flush-{group_id}",

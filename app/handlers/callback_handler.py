@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-from typing import Optional
-
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import CallbackQuery
+from pyrogram.enums import ParseMode
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.moderation.verification_hub import parse_callback_data
+from app.moderation.moderation_actions import (
+    execute_approve,
+    execute_queue,
+    execute_reject,
+    safe_edit_message,
+)
 from app.services import submission_service
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-_FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
-_MAX_RETRIES = 3
 
 
 # ── Access control ────────────────────────────────────────────────────────────
@@ -28,185 +28,168 @@ def _is_moderator(user_id: int) -> bool:
     )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Destination selection keyboard ────────────────────────────────────────────
 
-async def _safe_dm(client: Client, user_id: int, text: str) -> None:
-    """
-    Send a private message to a user with FloodWait-safe retries.
-    Failures are logged but never propagated — a DM notification
-    is best-effort and must not block the moderation flow.
-    """
-    for attempt in range(_MAX_RETRIES):
-        try:
-            await client.send_message(
-                chat_id=user_id,
-                text=text,
-                parse_mode="html",
-            )
-            return
-        except FloodWait as e:
-            wait = int(e.value) + _FLOOD_BUFFER
-            logger.warning(
-                "FloodWait on DM, sleeping",
-                extra={"ctx_user_id": user_id, "ctx_wait": wait, "ctx_attempt": attempt + 1},
-            )
-            await asyncio.sleep(wait)
-        except RPCError as e:
-            logger.warning(
-                "Failed to DM submitter",
-                extra={
-                    "ctx_user_id": user_id,
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
-            )
-            if attempt == _MAX_RETRIES - 1:
-                return
-            await asyncio.sleep(2 ** attempt)
+def _destination_keyboard(action: str, submitter_id: int, msg_id: int) -> InlineKeyboardMarkup:
+    """Build the second-step destination picker keyboard."""
+    if action == "approve":
+        label_nsfw = "🔞 NSFW"
+        label_premium = "⭐ Premium"
+    else:  # queue
+        label_nsfw = "🔞 NSFW Queue"
+        label_premium = "⭐ Premium Queue"
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                label_nsfw,
+                callback_data=f"mod_dest:{action}:nsfw:{submitter_id}:{msg_id}",
+            ),
+            InlineKeyboardButton(
+                label_premium,
+                callback_data=f"mod_dest:{action}:premium:{submitter_id}:{msg_id}",
+            ),
+        ]
+    ])
 
 
-async def _safe_edit(callback: CallbackQuery, text: str) -> None:
-    """
-    Edit the moderation message text in place.
-    Silently swallows MESSAGE_NOT_MODIFIED and other RPC errors
-    to avoid crashing the callback flow on double-clicks.
-    """
-    for attempt in range(_MAX_RETRIES):
-        try:
-            await callback.message.edit_text(text, parse_mode="html")
-            return
-        except FloodWait as e:
-            wait = int(e.value) + _FLOOD_BUFFER
-            await asyncio.sleep(wait)
-        except RPCError as e:
-            # MESSAGE_NOT_MODIFIED is expected on duplicate actions — log & exit
-            logger.warning(
-                "Could not edit moderation message",
-                extra={
-                    "ctx_chat_id": callback.message.chat.id,
-                    "ctx_msg_id": callback.message.id,
-                    "ctx_error": str(e),
-                    "ctx_attempt": attempt + 1,
-                },
-            )
-            return
+# ── Handlers ──────────────────────────────────────────────────────────────────
 
-
-# ── Handler ───────────────────────────────────────────────────────────────────
-
-@Client.on_callback_query(filters.regex(r"^mod_(approve|reject):"))
+@Client.on_callback_query(filters.regex(r"^mod_(approve|queue|reject|dest):"))
 async def handle_moderation_callback(client: Client, callback: CallbackQuery) -> None:
     """
-    Handles Approve / Reject inline button presses from the verification group.
+    Two-step moderation state machine.
 
-    Authorization gates (in order):
-    1. Chat must be the configured VERIFICATION_GROUP_ID.
-    2. Acting user must be OWNER, ADMIN, or SUDO.
+    Step 1 — moderator clicks Approve / Queue / Reject:
+      - Reject: executes immediately (no destination needed)
+      - Approve / Queue: edits card to destination picker
 
-    On approve: ingests via MediaIngestionPipeline, edits card, DMs submitter.
-    On reject:  discards pending entry, edits card, DMs submitter.
+    Step 2 — moderator picks NSFW / Premium:
+      - Executes the full approve or queue flow
     """
     # ── Gate 1: correct chat ─────────────────────────────────────────────────
     if callback.message.chat.id != settings.VERIFICATION_GROUP_ID:
         await callback.answer("This action is not available here.", show_alert=True)
         logger.warning(
-            "Moderation callback fired outside verification group",
-            extra={
-                "ctx_chat_id": callback.message.chat.id,
-                "ctx_user_id": callback.from_user.id,
-            },
+            "Moderation callback outside verification group",
+            extra={"ctx_chat_id": callback.message.chat.id, "ctx_user_id": callback.from_user.id},
         )
         return
 
-    # ── Gate 2: moderator authorisation ─────────────────────────────────────
+    # ── Gate 2: authorisation ────────────────────────────────────────────────
     moderator_id = callback.from_user.id
     if not _is_moderator(moderator_id):
-        await callback.answer(
-            "⛔ You are not authorised to action submissions.",
-            show_alert=True,
-        )
+        await callback.answer("⛔ You are not authorised to action submissions.", show_alert=True)
         logger.warning(
             "Unauthorised moderation attempt",
             extra={"ctx_user_id": moderator_id, "ctx_data": callback.data},
         )
         return
 
-    # ── Parse callback payload ───────────────────────────────────────────────
+    # ── Parse ────────────────────────────────────────────────────────────────
     parsed = parse_callback_data(callback.data)
     if parsed is None:
         await callback.answer("Malformed callback data.", show_alert=True)
         logger.error(
-            "Could not parse moderation callback data",
-            extra={"ctx_data": callback.data, "ctx_user_id": moderator_id},
+            "Failed to parse moderation callback",
+            extra={"ctx_data": callback.data},
         )
         return
 
-    action, submitter_id, msg_id = parsed
     moderator_name = callback.from_user.first_name or str(moderator_id)
+    chat_id = callback.message.chat.id
+    card_message_id = callback.message.id
 
-    # ── Approve ──────────────────────────────────────────────────────────────
-    if action == "approve":
-        result_uid = await submission_service.ingest_approved(msg_id)
+    # ── Step 1 ───────────────────────────────────────────────────────────────
+    if parsed["step"] == 1:
+        action = parsed["action"]
+        submitter_id = parsed["submitter_id"]
+        msg_id = parsed["msg_id"]
 
-        if result_uid is None:
+        if action == "reject":
+            # Reject needs no destination — execute immediately
+            entry = submission_service.pop_pending(msg_id)
+            if entry is None:
+                await callback.answer(
+                    "Submission not found — already actioned.",
+                    show_alert=True,
+                )
+                return
+
+            await callback.answer("❌ Rejected.", show_alert=False)
+            await execute_reject(
+                client=client,
+                submitter_user_id=submitter_id,
+                mod_card_chat_id=chat_id,
+                mod_card_message_id=card_message_id,
+                moderator_name=moderator_name,
+                moderator_id=moderator_id,
+            )
+            return
+
+        # Approve or Queue — need destination, show picker
+        prompt = (
+            "Select destination:" if action == "approve"
+            else "Queue for which destination?"
+        )
+        keyboard = _destination_keyboard(action, submitter_id, msg_id)
+
+        try:
+            await callback.message.edit_text(
+                f"📬 <b>{prompt}</b>\n👤 Submitter: <code>{submitter_id}</code>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=keyboard,
+            )
+            await callback.answer()
+        except Exception as e:
+            logger.warning(
+                "Could not edit card to destination picker",
+                extra={"ctx_error": str(e)},
+            )
+            await callback.answer("Error showing destination picker.", show_alert=True)
+
+        return
+
+    # ── Step 2 ───────────────────────────────────────────────────────────────
+    if parsed["step"] == 2:
+        action = parsed["action"]
+        dest = parsed["dest"]
+        submitter_id = parsed["submitter_id"]
+        msg_id = parsed["msg_id"]
+
+        # Pop the pending entry — this is the point of no return
+        entry = submission_service.pop_pending(msg_id)
+        if entry is None:
             await callback.answer(
-                "Submission not found — it may have already been actioned.",
+                "Submission not found — already actioned.",
                 show_alert=True,
             )
             return
 
-        await _safe_edit(
-            callback,
-            f"✅ <b>Approved</b> by {moderator_name} "
-            f"(<code>{moderator_id}</code>)\n"
-            f"👤 Submitter: <code>{submitter_id}</code>",
-        )
-        await _safe_dm(
-            client,
-            submitter_id,
-            "✅ <b>Your submission has been approved</b> and is now queued for the vault.",
-        )
-        await callback.answer("✅ Approved.", show_alert=False)
+        _, messages = entry
 
-        logger.info(
-            "Submission approved",
-            extra={
-                "ctx_submitter_id": submitter_id,
-                "ctx_msg_id": msg_id,
-                "ctx_moderator_id": moderator_id,
-            },
+        await callback.answer(
+            "✅ Processing..." if action == "approve" else "⏳ Queuing...",
+            show_alert=False,
         )
 
-    # ── Reject ───────────────────────────────────────────────────────────────
-    elif action == "reject":
-        result_uid = await submission_service.reject_pending(msg_id)
-
-        if result_uid is None:
-            await callback.answer(
-                "Submission not found — it may have already been actioned.",
-                show_alert=True,
+        if action == "approve":
+            await execute_approve(
+                client=client,
+                messages=messages,
+                submitter_user_id=submitter_id,
+                dest=dest,
+                mod_card_chat_id=chat_id,
+                mod_card_message_id=card_message_id,
+                moderator_name=moderator_name,
             )
-            return
-
-        await _safe_edit(
-            callback,
-            f"❌ <b>Rejected</b> by {moderator_name} "
-            f"(<code>{moderator_id}</code>)\n"
-            f"👤 Submitter: <code>{submitter_id}</code>",
-        )
-        await _safe_dm(
-            client,
-            submitter_id,
-            "❌ <b>Your submission was not approved.</b> "
-            "Please review our content guidelines and feel free to try again.",
-        )
-        await callback.answer("❌ Rejected.", show_alert=False)
-
-        logger.info(
-            "Submission rejected",
-            extra={
-                "ctx_submitter_id": submitter_id,
-                "ctx_msg_id": msg_id,
-                "ctx_moderator_id": moderator_id,
-            },
-        )
+        elif action == "queue":
+            await execute_queue(
+                client=client,
+                messages=messages,
+                submitter_user_id=submitter_id,
+                dest=dest,
+                mod_card_chat_id=chat_id,
+                mod_card_message_id=card_message_id,
+                moderator_name=moderator_name,
+            )
