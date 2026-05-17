@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from app.config.settings import settings
+from app.config import settings
 from app.models.subscription import Plan, Subscription, SubscriptionStatus, plan_rank
 from app.repositories.subscription_repository import SubscriptionRepository
-from app.utils.logger import get_logger
+from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -64,8 +64,11 @@ class SubscriptionService:
         If the user already has an active non-lifetime subscription of the same
         plan, we extend from the current expiry rather than overwriting it.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         existing = await self._repo.get_by_user_id(user_id)
+
+        expires_at: Optional[datetime] = None
+        grace_until: Optional[datetime] = None
 
         if duration_days is not None:
             if (
@@ -75,16 +78,12 @@ class SubscriptionService:
                 and existing.expires_at
             ):
                 base = max(existing.expires_at, now)
-                expires_at: Optional[datetime] = base + timedelta(days=duration_days)
+                exp = base + timedelta(days=duration_days)
             else:
-                expires_at = now + timedelta(days=duration_days)
-            grace_until: Optional[datetime] = expires_at + timedelta(
-                days=settings.GRACE_PERIOD_DAYS
-            )
-        else:
-            # Lifetime
-            expires_at = None
-            grace_until = None
+                exp = now + timedelta(days=duration_days)
+            
+            expires_at = exp
+            grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
         sub = Subscription(
             user_id=user_id,
@@ -101,10 +100,12 @@ class SubscriptionService:
         await self._repo.upsert(sub)
         logger.info(
             "Subscription granted",
-            user_id=user_id,
-            plan=plan.value,
-            duration_days=duration_days,
-            granted_by=granted_by,
+            extra={
+                "ctx_user_id": user_id,
+                "ctx_plan": plan.value,
+                "ctx_duration_days": duration_days,
+                "ctx_granted_by": granted_by,
+            }
         )
         return sub
 
@@ -113,26 +114,26 @@ class SubscriptionService:
         sub = await self._repo.get_by_user_id(user_id)
         if not sub:
             return None
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         sub.status = SubscriptionStatus.EXPIRED
         sub.expires_at = now
         sub.grace_until = now
         sub.plan = Plan.FREE
         sub.updated_at = now
         await self._repo.upsert(sub)
-        logger.info("Subscription revoked", user_id=user_id, revoked_by=revoked_by)
+        logger.info("Subscription revoked", extra={"ctx_user_id": user_id, "ctx_revoked_by": revoked_by})
         return sub
 
     async def set_grace(self, sub: Subscription) -> Subscription:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         sub.status = SubscriptionStatus.GRACE
         sub.updated_at = now
         await self._repo.upsert(sub)
-        logger.info("Subscription → grace", user_id=sub.user_id)
+        logger.info("Subscription → grace", extra={"ctx_user_id": sub.user_id})
         return sub
 
     async def expire(self, sub: Subscription) -> Subscription:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         previous_plan = sub.plan.value
         sub.status = SubscriptionStatus.EXPIRED
         sub.plan = Plan.FREE
@@ -140,8 +141,10 @@ class SubscriptionService:
         await self._repo.upsert(sub)
         logger.info(
             "Subscription fully expired",
-            user_id=sub.user_id,
-            previous_plan=previous_plan,
+            extra={
+                "ctx_user_id": sub.user_id,
+                "ctx_previous_plan": previous_plan,
+            }
         )
         return sub
 
@@ -149,7 +152,7 @@ class SubscriptionService:
         """Advance sub through state machine based on wall-clock time."""
         if sub.is_lifetime:
             return sub
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if sub.is_active and sub.expires_at and sub.expires_at <= now:
             return await self.set_grace(sub)
         if sub.is_in_grace and sub.grace_until and sub.grace_until <= now:

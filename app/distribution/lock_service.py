@@ -1,12 +1,11 @@
 import asyncio
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, AsyncGenerator
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 from app.config import settings
-from app.core.exceptions import QueueLockError, StaleLockError
+from app.core.exceptions import QueueLockError
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

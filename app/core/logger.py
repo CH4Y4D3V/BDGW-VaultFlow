@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import json
 import logging
+import contextvars
 import sys
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict
+
+_correlation_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("correlation_id", default="")
+
+def set_correlation_id(cid: str) -> contextvars.Token:
+    return _correlation_id_ctx.set(cid)
+
+def reset_correlation_id(token: contextvars.Token) -> None:
+    _correlation_id_ctx.reset(token)
 
 
 class _JSONFormatter(logging.Formatter):
@@ -30,6 +39,10 @@ class _JSONFormatter(logging.Formatter):
             "line": record.lineno,
             "pid": record.process,
         }
+
+        cid = _correlation_id_ctx.get()
+        if cid:
+            log_record["correlation_id"] = cid
 
         if record.exc_info:
             exc_type, exc_value, exc_tb = record.exc_info

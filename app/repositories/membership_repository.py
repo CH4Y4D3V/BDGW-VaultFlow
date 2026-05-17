@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.membership import ChatType, Membership, MembershipStatus
@@ -30,7 +30,7 @@ class MembershipRepository(BaseRepository):
         status: MembershipStatus,
         reason: Optional[str] = None,
     ) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         patch: dict = {
             "status": status.value,
             "last_verified": now,
@@ -46,7 +46,7 @@ class MembershipRepository(BaseRepository):
     async def update_last_verified(self, user_id: int, chat_id: int) -> None:
         await self.update_one(
             {"user_id": user_id, "chat_id": chat_id},
-            {"$set": {"last_verified": datetime.utcnow()}},
+            {"$set": {"last_verified": datetime.now(timezone.utc)}},
         )
 
     # ── List queries ──────────────────────────────────────────────────────────
@@ -105,7 +105,7 @@ class MembershipRepository(BaseRepository):
         chat_ids: Optional[list[int]] = None,
     ) -> int:
         """Bulk-mark active memberships as kicked."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         filter_: dict = {
             "user_id": user_id,
             "status": MembershipStatus.ACTIVE.value,

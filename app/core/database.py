@@ -1,8 +1,6 @@
-import asyncio
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import IndexModel, ASCENDING, DESCENDING
-from pymongo.errors import CollectionInvalid
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -19,17 +17,18 @@ class DatabaseManager:
         if cls._initialized:
             return
 
-        cls._client = AsyncIOMotorClient(
+        client = AsyncIOMotorClient(
             settings.MONGO_URI,
             serverSelectionTimeoutMS=5000,
             maxPoolSize=20,
             minPoolSize=2,
             retryWrites=True,
         )
+        cls._client = client
 
-        cls._db = cls._client[settings.MONGO_DB_NAME]
+        cls._db = client[settings.MONGO_DB_NAME]
 
-        await cls._client.admin.command("ping")
+        await client.admin.command("ping")
         logger.info("MongoDB connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
 
         await cls._ensure_indexes()
@@ -37,8 +36,9 @@ class DatabaseManager:
 
     @classmethod
     async def disconnect(cls) -> None:
-        if cls._client:
-            cls._client.close()
+        client = cls._client
+        if client is not None:
+            client.close()
             cls._client = None
             cls._db = None
             cls._initialized = False
@@ -46,16 +46,30 @@ class DatabaseManager:
 
     @classmethod
     def get_db(cls) -> AsyncIOMotorDatabase:
-        if cls._db is None:
+        db = cls._db
+        if db is None:
             raise RuntimeError("Database not initialized. Call DatabaseManager.connect() first.")
-        return cls._db
+        return db
 
     @classmethod
     async def _ensure_indexes(cls) -> None:
-        db = cls._db
+        db = cls.get_db()
 
         # Queue collection indexes
         queue_indexes = [
+            IndexModel(
+                [("content_id", ASCENDING)],
+                name="unique_active_content",
+                unique=True,
+                partialFilterExpression={
+                    "status": {"$in": ["pending", "processing", "locked", "watermarking"]}
+                }
+            ),
+            IndexModel(
+                [("status", ASCENDING), ("locked_by", ASCENDING), ("priority", DESCENDING)],
+                name="status_locked_by_priority",
+                background=True,
+            ),
             IndexModel(
                 [("status", ASCENDING), ("priority", DESCENDING), ("execute_after", ASCENDING)],
                 name="status_priority_execute",
@@ -88,6 +102,11 @@ class DatabaseManager:
                 background=True,
                 expireAfterSeconds=604800,  # 7-day auto-cleanup for completed
                 partialFilterExpression={"status": {"$in": ["completed"]}},
+            ),
+            IndexModel(
+                [("status", ASCENDING), ("locked_at", ASCENDING)],
+                name="stale_lock_sweep",
+                background=True,
             ),
         ]
         await db[settings.QUEUE_COLLECTION].create_indexes(queue_indexes)

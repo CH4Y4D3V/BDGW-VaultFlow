@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pymongo import ASCENDING, DESCENDING
@@ -36,7 +36,7 @@ class SubscriptionRepository(BaseRepository):
             {
                 "$set": {
                     "status": status.value,
-                    "updated_at": updated_at or datetime.utcnow(),
+                "updated_at": updated_at or datetime.now(timezone.utc),
                 }
             },
         )
@@ -48,7 +48,7 @@ class SubscriptionRepository(BaseRepository):
 
     async def get_expiring_soon(self, within_hours: int = 24) -> list[Subscription]:
         """Active subscriptions expiring within the given window (for notifications)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         cutoff = now + timedelta(hours=within_hours)
         docs = await self.find_many(
             {
@@ -68,7 +68,7 @@ class SubscriptionRepository(BaseRepository):
 
     async def get_newly_expired(self) -> list[Subscription]:
         """Active subs whose expires_at has passed — must be moved to grace."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         docs = await self.find_many(
             {
                 "status": SubscriptionStatus.ACTIVE.value,
@@ -86,7 +86,7 @@ class SubscriptionRepository(BaseRepository):
 
     async def get_grace_expired(self) -> list[Subscription]:
         """Grace subs whose grace_until has passed — must be fully expired."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         docs = await self.find_many(
             {
                 "status": SubscriptionStatus.GRACE.value,

@@ -18,8 +18,8 @@ class BaseRepository:
     @property
     def db(self) -> AsyncIOMotorDatabase:
         if self._db is None:
-            from app.core.database import get_database
-            self._db = get_database()
+            from app.core.database import DatabaseManager
+            self._db = DatabaseManager.get_db()
         return self._db
 
     @property

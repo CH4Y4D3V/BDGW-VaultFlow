@@ -3,7 +3,7 @@ import json
 import sys
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 from app.config import settings
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -80,14 +80,14 @@ class Subscription:
     def remaining_days(self) -> Optional[int]:
         if self.expires_at is None:
             return None
-        delta = self.expires_at - datetime.utcnow()
+        delta = self.expires_at - datetime.now(timezone.utc)
         return max(0, delta.days)
 
     @property
     def grace_remaining_days(self) -> Optional[int]:
         if self.grace_until is None:
             return None
-        delta = self.grace_until - datetime.utcnow()
+        delta = self.grace_until - datetime.now(timezone.utc)
         return max(0, delta.days)
 
     # ── Access control ────────────────────────────────────────────────────────

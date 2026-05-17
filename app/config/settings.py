@@ -12,6 +12,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
+        extra="ignore",
     )
 
     # ── Pyrogram ──────────────────────────────────────────────────────────────
@@ -20,12 +21,19 @@ class Settings(BaseSettings):
     BOT_TOKEN: str
     SESSION_NAME: str = "vaultflow_bot"
     SESSION_DIR: str = "./sessions"
+    MAX_CONCURRENT_TRANSMISSIONS: int = 10
 
     # ── MongoDB ───────────────────────────────────────────────────────────────
     MONGO_URI: str
     MONGO_DB_NAME: str = "vaultflow"
     MONGO_MAX_POOL_SIZE: int = 20
     MONGO_MIN_POOL_SIZE: int = 5
+    QUEUE_COLLECTION: str = "queue"
+    DEAD_LETTER_COLLECTION: str = "dead_letters"
+    LOCK_COLLECTION: str = "locks"
+    METRICS_COLLECTION: str = "metrics"
+    VAULT_COLLECTION: str = "vault"
+    CHANNEL_CONFIG_COLLECTION: str = "channel_config"
 
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_CHANNEL_ID: int
@@ -33,15 +41,54 @@ class Settings(BaseSettings):
     LOG_CHANNEL_ID: int = 0
 
     # ── Access Control ────────────────────────────────────────────────────────
+    OWNER_ID: int = 0
     ADMIN_IDS: List[int] = Field(default_factory=list)
+    SUDO_IDS: List[int] = Field(default_factory=list)
+
+    # ── Worker Pools ──────────────────────────────────────────────────────────
+    DISPATCHER_WORKER_COUNT: int = 4
+    WATERMARK_WORKER_COUNT: int = 2
+    WORKER_BATCH_SIZE: int = 5
+    WORKER_POLL_INTERVAL: float = 2.0
+
+    # ── Scheduler & Fairness ──────────────────────────────────────────────────
+    SCHEDULER_INTERVAL_SECONDS: int = 60
+    MAX_JOBS_PER_CYCLE: int = 100
+    RANDOMIZE_POSTING_WINDOW: int = 300
+    REPOST_PREVENTION_HOURS: int = 168
+
+    # ── Retries & Backoff ─────────────────────────────────────────────────────
+    MAX_RETRY_ATTEMPTS: int = 3
+    RETRY_BASE_DELAY: float = 5.0
+    RETRY_MAX_DELAY: float = 3600.0
+    RETRY_JITTER_RANGE: float = 2.0
+
+    # ── Distributed Locks ─────────────────────────────────────────────────────
+    LOCK_TTL_SECONDS: int = 300
+    LOCK_RETRY_ATTEMPTS: int = 5
+    LOCK_RETRY_DELAY: float = 1.0
+    STALE_LOCK_THRESHOLD_SECONDS: int = 600
+
+    # ── Rate Limits & Flood Protection ────────────────────────────────────────
+    GLOBAL_RATE_LIMIT_PER_MIN: int = 30
+    PER_TARGET_RATE_LIMIT_PER_MIN: int = 10
+    FLOODWAIT_EXTRA_BUFFER: int = 2
+    FLOODWAIT_MAX_WAIT: int = 86400
+    FLOOD_MAX_REQUESTS: int = 5
+    FLOOD_WINDOW_SECONDS: int = 60
 
     # ── Media Group ───────────────────────────────────────────────────────────
+    MEDIA_GROUP_TIMEOUT_SECONDS: float = 3.0
     MEDIA_GROUP_TIMEOUT: float = 3.0
     MEDIA_GROUP_MAX_SIZE: int = 10
 
-    # ── Flood Protection ──────────────────────────────────────────────────────
-    FLOOD_MAX_REQUESTS: int = 5
-    FLOOD_WINDOW_SECONDS: int = 60
+    # ── Media Processing & Watermarks ─────────────────────────────────────────
+    PROCESSED_MEDIA_DIR: str = "./processed"
+    WATERMARK_CACHE_DIR: str = "./watermark_cache"
+    FFMPEG_TIMEOUT: float = 120.0
+    WATERMARK_POSITION: str = "BOTTOM_RIGHT"
+    WATERMARK_OPACITY: float = 0.8
+    WATERMARK_SCALE: float = 0.15
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True
@@ -49,13 +96,17 @@ class Settings(BaseSettings):
     # ── External Module Integration ───────────────────────────────────────────
     CONTENT_ROUTING_ENABLED: bool = True
 
+    # ── Subscriptions ─────────────────────────────────────────────────────────
+    GRACE_PERIOD_DAYS: int = 3
+
     # ── Runtime ───────────────────────────────────────────────────────────────
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "JSON"
 
-    @field_validator("ADMIN_IDS", mode="before")
+    @field_validator("ADMIN_IDS", "SUDO_IDS", mode="before")
     @classmethod
-    def _parse_admin_ids(cls, v: str | List[int]) -> List[int]:
+    def _parse_id_lists(cls, v: str | List[int]) -> List[int]:
         if isinstance(v, str):
             return json.loads(v)
         return v

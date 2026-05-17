@@ -1,12 +1,11 @@
 import asyncio
 import hashlib
-import os
 import shutil
 import uuid
 from pathlib import Path
 from typing import Optional
 from app.config import settings
-from app.core.models import MediaType, WatermarkPosition
+from app.core.models import WatermarkPosition
 from app.core.exceptions import (
     FFmpegNotFoundError,
     FFmpegTimeoutError,
@@ -122,12 +121,20 @@ class FFmpegProcessor:
             out_path,
         ]
 
-        await self._run_ffmpeg(cmd, operation="image_watermark", input_path=input_path)
-        logger.info(
-            "Image watermark applied",
-            extra={"ctx_input": input_path, "ctx_output": out_path},
-        )
-        return out_path
+        try:
+            await self._run_ffmpeg(cmd, operation="image_watermark", input_path=input_path)
+            logger.info(
+                "Image watermark applied",
+                extra={"ctx_input": input_path, "ctx_output": out_path},
+            )
+            return out_path
+        except Exception:
+            if Path(out_path).exists():
+                try:
+                    Path(out_path).unlink()
+                except OSError:
+                    pass
+            raise
 
     async def apply_video_watermark(
         self,
@@ -173,12 +180,20 @@ class FFmpegProcessor:
             out_path,
         ]
 
-        await self._run_ffmpeg(cmd, operation="video_watermark", input_path=input_path)
-        logger.info(
-            "Video watermark applied",
-            extra={"ctx_input": input_path, "ctx_output": out_path},
-        )
-        return out_path
+        try:
+            await self._run_ffmpeg(cmd, operation="video_watermark", input_path=input_path)
+            logger.info(
+                "Video watermark applied",
+                extra={"ctx_input": input_path, "ctx_output": out_path},
+            )
+            return out_path
+        except Exception:
+            if Path(out_path).exists():
+                try:
+                    Path(out_path).unlink()
+                except OSError:
+                    pass
+            raise
 
     async def get_media_dimensions(self, file_path: str) -> tuple[int, int]:
         """Returns (width, height) using ffprobe."""
@@ -199,7 +214,19 @@ class FFmpegProcessor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            raise FFmpegTimeoutError(f"ffprobe timed out for {file_path}")
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
         line = stdout.decode().strip()
         parts = line.split(",")
         if len(parts) != 2:
@@ -225,6 +252,10 @@ class FFmpegProcessor:
                 raise FFmpegTimeoutError(
                     f"FFmpeg {operation} timed out after {settings.FFMPEG_TIMEOUT}s: {input_path}"
                 )
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                raise
 
             if proc.returncode != 0:
                 error_msg = stderr.decode(errors="replace").strip()

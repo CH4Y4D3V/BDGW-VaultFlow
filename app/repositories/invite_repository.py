@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.invite import Invite, InviteStatus
@@ -26,7 +26,7 @@ class InviteRepository(BaseRepository):
         After consuming the last use the status is flipped to EXHAUSTED in the same
         request so there is no race window.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         doc = await self.collection.find_one_and_update(
             {
                 "token": token,
@@ -59,7 +59,7 @@ class InviteRepository(BaseRepository):
         return invite
 
     async def revoke(self, token: str, revoked_by: int) -> bool:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         count = await self.update_one(
             {"token": token, "status": InviteStatus.ACTIVE.value},
             {
@@ -76,7 +76,7 @@ class InviteRepository(BaseRepository):
 
     async def expire_stale(self) -> int:
         """Flip active invites whose expires_at has passed to EXPIRED."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         return await self.update_many(
             {
                 "status": InviteStatus.ACTIVE.value,

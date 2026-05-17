@@ -1,6 +1,5 @@
 import asyncio
 import time
-from collections import defaultdict
 from typing import Optional
 from app.config import settings
 from app.core.exceptions import RateLimitExceededError

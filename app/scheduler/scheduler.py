@@ -1,16 +1,14 @@
-import asyncio
 import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.triggers.cron import CronTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import settings
 from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority
 from app.core.exceptions import DuplicateJobError
 from app.repositories.queue_repository import QueueRepository
-from app.scheduler.fairness import FairnessSelector
+from app.distribution.fairness import FairnessSelector
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -50,6 +48,7 @@ class DistributionScheduler:
             replace_existing=True,
             max_instances=1,  # Prevent concurrent scheduler runs
             coalesce=True,
+            misfire_grace_time=60,
         )
 
         # Stale lock recovery sweep
@@ -61,6 +60,7 @@ class DistributionScheduler:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=60,
         )
 
         # Metrics collection
@@ -72,6 +72,7 @@ class DistributionScheduler:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=60,
         )
 
         logger.info("Scheduler jobs configured")
@@ -89,9 +90,9 @@ class DistributionScheduler:
 
     async def stop(self) -> None:
         if self._started:
-            self._scheduler.shutdown(wait=False)
+            self._scheduler.shutdown(wait=True)
             self._started = False
-            logger.info("Distribution scheduler stopped")
+            logger.info("Distribution scheduler stopped gracefully")
 
     async def _distribution_cycle(self) -> None:
         """
@@ -139,8 +140,16 @@ class DistributionScheduler:
                     max_count=slots_available,
                 )
 
+                group_execute_times = {}
+                group_index = 0
+
                 for i, content_item in enumerate(selected_content):
-                    execute_after = self._randomized_execute_time(i)
+                    group_id = content_item.get("media_group_id") or content_item.get("content_id")
+                    if group_id not in group_execute_times:
+                        group_execute_times[group_id] = self._randomized_execute_time(group_index)
+                        group_index += 1
+
+                    execute_after = group_execute_times[group_id]
                     enqueued = await self._enqueue_content(
                         content_item=content_item,
                         source_channel_id=source_channel_id,
@@ -182,6 +191,7 @@ class DistributionScheduler:
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
         job = QueueJob(
+            _id=None,
             content_id=content_item["content_id"],
             source_channel_id=source_channel_id,
             target_channel_ids=target_channel_ids,
@@ -195,7 +205,11 @@ class DistributionScheduler:
             execute_after=execute_after,
             watermark_required=watermark_required,
             watermark_config=watermark_config,
-            metadata=content_item.get("metadata", {}),
+            metadata={
+                **content_item.get("metadata", {}),
+                "media_group_id": content_item.get("media_group_id"),
+                "message_id": content_item.get("message_id"),
+            },
         )
 
         try:
@@ -278,16 +292,17 @@ class DistributionScheduler:
         self,
         func: Callable,
         trigger: Any,
-        job_id: str,
+        _id: str,
         **kwargs,
     ) -> None:
         """Allow external registration of custom scheduler jobs."""
         self._scheduler.add_job(
             func,
             trigger=trigger,
-            id=job_id,
+            id=_id,
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=60,
             **kwargs,
         )

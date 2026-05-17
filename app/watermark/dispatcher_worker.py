@@ -1,16 +1,15 @@
 import asyncio
-import uuid
 from typing import Optional, Callable
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import settings
-from app.core.models import JobStatus
-from app.core.exceptions import MaxRetriesExceededError, DispatcherError
+from app.core.logger import set_correlation_id, reset_correlation_id
+from app.core.exceptions import MaxRetriesExceededError, FloodWaitError
 from app.distribution.dispatcher import DistributionDispatcher
 from app.distribution.flood_wait import FloodWaitHandler, calculate_retry_delay
 from app.distribution.target_balancer import TargetBalancer
 from app.repositories.queue_repository import QueueRepository
-from app.services.lock_service import DistributedLockService
-from app.services.rate_limiter import RateLimiterService
+from app.distribution.lock_service import DistributedLockService
+from app.distribution.rate_limiter import RateLimiterService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -75,12 +74,17 @@ class DispatcherWorker:
 
     async def stop(self) -> None:
         self._running = False
-        if self._task:
-            self._task.cancel()
+        if self._task and not self._task.done():
+            logger.info("Draining dispatcher worker...", extra={"ctx_worker": self._worker_id})
             try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(self._task, timeout=30.0)
+            except asyncio.TimeoutError:
+                logger.warning("Dispatcher worker drain timeout, force cancelling", extra={"ctx_worker": self._worker_id})
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
         logger.info("Dispatcher worker stopped", extra={"ctx_worker": self._worker_id})
 
     async def _run_loop(self) -> None:
@@ -95,8 +99,20 @@ class DispatcherWorker:
                     await asyncio.sleep(settings.WORKER_POLL_INTERVAL)
                     continue
 
-                tasks = [self._handle_job(job) for job in jobs]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                groups = {}
+                for job in jobs:
+                    gid = job.get("metadata", {}).get("media_group_id") or str(job["_id"])
+                    if gid not in groups:
+                        groups[gid] = []
+                    groups[gid].append(job)
+
+                tasks = [self._handle_job_group(group) for group in groups.values()]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for res in results:
+                    if isinstance(res, asyncio.CancelledError):
+                        raise res
+                    elif isinstance(res, Exception):
+                        logger.error("Unhandled exception in job handler", exc_info=res)
 
             except asyncio.CancelledError:
                 break
@@ -108,50 +124,94 @@ class DispatcherWorker:
                 )
                 await asyncio.sleep(5)
 
-    async def _handle_job(self, job_doc: dict) -> None:
-        job_id = str(job_doc["_id"])
+    async def _handle_job_group(self, job_docs: list[dict]) -> None:
+        primary_job = job_docs[0]
+        primary_id = str(primary_job["_id"])
+        group_id = primary_job.get("metadata", {}).get("media_group_id") or primary_id
 
-        lock_key = f"job:{job_id}"
-        acquired = await self._lock_service.acquire(
-            lock_key,
-            ttl_seconds=settings.LOCK_TTL_SECONDS,
-        )
-        if not acquired:
-            logger.warning(
-                "Could not acquire job lock — another worker is processing it",
-                extra={"ctx_job_id": job_id, "ctx_worker": self._worker_id},
-            )
-            return
-
+        corr_token = set_correlation_id(f"grp_{group_id}")
         try:
-            marked = await self._queue_repo.mark_processing(job_id, self._worker_id)
-            if not marked:
+            lock_key = f"group:{group_id}"
+            acquired = await self._lock_service.acquire(
+                lock_key,
+                ttl_seconds=settings.LOCK_TTL_SECONDS,
+            )
+            if not acquired:
                 logger.warning(
-                    "Job already taken by another worker after claim",
-                    extra={"ctx_job_id": job_id},
+                    "Could not acquire group lock — another worker is processing it",
+                    extra={"ctx_group_id": group_id, "ctx_worker": self._worker_id},
                 )
+                for job in job_docs:
+                    await self._queue_repo.release_claim(str(job["_id"]))
                 return
 
-            success = await self._dispatcher.dispatch(job_doc, self._worker_id)
+            try:
+                for job in job_docs:
+                    marked = await self._queue_repo.mark_processing(str(job["_id"]), self._worker_id)
+                    if not marked:
+                        logger.warning(
+                            "Job already taken by another worker after claim",
+                            extra={"ctx_job_id": str(job["_id"])},
+                        )
 
-            if not success:
-                await self._handle_retry(job_doc, job_id, "Partial delivery failure")
+                success = await self._dispatcher.dispatch(job_docs, self._worker_id)
 
-        except MaxRetriesExceededError as e:
-            await self._queue_repo.move_to_dead_letter(job_id, str(e))
+                if not success:
+                    remaining = set(primary_job.get("target_channel_ids", [])) - set(primary_job.get("delivered_targets", []))
+                    max_wait = 0.0
+                    for tid in remaining:
+                        wait = self._flood_handler.seconds_until_available(tid)
+                        if wait > max_wait:
+                            max_wait = wait
+                    
+                    if max_wait > 0:
+                        logger.warning("Group deferred due to FloodWait", extra={"ctx_group_id": group_id, "ctx_wait": max_wait})
+                        for job in job_docs:
+                            await self._queue_repo.mark_failed(
+                                str(job["_id"]), 
+                                "Deferred due to FloodWait", 
+                                next_retry_delay_seconds=max_wait, 
+                                increment_retry=False
+                            )
+                    else:
+                        for job in job_docs:
+                            await self._handle_retry(job, str(job["_id"]), "Partial delivery failure")
 
-        except Exception as e:
-            logger.error(
-                "Unexpected error handling job",
-                extra={"ctx_job_id": job_id, "ctx_error": str(e)},
-                exc_info=True,
-            )
-            await self._handle_retry(job_doc, job_id, str(e))
+            except asyncio.CancelledError:
+                logger.warning("Group cancelled during processing, releasing claim", extra={"ctx_group_id": group_id})
+                for job in job_docs:
+                    await self._queue_repo.release_claim(str(job["_id"]))
+                raise
 
+            except MaxRetriesExceededError as e:
+                for job in job_docs:
+                    await self._queue_repo.move_to_dead_letter(str(job["_id"]), str(e))
+
+            except FloodWaitError as e:
+                logger.warning(
+                    "FloodWait encountered during dispatch",
+                    extra={"ctx_group_id": group_id, "ctx_wait": e.seconds},
+                )
+                for job in job_docs:
+                    await self._handle_retry(job, str(job["_id"]), str(e), override_delay=e.seconds)
+
+            except Exception as e:
+                logger.error(
+                    "Unexpected error handling group",
+                    extra={"ctx_group_id": group_id, "ctx_error": str(e)},
+                    exc_info=True,
+                )
+                for job in job_docs:
+                    await self._handle_retry(job, str(job["_id"]), str(e))
+
+            finally:
+                await self._lock_service.release(lock_key)
         finally:
-            await self._lock_service.release(lock_key)
+            reset_correlation_id(corr_token)
 
-    async def _handle_retry(self, job_doc: dict, job_id: str, error: str) -> None:
+    async def _handle_retry(
+        self, job_doc: dict, job_id: str, error: str, override_delay: Optional[int] = None
+    ) -> None:
         retry_count = job_doc.get("retry_count", 0)
         max_retries = job_doc.get("max_retries", settings.MAX_RETRY_ATTEMPTS)
 
@@ -167,7 +227,7 @@ class DispatcherWorker:
             await self._queue_repo.move_to_dead_letter(job_id, error)
             return
 
-        delay = calculate_retry_delay(retry_count)
+        delay = override_delay if override_delay is not None else calculate_retry_delay(retry_count)
         logger.warning(
             "Job failed, scheduling retry",
             extra={
@@ -179,3 +239,49 @@ class DispatcherWorker:
             },
         )
         await self._queue_repo.mark_failed(job_id, error, next_retry_delay_seconds=delay)
+
+
+class DispatcherWorkerPool:
+    """Manages N dispatcher worker tasks concurrently."""
+
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        delivery_callback: Callable,
+        rate_limiter: RateLimiterService,
+        flood_handler: FloodWaitHandler,
+        target_balancer: TargetBalancer,
+        worker_count: Optional[int] = None,
+    ):
+        self._worker_count = worker_count or settings.DISPATCHER_WORKER_COUNT
+        self._workers: list[DispatcherWorker] = []
+        self._db = db
+        self._delivery_callback = delivery_callback
+        self._rate_limiter = rate_limiter
+        self._flood_handler = flood_handler
+        self._balancer = target_balancer
+
+    async def start(self) -> None:
+        for i in range(self._worker_count):
+            worker = DispatcherWorker(
+                worker_id=f"dispatcher-{i}",
+                db=self._db,
+                delivery_callback=self._delivery_callback,
+                rate_limiter=self._rate_limiter,
+                shared_flood_handler=self._flood_handler,
+                shared_balancer=self._balancer,
+            )
+            self._workers.append(worker)
+            await worker.start()
+
+        logger.info(
+            f"Dispatcher pool started with {self._worker_count} workers",
+            extra={"ctx_count": self._worker_count},
+        )
+
+    async def stop(self) -> None:
+        if self._workers:
+            # Drain concurrently to avoid blocking timeout delays
+            await asyncio.gather(*(worker.stop() for worker in self._workers), return_exceptions=True)
+        self._workers.clear()
+        logger.info("Dispatcher pool stopped")

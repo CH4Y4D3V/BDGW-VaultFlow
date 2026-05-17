@@ -1,6 +1,6 @@
 import random
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Any
+from datetime import datetime, timezone
+from typing import List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import settings
 from app.utils.logger import get_logger
@@ -61,7 +61,7 @@ class FairnessSelector:
         # Group into tiers, shuffle within each tier for randomness
         return self._select_with_fairness(scored, max_count)
 
-    def _score_content(self, content_list: List[dict]) -> List[tuple[float, dict]]:
+    def _score_content(self, content_list: List[dict]) -> List[tuple[float, List[dict]]]:
         """
         Score content on:
         - Age (older = higher priority, FIFO with jitter)
@@ -69,46 +69,63 @@ class FairnessSelector:
         - Random jitter (prevents strict ordering → unpredictable posting pattern)
         """
         now = datetime.now(timezone.utc)
+
+        groups = {}
+        for item in content_list:
+            group_id = item.get("media_group_id") or item.get("content_id")
+            if group_id not in groups:
+                groups[group_id] = []
+            groups[group_id].append(item)
+
         scored = []
 
-        for item in content_list:
-            created_at = item.get("created_at")
+        for group_id, items in groups.items():
+            # Sort deterministically within album to preserve Telegram delivery order
+            items.sort(key=lambda x: x.get("message_id", x.get("content_id", "")))
+            
+            primary = items[0]
+            created_at = primary.get("created_at")
             if isinstance(created_at, datetime):
                 age_hours = (now - created_at.replace(tzinfo=timezone.utc)).total_seconds() / 3600
             else:
                 age_hours = 0.0
 
-            view_count = item.get("view_count", 0)
+            view_count = primary.get("view_count", 0)
             # Normalize: higher age = higher score, lower views = higher score
             age_score = min(age_hours / 168.0, 1.0)  # cap at 7 days
             view_penalty = min(view_count / 10000.0, 1.0)
             jitter = random.uniform(0, 0.2)
 
             score = age_score - (view_penalty * 0.3) + jitter
-            scored.append((score, item))
+            scored.append((score, items))
 
         return sorted(scored, key=lambda x: x[0], reverse=True)
 
     def _select_with_fairness(
-        self, scored: List[tuple[float, dict]], max_count: int
+        self, scored: List[tuple[float, List[dict]]], max_count: int
     ) -> List[dict]:
         """
         Split into top-tier (score > 0.5) and rest.
         Take majority from top-tier, fill remainder from rest (shuffled).
         This ensures quality content gets priority without being fully deterministic.
         """
-        top_tier = [item for score, item in scored if score > 0.5]
-        lower_tier = [item for score, item in scored if score <= 0.5]
+        top_tier = [items for score, items in scored if score > 0.5]
+        lower_tier = [items for score, items in scored if score <= 0.5]
 
         random.shuffle(top_tier)
         random.shuffle(lower_tier)
 
+        # Treat albums as unified units for slot allocation
         top_quota = min(int(max_count * 0.7), len(top_tier))
         lower_quota = min(max_count - top_quota, len(lower_tier))
 
-        selected = top_tier[:top_quota] + lower_tier[:lower_quota]
+        selected_groups = top_tier[:top_quota] + lower_tier[:lower_quota]
 
         # Final shuffle so the ordering itself isn't predictable
-        random.shuffle(selected)
+        random.shuffle(selected_groups)
 
-        return selected[:max_count]
+        selected = []
+        for group in selected_groups:
+            selected.extend(group)
+
+        return selected

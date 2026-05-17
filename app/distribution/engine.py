@@ -1,11 +1,15 @@
 import asyncio
+import signal
 from typing import Optional, Callable
-from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.config import settings
-from app.services.database import DatabaseManager
+from app.core.database import DatabaseManager
 from app.scheduler.scheduler import DistributionScheduler
-from app.workers.worker_pool import WorkerPool
+from app.watermark.dispatcher_worker import DispatcherWorkerPool
 from app.watermark.worker_pool import WatermarkWorkerPool
+from app.distribution.rate_limiter import RateLimiterService
+from app.distribution.flood_wait import FloodWaitHandler
+from app.distribution.target_balancer import TargetBalancer
+from app.core.supervision import SystemSupervisor
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,7 +30,7 @@ class DistributionEngine:
         await engine.stop()
 
     delivery_callback signature:
-        async def deliver(job_doc: dict, target_id: str) -> None
+        async def deliver(job_docs: list[dict], target_id: str) -> None
 
     content_provider_callback signature:
         async def get_channels() -> list[dict]
@@ -50,8 +54,15 @@ class DistributionEngine:
         self._watermark_count = watermark_worker_count
 
         self._scheduler: Optional[DistributionScheduler] = None
-        self._worker_pool: Optional[WorkerPool] = None
+        self._worker_pool: Optional[DispatcherWorkerPool] = None
         self._watermark_pool: Optional[WatermarkWorkerPool] = None
+        
+        # Shared singletons across all distribution workers
+        self._rate_limiter = RateLimiterService()
+        self._flood_handler = FloodWaitHandler()
+        self._balancer = TargetBalancer()
+        self._supervisor = SystemSupervisor()
+        
         self._running = False
 
     async def start(self) -> None:
@@ -64,9 +75,12 @@ class DistributionEngine:
         await DatabaseManager.connect()
         db = DatabaseManager.get_db()
 
-        self._worker_pool = WorkerPool(
+        self._worker_pool = DispatcherWorkerPool(
             db=db,
             delivery_callback=self._delivery_callback,
+            rate_limiter=self._rate_limiter,
+            flood_handler=self._flood_handler,
+            target_balancer=self._balancer,
             worker_count=self._dispatcher_count,
         )
         await self._worker_pool.start()
@@ -83,6 +97,8 @@ class DistributionEngine:
         )
         await self._scheduler.start()
 
+        await self._supervisor.start()
+
         self._running = True
         logger.info(
             "Distribution engine started",
@@ -97,6 +113,9 @@ class DistributionEngine:
             return
 
         logger.info("Distribution engine shutting down")
+
+        if self._supervisor:
+            await self._supervisor.stop()
 
         if self._scheduler:
             await self._scheduler.stop()
@@ -114,12 +133,24 @@ class DistributionEngine:
 
     async def run_until_stopped(self) -> None:
         """Convenience method for running until SIGINT/SIGTERM."""
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def _signal_handler():
+            logger.info("Shutdown signal received, initiating graceful teardown...")
+            stop_event.set()
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _signal_handler)
+            except NotImplementedError:
+                pass  # Ignore on Windows
+                
         await self.start()
         try:
-            while self._running:
-                await asyncio.sleep(1)
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            pass
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            logger.info("Run loop cancelled, triggering shutdown...")
         finally:
             await self.stop()
 
@@ -128,7 +159,7 @@ class DistributionEngine:
         return self._scheduler
 
     @property
-    def worker_pool(self) -> Optional[WorkerPool]:
+    def worker_pool(self) -> Optional[DispatcherWorkerPool]:
         return self._worker_pool
 
     @property

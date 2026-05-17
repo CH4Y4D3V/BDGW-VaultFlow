@@ -1,19 +1,13 @@
-import asyncio
 from datetime import datetime, timezone
-from typing import Optional, List
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from app.config import settings
-from app.core.models import QueueJob, DistributionResult, JobStatus, MediaType
+from typing import List, Callable, Awaitable
+from app.core.models import DistributionResult
 from app.core.exceptions import (
     FloodWaitError,
-    MaxRetriesExceededError,
-    RateLimitExceededError,
-    DispatcherError,
 )
-from app.distribution.flood_wait import FloodWaitHandler, calculate_retry_delay
+from app.distribution.flood_wait import FloodWaitHandler
 from app.distribution.target_balancer import TargetBalancer
 from app.repositories.queue_repository import QueueRepository
-from app.services.rate_limiter import RateLimiterService
+from app.distribution.rate_limiter import RateLimiterService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,7 +28,7 @@ class DistributionDispatcher:
         rate_limiter: RateLimiterService,
         flood_handler: FloodWaitHandler,
         target_balancer: TargetBalancer,
-        delivery_callback,  # Injected by worker; avoids circular dep with Telegram layer
+        delivery_callback: Callable[[List[dict], str], Awaitable[None]],
     ):
         self._queue = queue_repo
         self._rate_limiter = rate_limiter
@@ -42,22 +36,24 @@ class DistributionDispatcher:
         self._balancer = target_balancer
         self._deliver = delivery_callback  # async def deliver(job, target_id) -> None
 
-    async def dispatch(self, job_doc: dict, worker_id: str) -> bool:
+    async def dispatch(self, job_docs: List[dict], worker_id: str) -> bool:
         """
         Main dispatch entry point.
         Returns True if job fully completed (all targets), False if partial/failed.
         """
-        job_id = str(job_doc["_id"])
-        target_ids: List[str] = job_doc.get("target_channel_ids", [])
-        delivered: List[str] = job_doc.get("delivered_targets", [])
+        primary_job = job_docs[0]
+        primary_id = str(primary_job["_id"])
+        target_ids: List[str] = primary_job.get("target_channel_ids", [])
+        delivered: List[str] = primary_job.get("delivered_targets", [])
         remaining = [t for t in target_ids if t not in delivered]
 
         if not remaining:
             logger.info(
                 "All targets already delivered",
-                extra={"ctx_job_id": job_id},
+                extra={"ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id},
             )
-            await self._queue.mark_completed(job_id)
+            for job in job_docs:
+                await self._queue.mark_completed(str(job["_id"]))
             return True
 
         sorted_targets = await self._balancer.sort_targets_by_load(remaining)
@@ -69,7 +65,7 @@ class DistributionDispatcher:
                 logger.warning(
                     "Target is flood-waited, skipping for now",
                     extra={
-                        "ctx_job_id": job_id,
+                        "ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id,
                         "ctx_target": target_id,
                         "ctx_wait": wait,
                     },
@@ -82,7 +78,7 @@ class DistributionDispatcher:
                 logger.warning(
                     "Rate limit hit, deferring target",
                     extra={
-                        "ctx_job_id": job_id,
+                        "ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id,
                         "ctx_target": target_id,
                         "ctx_reason": reason,
                     },
@@ -90,22 +86,24 @@ class DistributionDispatcher:
                 all_succeeded = False
                 continue
 
-            result = await self._dispatch_to_target(job_doc, job_id, target_id)
+            result = await self._dispatch_to_target(job_docs, primary_id, target_id)
 
             if result.success:
-                await self._queue.record_target_delivered(job_id, target_id)
+                for job in job_docs:
+                    await self._queue.record_target_delivered(str(job["_id"]), target_id)
                 await self._balancer.record_delivery(target_id, success=True)
                 logger.info(
                     "Target delivered",
-                    extra={"ctx_job_id": job_id, "ctx_target": target_id},
+                    extra={"ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id, "ctx_target": target_id},
                 )
             else:
-                await self._queue.record_target_failed(job_id, target_id, result.error or "unknown")
+                for job in job_docs:
+                    await self._queue.record_target_failed(str(job["_id"]), target_id, result.error or "unknown")
                 await self._balancer.record_delivery(target_id, success=False)
                 all_succeeded = False
 
         # Re-fetch to get current delivered state
-        updated = await self._queue.get_job_by_id(job_id)
+        updated = await self._queue.get_job_by_id(primary_id)
         if not updated:
             return False
 
@@ -113,18 +111,19 @@ class DistributionDispatcher:
         all_targets = set(target_ids)
 
         if all_targets == current_delivered:
-            await self._queue.mark_completed(job_id)
+            for job in job_docs:
+                await self._queue.mark_completed(str(job["_id"]))
             return True
 
         return all_succeeded
 
     async def _dispatch_to_target(
-        self, job_doc: dict, job_id: str, target_id: str
+        self, job_docs: List[dict], primary_id: str, target_id: str
     ) -> DistributionResult:
         try:
-            await self._deliver(job_doc, target_id)
+            await self._deliver(job_docs, target_id)
             return DistributionResult(
-                job_id=job_id,
+                job_id=primary_id,
                 target_id=target_id,
                 success=True,
                 delivered_at=datetime.now(timezone.utc),
@@ -133,7 +132,7 @@ class DistributionDispatcher:
         except FloodWaitError as e:
             self._flood_handler.register_flood_wait(target_id, e.seconds)
             return DistributionResult(
-                job_id=job_id,
+                job_id=primary_id,
                 target_id=target_id,
                 success=False,
                 error=f"floodwait:{e.seconds}",
@@ -144,14 +143,14 @@ class DistributionDispatcher:
             logger.error(
                 "Delivery failed",
                 extra={
-                    "ctx_job_id": job_id,
+                    "ctx_group_id": primary_id,
                     "ctx_target": target_id,
                     "ctx_error": str(e),
                 },
                 exc_info=True,
             )
             return DistributionResult(
-                job_id=job_id,
+                job_id=primary_id,
                 target_id=target_id,
                 success=False,
                 error=str(e),

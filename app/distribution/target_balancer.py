@@ -2,7 +2,7 @@ import asyncio
 import random
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

@@ -1,10 +1,10 @@
-import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Any
+from typing import Optional, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 from app.config import settings
-from app.core.models import QueueJob, DeadLetterJob, JobStatus, QueueMetrics
+from app.core.models import QueueJob, JobStatus, QueueMetrics
 from app.core.exceptions import JobNotFoundError, DuplicateJobError
 from app.utils.logger import get_logger
 
@@ -25,22 +25,17 @@ class QueueRepository:
         Insert a new job. Raises DuplicateJobError if the same content_id
         is already pending/processing for any of the same target channels.
         """
-        existing = await self._queue.find_one(
-            {
-                "content_id": job.content_id,
-                "status": {"$in": [JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.LOCKED]},
-            }
-        )
-        if existing:
-            raise DuplicateJobError(
-                f"Active job already exists for content_id={job.content_id}"
-            )
-
         doc = job.model_dump(by_alias=False, exclude={"id"})
         doc["created_at"] = datetime.now(timezone.utc)
         doc["updated_at"] = datetime.now(timezone.utc)
 
-        result = await self._queue.insert_one(doc)
+        try:
+            result = await self._queue.insert_one(doc)
+        except DuplicateKeyError:
+            raise DuplicateJobError(
+                f"Active job already exists for content_id={job.content_id}"
+            )
+            
         job_id = str(result.inserted_id)
         logger.info(
             "Job enqueued",
@@ -54,18 +49,44 @@ class QueueRepository:
 
     # ─── Claim / Lock ─────────────────────────────────────────────────────────
 
+    async def claim_watermark_jobs(self, worker_id: str, batch_size: int = 1) -> List[dict]:
+        now = datetime.now(timezone.utc)
+        claimed = []
+        for _ in range(batch_size):
+            doc = await self._queue.find_one_and_update(
+                {
+                    "status": JobStatus.WATERMARKING,
+                    "locked_by": None,
+                },
+                {
+                    "$set": {
+                        "locked_by": worker_id,
+                        "locked_at": now,
+                        "updated_at": now,
+                    }
+                },
+                sort=[("priority", -1), ("created_at", 1)],
+                return_document=True,
+            )
+            if doc:
+                claimed.append(doc)
+        return claimed
+
     async def claim_next(self, worker_id: str, batch_size: int = 1) -> List[dict]:
         """
-        Atomically claim the next N pending jobs using find_one_and_update.
-        Returns raw dicts to avoid repeated serialization overhead.
+        Atomically claim the next N pending jobs.
+        If a claimed job is part of a media group, atomically claim the ENTIRE group
+        so they are processed and dispatched as an atomic album.
         """
         now = datetime.now(timezone.utc)
         claimed = []
+        claimed_ids = []
 
         for _ in range(batch_size):
             doc = await self._queue.find_one_and_update(
                 {
                     "status": JobStatus.PENDING,
+                    "_id": {"$nin": claimed_ids},
                     "$or": [
                         {"execute_after": None},
                         {"execute_after": {"$lte": now}},
@@ -79,11 +100,72 @@ class QueueRepository:
                         "updated_at": now,
                     }
                 },
-                sort=[("priority", -1), ("scheduled_at", 1)],
+                sort=[("priority", -1), ("execute_after", 1), ("_id", 1)],
                 return_document=True,
             )
-            if doc:
+            
+            if not doc:
+                break
+                
+            group_id = doc.get("metadata", {}).get("media_group_id")
+            if group_id:
+                # Ensure no other items in the group are still watermarking or processing
+                unready_count = await self._queue.count_documents({
+                    "metadata.media_group_id": group_id,
+                    "_id": {"$ne": doc["_id"]},
+                    "status": {"$in": [JobStatus.WATERMARKING, JobStatus.LOCKED, JobStatus.PROCESSING]}
+                })
+                
+                if unready_count > 0:
+                    # Rollback this claim, the album is not fully ready
+                    await self._queue.update_one(
+                        {"_id": doc["_id"]},
+                        {
+                            "$set": {
+                                "status": JobStatus.PENDING,
+                                "locked_by": None,
+                                "locked_at": None,
+                                "updated_at": now,
+                            }
+                        }
+                    )
+                    claimed_ids.append(doc["_id"])
+                    continue
+                
+                # Atomically lock the rest of the media group
+                result = await self._queue.update_many(
+                    {
+                        "status": JobStatus.PENDING,
+                        "metadata.media_group_id": group_id,
+                        "_id": {"$ne": doc["_id"]},
+                    },
+                    {
+                        "$set": {
+                            "status": JobStatus.LOCKED,
+                            "locked_by": worker_id,
+                            "locked_at": now,
+                            "updated_at": now,
+                        }
+                    }
+                )
+                
                 claimed.append(doc)
+                claimed_ids.append(doc["_id"])
+
+                if result.modified_count > 0:
+                    cursor = self._queue.find({
+                        "status": JobStatus.LOCKED,
+                        "locked_by": worker_id,
+                        "metadata.media_group_id": group_id,
+                        "_id": {"$ne": doc["_id"]}
+                    }).sort([("metadata.message_id", 1), ("_id", 1)])
+                    
+                    async for sibling in cursor:
+                        claimed.append(sibling)
+                        claimed_ids.append(sibling["_id"])
+            else:
+                claimed.append(doc)
+                claimed_ids.append(doc["_id"])
 
         return claimed
 
@@ -100,6 +182,29 @@ class QueueRepository:
         )
         return result.modified_count > 0
 
+    async def release_claim(self, job_id: str) -> None:
+        """Revert a locked/processing job back to pending (e.g., lock contention, graceful shutdown)."""
+        doc = await self._queue.find_one({"_id": ObjectId(job_id)})
+        if not doc:
+            return
+
+        next_status = JobStatus.WATERMARKING if (
+            doc.get("watermark_required") and not doc.get("watermark_applied")
+        ) else JobStatus.PENDING
+
+        await self._queue.update_one(
+            {"_id": ObjectId(job_id)},
+            {
+                "$set": {
+                    "status": next_status,
+                    "locked_by": None,
+                    "locked_at": None,
+                    "processing_started_at": None,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+
     # ─── Progress Updates ─────────────────────────────────────────────────────
 
     async def record_target_delivered(self, job_id: str, target_id: str) -> None:
@@ -107,7 +212,10 @@ class QueueRepository:
             {"_id": ObjectId(job_id)},
             {
                 "$addToSet": {"delivered_targets": target_id},
-                "$set": {"updated_at": datetime.now(timezone.utc)},
+                "$set": {
+                    "updated_at": datetime.now(timezone.utc),
+                    "locked_at": datetime.now(timezone.utc),
+                },
             },
         )
 
@@ -118,6 +226,7 @@ class QueueRepository:
                 "$set": {
                     f"failed_targets.{target_id}": error,
                     "updated_at": datetime.now(timezone.utc),
+                    "locked_at": datetime.now(timezone.utc),
                 }
             },
         )
@@ -130,6 +239,8 @@ class QueueRepository:
                     "watermark_applied": True,
                     "processed_media_path": processed_path,
                     "status": JobStatus.PENDING,
+                    "locked_by": None,
+                    "locked_at": None,
                     "updated_at": datetime.now(timezone.utc),
                 }
             },
@@ -157,7 +268,12 @@ class QueueRepository:
         job_id: str,
         error: str,
         next_retry_delay_seconds: Optional[float] = None,
+        increment_retry: bool = True,
     ) -> dict:
+        job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
+        if not job_doc:
+            raise JobNotFoundError(f"Job {job_id} not found")
+
         now = datetime.now(timezone.utc)
         execute_after = (
             now + timedelta(seconds=next_retry_delay_seconds)
@@ -165,20 +281,27 @@ class QueueRepository:
             else now
         )
 
+        next_status = JobStatus.WATERMARKING if (
+            job_doc.get("watermark_required") and not job_doc.get("watermark_applied")
+        ) else JobStatus.PENDING
+
+        update_ops = {
+            "$set": {
+                "status": next_status,
+                "last_error": error,
+                "last_error_at": now,
+                "execute_after": execute_after,
+                "locked_by": None,
+                "locked_at": None,
+                "updated_at": now,
+            }
+        }
+        if increment_retry:
+            update_ops["$inc"] = {"retry_count": 1}
+
         doc = await self._queue.find_one_and_update(
             {"_id": ObjectId(job_id)},
-            {
-                "$inc": {"retry_count": 1},
-                "$set": {
-                    "status": JobStatus.PENDING,
-                    "last_error": error,
-                    "last_error_at": now,
-                    "execute_after": execute_after,
-                    "locked_by": None,
-                    "locked_at": None,
-                    "updated_at": now,
-                },
-            },
+            update_ops,
             return_document=True,
         )
         return doc
@@ -200,7 +323,14 @@ class QueueRepository:
             "metadata": job_doc.get("metadata", {}),
         }
 
-        result = await self._dlq.insert_one(dlq_doc)
+        try:
+            result = await self._dlq.insert_one(dlq_doc)
+            dlq_id = str(result.inserted_id)
+        except DuplicateKeyError:
+            existing_dlq = await self._dlq.find_one({"original_job_id": job_id})
+            dlq_id = str(existing_dlq["_id"]) if existing_dlq else "unknown"
+            logger.warning("Job already exists in dead letter queue", extra={"ctx_job_id": job_id})
+
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {"$set": {"status": JobStatus.DEAD, "updated_at": datetime.now(timezone.utc)}},
@@ -210,11 +340,11 @@ class QueueRepository:
             "Job moved to dead letter queue",
             extra={
                 "ctx_job_id": job_id,
-                "ctx_dlq_id": str(result.inserted_id),
+                "ctx_dlq_id": dlq_id,
                 "ctx_error": final_error,
             },
         )
-        return str(result.inserted_id)
+        return dlq_id
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
@@ -226,7 +356,9 @@ class QueueRepository:
         threshold = datetime.now(timezone.utc) - timedelta(
             seconds=settings.STALE_LOCK_THRESHOLD_SECONDS
         )
-        result = await self._queue.update_many(
+        now = datetime.now(timezone.utc)
+        
+        result_dispatch = await self._queue.update_many(
             {
                 "status": {"$in": [JobStatus.LOCKED, JobStatus.PROCESSING]},
                 "locked_at": {"$lt": threshold},
@@ -236,16 +368,32 @@ class QueueRepository:
                     "status": JobStatus.PENDING,
                     "locked_by": None,
                     "locked_at": None,
-                    "updated_at": datetime.now(timezone.utc),
+                    "updated_at": now,
                 }
             },
         )
-        if result.modified_count:
+        
+        result_wm = await self._queue.update_many(
+            {
+                "status": JobStatus.WATERMARKING,
+                "locked_at": {"$lt": threshold},
+            },
+            {
+                "$set": {
+                    "locked_by": None,
+                    "locked_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+        
+        total = result_dispatch.modified_count + result_wm.modified_count
+        if total:
             logger.warning(
-                f"Recovered {result.modified_count} stale jobs",
-                extra={"ctx_count": result.modified_count},
+                f"Recovered {total} stale jobs",
+                extra={"ctx_count": total},
             )
-        return result.modified_count
+        return total
 
     # ─── Scheduler Queries ────────────────────────────────────────────────────
 
@@ -289,13 +437,16 @@ class QueueRepository:
         async for doc in self._queue.aggregate(pipeline):
             counts[doc["_id"]] = doc["count"]
 
+        def _get_count(status_val) -> int:
+            val = status_val.value if hasattr(status_val, "value") else status_val
+            return counts.get(val, 0)
+
         metrics = QueueMetrics(
-            pending_count=counts.get(JobStatus.PENDING, 0),
-            processing_count=counts.get(JobStatus.PROCESSING, 0)
-            + counts.get(JobStatus.LOCKED, 0),
-            completed_count=counts.get(JobStatus.COMPLETED, 0),
-            failed_count=counts.get(JobStatus.FAILED, 0),
-            dead_count=counts.get(JobStatus.DEAD, 0),
+            pending_count=_get_count(JobStatus.PENDING),
+            processing_count=_get_count(JobStatus.PROCESSING) + _get_count(JobStatus.LOCKED),
+            completed_count=_get_count(JobStatus.COMPLETED),
+            failed_count=_get_count(JobStatus.FAILED),
+            dead_count=_get_count(JobStatus.DEAD),
         )
 
         await self._metrics.insert_one(
