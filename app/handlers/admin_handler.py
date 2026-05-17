@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+import asyncio
+import time
+
+from pyrogram import Client, filters
+from pyrogram.errors import FloodWait, RPCError
+from pyrogram.types import Message
+
+from app.config import settings
+from app.core.database import DatabaseManager
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+_FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
+_MAX_RETRIES = 3
+
+
+# ── Access control ────────────────────────────────────────────────────────────
+
+def _is_admin(user_id: int) -> bool:
+    return (
+        user_id == settings.OWNER_ID
+        or user_id in settings.ADMIN_IDS
+        or user_id in settings.SUDO_IDS
+    )
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _safe_reply(message: Message, text: str, parse_mode: str = "html") -> None:
+    """Reply with FloodWait-safe retry logic."""
+    for attempt in range(_MAX_RETRIES):
+        try:
+            await message.reply_text(text, parse_mode=parse_mode)
+            return
+        except FloodWait as e:
+            wait = int(e.value) + _FLOOD_BUFFER
+            await asyncio.sleep(wait)
+        except RPCError as e:
+            logger.warning(
+                "Failed to send admin reply",
+                extra={
+                    "ctx_error": str(e),
+                    "ctx_attempt": attempt + 1,
+                },
+            )
+            if attempt == _MAX_RETRIES - 1:
+                return
+            await asyncio.sleep(2 ** attempt)
+
+
+async def _probe_mongodb() -> tuple[str, float | None]:
+    """
+    Issue a lightweight ping to MongoDB and measure round-trip latency.
+    Returns (status_label, latency_ms | None).
+    """
+    try:
+        db = DatabaseManager.get_db()
+        t0 = time.monotonic()
+        await db.command("ping")
+        latency_ms = round((time.monotonic() - t0) * 1000, 2)
+        return "🟢 Connected", latency_ms
+    except RuntimeError as e:
+        # DatabaseManager not initialised yet
+        return f"🔴 Not initialised: {e}", None
+    except Exception as e:
+        logger.warning("MongoDB ping failed", extra={"ctx_error": str(e)})
+        return f"🔴 Error: {e}", None
+
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.command("ping"))
+async def handle_ping(client: Client, message: Message) -> None:
+    """
+    Health-check command.
+    Reports MongoDB connectivity and round-trip latency.
+    Restricted to OWNER, ADMIN, and SUDO users.
+    """
+    if not message.from_user or not _is_admin(message.from_user.id):
+        return
+
+    db_status, latency_ms = await _probe_mongodb()
+    latency_line = f" <code>({latency_ms} ms)</code>" if latency_ms is not None else ""
+
+    text = (
+        f"🏓 <b>Pong!</b>\n\n"
+        f"<b>Database:</b> {db_status}{latency_line}"
+    )
+
+    await _safe_reply(message, text)
+    logger.info(
+        "/ping executed",
+        extra={
+            "ctx_user_id": message.from_user.id,
+            "ctx_db_status": db_status,
+            "ctx_latency_ms": latency_ms,
+        },
+    )
+
+
+@Client.on_message(filters.command("status"))
+async def handle_status(client: Client, message: Message) -> None:
+    """
+    Runtime status command.
+    Reports bot identity and key configuration surface (no secrets).
+    Restricted to OWNER, ADMIN, and SUDO users.
+    """
+    if not message.from_user or not _is_admin(message.from_user.id):
+        return
+
+    try:
+        me = await client.get_me()
+        bot_display = f"@{me.username}" if me.username else f"ID <code>{me.id}</code>"
+        bot_name = me.first_name or "Unknown"
+    except Exception as e:
+        bot_display = "Unknown"
+        bot_name = "Unknown"
+        logger.warning("Failed to fetch bot identity for /status", extra={"ctx_error": str(e)})
+
+    from app.services.submission_service import get_pending_count
+
+    pending_count = get_pending_count()
+    admin_count = len(set(settings.ADMIN_IDS) | set(settings.SUDO_IDS))
+
+    text = (
+        f"📊 <b>VaultFlow — Runtime Status</b>\n\n"
+        f"<b>Bot:</b> {bot_name} ({bot_display})\n"
+        f"<b>Verification Group:</b> <code>{settings.VERIFICATION_GROUP_ID}</code>\n"
+        f"<b>Vault Channel:</b> <code>{settings.VAULT_CHANNEL_ID}</code>\n"
+        f"<b>Owner ID:</b> <code>{settings.OWNER_ID}</code>\n"
+        f"<b>Privileged users:</b> {admin_count}\n"
+        f"<b>Pending submissions:</b> {pending_count}\n"
+        f"<b>Log level:</b> {settings.LOG_LEVEL}\n"
+        f"<b>Debug mode:</b> {'✅ On' if settings.DEBUG else '❌ Off'}"
+    )
+
+    await _safe_reply(message, text)
+    logger.info(
+        "/status executed",
+        extra={"ctx_user_id": message.from_user.id},
+    )
