@@ -54,8 +54,8 @@ class DatabaseManager:
     async def _ensure_indexes(cls) -> None:
         db = cls.get_db()
 
-        # ── Queue collection ──────────────────────────────────────────────────
-        queue_indexes = [
+        # ── Queue ─────────────────────────────────────────────────────────────
+        await db[settings.QUEUE_COLLECTION].create_indexes([
             IndexModel(
                 [("content_id", ASCENDING)],
                 name="unique_active_content",
@@ -99,7 +99,7 @@ class DatabaseManager:
                 [("created_at", ASCENDING)],
                 name="created_ttl",
                 background=True,
-                expireAfterSeconds=604800,  # 7-day auto-cleanup for completed jobs
+                expireAfterSeconds=604800,
                 partialFilterExpression={"status": {"$in": ["completed"]}},
             ),
             IndexModel(
@@ -107,37 +107,33 @@ class DatabaseManager:
                 name="stale_lock_sweep",
                 background=True,
             ),
-        ]
-        await db[settings.QUEUE_COLLECTION].create_indexes(queue_indexes)
+        ])
 
-        # ── Dead letter collection ─────────────────────────────────────────────
-        dlq_indexes = [
+        # ── Dead letter ───────────────────────────────────────────────────────
+        await db[settings.DEAD_LETTER_COLLECTION].create_indexes([
             IndexModel([("original_job_id", ASCENDING)], name="original_job", unique=True),
             IndexModel([("dead_at", DESCENDING)], name="dead_recency", background=True),
             IndexModel([("source_channel_id", ASCENDING)], name="dlq_channel", background=True),
-        ]
-        await db[settings.DEAD_LETTER_COLLECTION].create_indexes(dlq_indexes)
+        ])
 
-        # ── Distributed locks ──────────────────────────────────────────────────
-        lock_indexes = [
+        # ── Distributed locks ─────────────────────────────────────────────────
+        await db[settings.LOCK_COLLECTION].create_indexes([
             IndexModel([("lock_key", ASCENDING)], name="lock_key_unique", unique=True),
             IndexModel([("expires_at", ASCENDING)], name="lock_expiry_ttl", expireAfterSeconds=0),
-        ]
-        await db[settings.LOCK_COLLECTION].create_indexes(lock_indexes)
+        ])
 
         # ── Metrics ───────────────────────────────────────────────────────────
-        metrics_indexes = [
+        await db[settings.METRICS_COLLECTION].create_indexes([
             IndexModel([("collected_at", DESCENDING)], name="metrics_recency", background=True),
             IndexModel(
                 [("collected_at", ASCENDING)],
                 name="metrics_ttl",
-                expireAfterSeconds=2592000,  # 30-day retention
+                expireAfterSeconds=2592000,
             ),
-        ]
-        await db[settings.METRICS_COLLECTION].create_indexes(metrics_indexes)
+        ])
 
-        # ── Vault collection ───────────────────────────────────────────────────
-        vault_indexes = [
+        # ── Vault ─────────────────────────────────────────────────────────────
+        await db[settings.VAULT_COLLECTION].create_indexes([
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
             IndexModel(
                 [("status", ASCENDING), ("moderation_destination", ASCENDING), ("created_at", ASCENDING)],
@@ -150,21 +146,124 @@ class DatabaseManager:
                 background=True,
                 sparse=True,
             ),
-            IndexModel([("vault_message_id", ASCENDING)], name="vault_msg_id", background=True, sparse=True),
-        ]
-        await db[settings.VAULT_COLLECTION].create_indexes(vault_indexes)
+            IndexModel(
+                [("vault_message_id", ASCENDING)],
+                name="vault_msg_id",
+                background=True,
+                sparse=True,
+            ),
+        ])
 
-        # ── Pending submissions ────────────────────────────────────────────────
-        # TTL index auto-expires unactioned submissions after 48 h so orphans self-clean.
-        pending_indexes = [
+        # ── Pending submissions ───────────────────────────────────────────────
+        await db[settings.PENDING_COLLECTION].create_indexes([
             IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="pending_expiry_ttl",
-                expireAfterSeconds=0,  # MongoDB removes doc when expires_at passes
+                expireAfterSeconds=0,
             ),
-        ]
-        await db[settings.PENDING_COLLECTION].create_indexes(pending_indexes)
+        ])
+
+        # ── Subscriptions ─────────────────────────────────────────────────────
+        await db["subscriptions"].create_indexes([
+            IndexModel([("user_id", ASCENDING)], name="sub_user_unique", unique=True),
+            IndexModel(
+                [("status", ASCENDING), ("expires_at", ASCENDING)],
+                name="sub_status_expiry",
+                background=True,
+            ),
+            IndexModel(
+                [("status", ASCENDING), ("grace_until", ASCENDING)],
+                name="sub_status_grace",
+                background=True,
+            ),
+            IndexModel(
+                [("plan", ASCENDING), ("status", ASCENDING)],
+                name="sub_plan_status",
+                background=True,
+            ),
+            IndexModel(
+                [("updated_at", DESCENDING)],
+                name="sub_updated",
+                background=True,
+            ),
+        ])
+
+        # ── Memberships ───────────────────────────────────────────────────────
+        await db["memberships"].create_indexes([
+            IndexModel(
+                [("user_id", ASCENDING), ("chat_id", ASCENDING)],
+                name="membership_unique",
+                unique=True,
+            ),
+            IndexModel(
+                [("chat_id", ASCENDING), ("status", ASCENDING)],
+                name="membership_chat_status",
+                background=True,
+            ),
+            IndexModel(
+                [("user_id", ASCENDING), ("status", ASCENDING)],
+                name="membership_user_status",
+                background=True,
+            ),
+            IndexModel(
+                [("chat_id", ASCENDING), ("last_verified", ASCENDING)],
+                name="membership_stale_sweep",
+                background=True,
+            ),
+        ])
+
+        # ── Invites ───────────────────────────────────────────────────────────
+        await db["invites"].create_indexes([
+            IndexModel([("token", ASCENDING)], name="invite_token_unique", unique=True),
+            IndexModel(
+                [("created_by", ASCENDING), ("status", ASCENDING)],
+                name="invite_creator",
+                background=True,
+            ),
+            IndexModel(
+                [("chat_id", ASCENDING), ("status", ASCENDING)],
+                name="invite_chat_status",
+                background=True,
+            ),
+            IndexModel(
+                [("status", ASCENDING), ("expires_at", ASCENDING)],
+                name="invite_expiry_sweep",
+                background=True,
+                sparse=True,
+            ),
+        ])
+
+        # ── Activity ──────────────────────────────────────────────────────────
+        await db["activity"].create_indexes([
+            IndexModel(
+                [("user_id", ASCENDING), ("timestamp", DESCENDING)],
+                name="activity_user_time",
+                background=True,
+            ),
+            IndexModel(
+                [("chat_id", ASCENDING), ("timestamp", DESCENDING)],
+                name="activity_chat_time",
+                background=True,
+                sparse=True,
+            ),
+            IndexModel(
+                [("action", ASCENDING), ("timestamp", DESCENDING)],
+                name="activity_action_time",
+                background=True,
+            ),
+            IndexModel(
+                [("timestamp", ASCENDING)],
+                name="activity_ttl",
+                background=True,
+                expireAfterSeconds=7776000,  # 90-day retention
+            ),
+        ])
+
+        # ── Bot config (rules, welcome messages, etc.) ────────────────────────
+        await db["bot_config"].create_indexes([
+            IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
+        ])
 
         logger.info("All MongoDB indexes verified/created")
 

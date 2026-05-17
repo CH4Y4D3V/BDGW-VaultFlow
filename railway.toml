@@ -1,16 +1,15 @@
 [build]
-builder = "NIXPACKS"
+builder = "nixpacks"
 
-[phases.setup]
-nixPkgs = ["ffmpeg"]
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["ffmpeg", "python311"]
 
 [deploy]
 startCommand = "python main_bot.py"
-restartPolicyType = "ON_FAILURE"
+restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 10
+sleepApplication = false
 
-[env]
-PYTHONUNBUFFERED = "1"
-
-[experimental]
-incremental_builds = true
+[deploy.healthcheck]
+type = "command"
+command = "python -c \"import app; print('ok')\""
