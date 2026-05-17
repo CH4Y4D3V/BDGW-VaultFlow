@@ -138,3 +138,6 @@ temp/
 *.bak
 *.backup
 *.old
+.ai/*
+!.ai/rules.md
+.ruff_cache
