@@ -1,0 +1,25 @@
+pyrogram==2.0.106
+tgcrypto==1.2.5
+
+motor==3.4.0
+pymongo==4.7.2
+
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+apscheduler==3.10.4
+
+python-dotenv==1.0.1
+
+structlog==24.1.0
+
+uvloop==0.19.0; platform_system != "Windows"
+
+aiofiles==23.2.1
+
+orjson==3.10.3
+
+Pillow==10.3.0
+imagehash==4.3.1
+
+tenacity==8.2.3
