@@ -2,7 +2,7 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import IndexModel, ASCENDING, DESCENDING
 from app.config import settings
-from app.utils.logger import get_logger
+from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -20,12 +20,11 @@ class DatabaseManager:
         client = AsyncIOMotorClient(
             settings.MONGO_URI,
             serverSelectionTimeoutMS=5000,
-            maxPoolSize=20,
-            minPoolSize=2,
+            maxPoolSize=settings.MONGO_MAX_POOL_SIZE,
+            minPoolSize=settings.MONGO_MIN_POOL_SIZE,
             retryWrites=True,
         )
         cls._client = client
-
         cls._db = client[settings.MONGO_DB_NAME]
 
         await client.admin.command("ping")
@@ -55,7 +54,7 @@ class DatabaseManager:
     async def _ensure_indexes(cls) -> None:
         db = cls.get_db()
 
-        # Queue collection indexes
+        # ── Queue collection ──────────────────────────────────────────────────
         queue_indexes = [
             IndexModel(
                 [("content_id", ASCENDING)],
@@ -63,7 +62,7 @@ class DatabaseManager:
                 unique=True,
                 partialFilterExpression={
                     "status": {"$in": ["pending", "processing", "locked", "watermarking"]}
-                }
+                },
             ),
             IndexModel(
                 [("status", ASCENDING), ("locked_by", ASCENDING), ("priority", DESCENDING)],
@@ -100,7 +99,7 @@ class DatabaseManager:
                 [("created_at", ASCENDING)],
                 name="created_ttl",
                 background=True,
-                expireAfterSeconds=604800,  # 7-day auto-cleanup for completed
+                expireAfterSeconds=604800,  # 7-day auto-cleanup for completed jobs
                 partialFilterExpression={"status": {"$in": ["completed"]}},
             ),
             IndexModel(
@@ -111,7 +110,7 @@ class DatabaseManager:
         ]
         await db[settings.QUEUE_COLLECTION].create_indexes(queue_indexes)
 
-        # Dead letter collection indexes
+        # ── Dead letter collection ─────────────────────────────────────────────
         dlq_indexes = [
             IndexModel([("original_job_id", ASCENDING)], name="original_job", unique=True),
             IndexModel([("dead_at", DESCENDING)], name="dead_recency", background=True),
@@ -119,18 +118,14 @@ class DatabaseManager:
         ]
         await db[settings.DEAD_LETTER_COLLECTION].create_indexes(dlq_indexes)
 
-        # Distributed locks indexes
+        # ── Distributed locks ──────────────────────────────────────────────────
         lock_indexes = [
             IndexModel([("lock_key", ASCENDING)], name="lock_key_unique", unique=True),
-            IndexModel(
-                [("expires_at", ASCENDING)],
-                name="lock_expiry_ttl",
-                expireAfterSeconds=0,
-            ),
+            IndexModel([("expires_at", ASCENDING)], name="lock_expiry_ttl", expireAfterSeconds=0),
         ]
         await db[settings.LOCK_COLLECTION].create_indexes(lock_indexes)
 
-        # Metrics indexes
+        # ── Metrics ───────────────────────────────────────────────────────────
         metrics_indexes = [
             IndexModel([("collected_at", DESCENDING)], name="metrics_recency", background=True),
             IndexModel(
@@ -140,6 +135,36 @@ class DatabaseManager:
             ),
         ]
         await db[settings.METRICS_COLLECTION].create_indexes(metrics_indexes)
+
+        # ── Vault collection ───────────────────────────────────────────────────
+        vault_indexes = [
+            IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
+            IndexModel(
+                [("status", ASCENDING), ("moderation_destination", ASCENDING), ("created_at", ASCENDING)],
+                name="vault_dist_query",
+                background=True,
+            ),
+            IndexModel(
+                [("file_unique_id", ASCENDING)],
+                name="vault_file_unique",
+                background=True,
+                sparse=True,
+            ),
+            IndexModel([("vault_message_id", ASCENDING)], name="vault_msg_id", background=True, sparse=True),
+        ]
+        await db[settings.VAULT_COLLECTION].create_indexes(vault_indexes)
+
+        # ── Pending submissions ────────────────────────────────────────────────
+        # TTL index auto-expires unactioned submissions after 48 h so orphans self-clean.
+        pending_indexes = [
+            IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="pending_expiry_ttl",
+                expireAfterSeconds=0,  # MongoDB removes doc when expires_at passes
+            ),
+        ]
+        await db[settings.PENDING_COLLECTION].create_indexes(pending_indexes)
 
         logger.info("All MongoDB indexes verified/created")
 

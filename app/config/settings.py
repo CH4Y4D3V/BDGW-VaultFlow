@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     PREMIUM_GROUP_ID: int = 0
     LOG_CHANNEL_ID: int = 0
 
-    # ── Destination display names (used in uploader notifications) ────────────
+    # ── Destination display names ─────────────────────────────────────────────
     NSFW_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
@@ -92,15 +92,20 @@ class Settings(BaseSettings):
     MEDIA_GROUP_TIMEOUT: float = 3.0
     MEDIA_GROUP_MAX_SIZE: int = 10
 
-    # ── Media Processing & Watermarks ─────────────────────────────────────────
+    # ── Media Processing ──────────────────────────────────────────────────────
     PROCESSED_MEDIA_DIR: str = "./processed"
     WATERMARK_CACHE_DIR: str = "./watermark_cache"
     FFMPEG_TIMEOUT: float = 120.0
 
-    # Watermark logo asset — place your PNG at this path
-    WATERMARK_LOGO_PATH: str = "./assets/watermark/logo.png"
+    # ── Watermark assets — per-destination logos ──────────────────────────────
+    # Place your PNG files at these paths before deploying.
+    WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"
+    WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
 
-    # Per-destination watermark text (used for text overlay if no logo)
+    # Legacy single-path fallback (kept for backwards-compat; per-dest paths take priority)
+    WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
+
+    # Per-destination text overlay (used when logo is unavailable)
     WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
@@ -110,9 +115,6 @@ class Settings(BaseSettings):
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True
-
-    # ── External Module Integration ───────────────────────────────────────────
-    CONTENT_ROUTING_ENABLED: bool = True
 
     # ── Subscriptions ─────────────────────────────────────────────────────────
     GRACE_PERIOD_DAYS: int = 3

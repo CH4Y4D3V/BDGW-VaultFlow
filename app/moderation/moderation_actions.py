@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
+from pymongo import UpdateOne
+from pymongo.errors import BulkWriteError
 from pyrogram.client import Client
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 
-from app.bot.ingestion import MediaIngestionPipeline
 from app.config import settings
 from app.core.models import (
     DistributionPriority,
@@ -20,14 +22,11 @@ from app.core.models import (
 from app.core.database import DatabaseManager
 from app.repositories.queue_repository import QueueRepository
 from app.core.exceptions import DuplicateJobError
-from app.utils.logger import get_logger
+from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 _MAX_RETRIES = 3
-
-# Shared ingestion pipeline — module-level singleton
-_pipeline = MediaIngestionPipeline()
 
 
 # ── Destination helpers ───────────────────────────────────────────────────────
@@ -48,13 +47,44 @@ def _destination_display_name(dest: str) -> str:
     return dest
 
 
+def _get_watermark_config(dest: str) -> Optional[dict]:
+    """
+    Return per-destination watermark config.
+    Falls back to text-only if the logo file is missing.
+    Returns None if neither logo nor text is configured (watermark disabled).
+    """
+    if dest == ModerationDestination.NSFW:
+        logo_path = settings.WATERMARK_LOGO_PATH_NSFW
+        text = settings.WATERMARK_TEXT_NSFW
+    elif dest == ModerationDestination.PREMIUM:
+        logo_path = settings.WATERMARK_LOGO_PATH_PREMIUM
+        text = settings.WATERMARK_TEXT_PREMIUM
+    else:
+        return None
+
+    logo_exists = Path(logo_path).exists()
+    if not logo_exists:
+        logger.warning(
+            "Watermark logo missing — will use text overlay",
+            extra={"ctx_path": logo_path, "ctx_dest": dest},
+        )
+
+    return {
+        "watermark_image_path": logo_path if logo_exists else None,
+        "watermark_text": text,
+        "position": settings.WATERMARK_POSITION,
+        "opacity": settings.WATERMARK_OPACITY,
+        "scale": settings.WATERMARK_SCALE,
+        "destination": dest,
+    }
+
+
 # ── Safe Telegram ops ─────────────────────────────────────────────────────────
 
 async def safe_dm(client: Client, user_id: int, text: str) -> None:
     """
-    Send a DM notification to the uploader.
-    Never raises — failures are logged and swallowed so the moderation
-    pipeline is never blocked by a blocked or unavailable user.
+    Send a DM to the uploader.
+    Swallows all exceptions so the moderation pipeline is never blocked.
     """
     for attempt in range(_MAX_RETRIES):
         try:
@@ -65,8 +95,7 @@ async def safe_dm(client: Client, user_id: int, text: str) -> None:
             )
             return
         except FloodWait as e:
-            wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-            await asyncio.sleep(wait)
+            await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
         except RPCError as e:
             logger.warning(
                 "Failed to DM uploader",
@@ -84,7 +113,7 @@ async def safe_dm(client: Client, user_id: int, text: str) -> None:
 
 
 async def safe_delete_message(client: Client, chat_id: int, message_id: int) -> None:
-    """Delete the moderation card from the verification group. Best-effort."""
+    """Delete the moderation card. Best-effort."""
     try:
         await client.delete_messages(chat_id=chat_id, message_ids=message_id)
     except Exception as e:
@@ -126,15 +155,12 @@ async def post_to_destination(
     dest: str,
 ) -> bool:
     """
-    Forward all messages in the submission directly to the destination group.
-    Returns True on success, False on failure.
+    Forward all messages to the destination group.
+    Returns True on success, False on terminal failure.
     """
     group_id = _destination_group_id(dest)
     if not group_id:
-        logger.error(
-            "Destination group ID not configured",
-            extra={"ctx_dest": dest},
-        )
+        logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
         return False
 
     for attempt in range(_MAX_RETRIES):
@@ -168,21 +194,126 @@ async def post_to_destination(
 
 # ── Vault archival ────────────────────────────────────────────────────────────
 
-async def archive_to_vault(messages: list, dest: str) -> None:
+async def archive_to_vault(
+    client: Client,
+    messages: list,
+    dest: str,
+) -> list[int]:
     """
-    Archive all messages via the ingestion pipeline.
-    The pipeline handles deduplication, album preservation, and vault writes.
+    Two-step vault archival:
+    1. Forward every message to VAULT_CHANNEL_ID (Telegram CDN, permanent storage).
+    2. Upsert metadata into MongoDB vault collection with destination + vault_message_id.
+
+    Returns list of vault_message_ids (0 for any message that failed to forward).
+    Never raises — failures are logged so the moderation flow continues.
     """
-    for msg in messages:
-        source_channel_id = str(msg.chat.id)
+    if not messages:
+        return []
+
+    vault_message_ids: list[int] = []
+
+    # ── Step 1: Telegram Vault Channel ────────────────────────────────────────
+    if settings.VAULT_CHANNEL_ID:
+        for msg in messages:
+            forwarded_id = 0
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    result = await client.forward_messages(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        from_chat_id=msg.chat.id,
+                        message_ids=msg.id,
+                    )
+                    fwd = result[0] if isinstance(result, list) else result
+                    forwarded_id = fwd.id
+                    break
+                except FloodWait as e:
+                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                except RPCError as e:
+                    logger.error(
+                        "Failed to forward message to vault channel",
+                        extra={
+                            "ctx_msg_id": msg.id,
+                            "ctx_error": str(e),
+                            "ctx_attempt": attempt + 1,
+                        },
+                    )
+                    if attempt == _MAX_RETRIES - 1:
+                        break
+                    await asyncio.sleep(2 ** attempt)
+            vault_message_ids.append(forwarded_id)
+    else:
+        logger.warning("VAULT_CHANNEL_ID not configured — skipping Telegram vault archival")
+        vault_message_ids = [0] * len(messages)
+
+    # ── Step 2: MongoDB vault metadata ────────────────────────────────────────
+    db = DatabaseManager.get_db()
+    vault_col = db[settings.VAULT_COLLECTION]
+    now = datetime.now(timezone.utc)
+    operations = []
+
+    for i, msg in enumerate(messages):
+        media = None
+        if msg.media:
+            try:
+                media = getattr(msg, msg.media.value, None)
+            except Exception:
+                pass
+
+        file_unique_id = getattr(media, "file_unique_id", None) if media else None
+        file_id = getattr(media, "file_id", None) if media else None
+        media_type_str = msg.media.value if msg.media else "text"
+        content_id = f"{msg.chat.id}_{msg.id}"
+        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
+
+        operations.append(UpdateOne(
+            {"content_id": content_id},
+            {
+                "$setOnInsert": {
+                    "content_id": content_id,
+                    "source_chat_id": str(msg.chat.id),
+                    "message_id": msg.id,
+                    "media_group_id": msg.media_group_id,
+                    "media_type": media_type_str,
+                    "file_id": file_id,
+                    "file_unique_id": file_unique_id,
+                    "caption": msg.caption or msg.text or "",
+                    "created_at": now,
+                },
+                "$set": {
+                    "vault_message_id": vault_msg_id or None,
+                    "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
+                    "moderation_destination": dest,
+                    "status": "pending_distribution",
+                    "updated_at": now,
+                    "metadata": {
+                        "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
+                        "date": msg.date.isoformat() if msg.date else None,
+                    },
+                },
+            },
+            upsert=True,
+        ))
+
+    if operations:
         try:
-            await _pipeline.ingest(msg, source_channel_id)
-        except Exception as e:
-            logger.error(
-                "Vault archival failed for message",
-                extra={"ctx_msg_id": msg.id, "ctx_error": str(e)},
-                exc_info=True,
+            result = await vault_col.bulk_write(operations, ordered=False)
+            logger.info(
+                "Vault archival complete",
+                extra={
+                    "ctx_count": len(operations),
+                    "ctx_dest": dest,
+                    "ctx_vault_forwarded": len([v for v in vault_message_ids if v]),
+                },
             )
+        except BulkWriteError as e:
+            logger.warning(
+                "Partial vault write (duplicates silently ignored)",
+                extra={"ctx_details": str(e.details)},
+            )
+        except Exception:
+            logger.error("Vault MongoDB write failed", exc_info=True)
+
+    return vault_message_ids
 
 
 # ── Queue enqueue ─────────────────────────────────────────────────────────────
@@ -193,9 +324,8 @@ async def enqueue_for_distribution(
     submitter_user_id: int,
 ) -> bool:
     """
-    Archive to vault then enqueue a MODERATED priority distribution job.
-    Moderator-queued content has priority MODERATED (3) — above scheduler content.
-    Queue deadline is enforced via queue_deadline field (within QUEUE_DEADLINE_HOURS).
+    Enqueue a MODERATED-priority distribution job with correct watermark config.
+    Queue deadline is enforced via queue_deadline field.
     """
     db = DatabaseManager.get_db()
     queue_repo = QueueRepository(db)
@@ -205,10 +335,12 @@ async def enqueue_for_distribution(
         logger.error("Cannot enqueue: destination group not configured", extra={"ctx_dest": dest})
         return False
 
+    watermark_config = _get_watermark_config(dest)
+    watermark_required = watermark_config is not None
+
     now = datetime.now(timezone.utc)
     deadline = now + timedelta(hours=settings.QUEUE_DEADLINE_HOURS)
 
-    # Group messages by media_group_id so albums stay atomic
     group_id = messages[0].media_group_id if messages else None
     content_id = (
         f"mod_{group_id}"
@@ -217,17 +349,28 @@ async def enqueue_for_distribution(
     )
 
     for i, msg in enumerate(messages):
-        media = getattr(msg, str(msg.media.value)) if msg.media else None
+        media = None
+        if msg.media:
+            try:
+                media = getattr(msg, msg.media.value, None)
+            except Exception:
+                pass
+
         file_id = getattr(media, "file_id", None) if media else None
-        media_type_str = str(msg.media.value) if msg.media else MediaType.TEXT.value
+        media_type_str = msg.media.value if msg.media else "text"
 
         try:
             media_type = MediaType(media_type_str)
         except ValueError:
             media_type = MediaType.TEXT
 
-        # Each message in an album gets its own job, linked by media_group_id in metadata
         item_content_id = f"{content_id}_{i}" if len(messages) > 1 else content_id
+
+        # When watermark is required, job starts in WATERMARKING state.
+        # The watermark worker needs a local file path, but at this point we only
+        # have a file_id.  The watermark worker must download first — which is the
+        # correct pattern.  We record media_file_id; the worker resolves the path.
+        initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
         job = QueueJob(
             content_id=item_content_id,
@@ -237,11 +380,12 @@ async def enqueue_for_distribution(
             media_file_id=file_id,
             caption=msg.caption or msg.text or "",
             priority=DistributionPriority.MODERATED,
-            status=JobStatus.PENDING,
+            status=initial_status,
             max_retries=settings.MAX_RETRY_ATTEMPTS,
             execute_after=now,
             queue_deadline=deadline,
-            watermark_required=False,
+            watermark_required=watermark_required,
+            watermark_config=watermark_config,
             metadata={
                 "media_group_id": group_id,
                 "message_id": msg.id,
@@ -254,14 +398,11 @@ async def enqueue_for_distribution(
         try:
             await queue_repo.enqueue(job)
         except DuplicateJobError:
-            logger.debug(
-                "Duplicate queue job skipped",
-                extra={"ctx_content_id": item_content_id},
-            )
-        except Exception as e:
+            logger.debug("Duplicate queue job skipped", extra={"ctx_content_id": item_content_id})
+        except Exception:
             logger.error(
                 "Failed to enqueue moderated job",
-                extra={"ctx_content_id": item_content_id, "ctx_error": str(e)},
+                extra={"ctx_content_id": item_content_id},
                 exc_info=True,
             )
             return False
@@ -273,6 +414,7 @@ async def enqueue_for_distribution(
             "ctx_dest": dest,
             "ctx_deadline": deadline.isoformat(),
             "ctx_count": len(messages),
+            "ctx_watermark": watermark_required,
         },
     )
     return True
@@ -290,25 +432,22 @@ async def execute_approve(
     moderator_name: str,
 ) -> None:
     """
-    Full approve flow:
-    1. Archive to vault
+    Approve flow:
+    1. Archive to vault (Telegram channel + MongoDB)
     2. Post immediately to destination group
     3. Delete moderation card
     4. Notify uploader
     """
     display_name = _destination_display_name(dest)
 
-    # 1. Archive
-    await archive_to_vault(messages, dest)
+    await archive_to_vault(client, messages, dest)
 
-    # 2. Post immediately
     posted = await post_to_destination(client, messages, dest)
     if not posted:
         logger.error(
             "Approve: failed to post to destination",
             extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
         )
-        # Don't block — still clean up and notify
         await safe_edit_message(
             client,
             mod_card_chat_id,
@@ -324,10 +463,7 @@ async def execute_approve(
         )
         return
 
-    # 3. Delete moderation card
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
-
-    # 4. Notify uploader
     await safe_dm(
         client,
         submitter_user_id,
@@ -336,11 +472,7 @@ async def execute_approve(
 
     logger.info(
         "Approve flow complete",
-        extra={
-            "ctx_submitter": submitter_user_id,
-            "ctx_dest": dest,
-            "ctx_moderator": moderator_name,
-        },
+        extra={"ctx_submitter": submitter_user_id, "ctx_dest": dest, "ctx_moderator": moderator_name},
     )
 
 
@@ -354,18 +486,16 @@ async def execute_queue(
     moderator_name: str,
 ) -> None:
     """
-    Full queue flow:
-    1. Archive to vault
-    2. Enqueue MODERATED priority distribution job (deadline: QUEUE_DEADLINE_HOURS)
+    Queue flow:
+    1. Archive to vault (Telegram channel + MongoDB)
+    2. Enqueue MODERATED-priority job (with watermark config, deadline: QUEUE_DEADLINE_HOURS)
     3. Delete moderation card
     4. Notify uploader
     """
     display_name = _destination_display_name(dest)
 
-    # 1. Archive
-    await archive_to_vault(messages, dest)
+    await archive_to_vault(client, messages, dest)
 
-    # 2. Enqueue
     queued = await enqueue_for_distribution(messages, dest, submitter_user_id)
     if not queued:
         logger.error(
@@ -381,14 +511,11 @@ async def execute_queue(
         )
         return
 
-    # 3. Delete moderation card
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
-
-    # 4. Notify uploader
     await safe_dm(
         client,
         submitter_user_id,
-        f"✅ Your content was approved.\n\nDestination:\n{display_name}",
+        f"✅ Your content has been queued for posting.\n\nDestination:\n{display_name}",
     )
 
     logger.info(
@@ -411,13 +538,12 @@ async def execute_reject(
     moderator_id: int,
 ) -> None:
     """
-    Full reject flow:
+    Reject flow:
     - Content stays in verification group (not deleted)
-    - Not archived
+    - Not archived to vault
     - Not distributed
     - Uploader notified
     """
-    # Edit the card to show rejected state — content remains visible to mods
     await safe_edit_message(
         client,
         mod_card_chat_id,
@@ -425,17 +551,12 @@ async def execute_reject(
         f"❌ <b>Rejected</b> by {moderator_name} (<code>{moderator_id}</code>)\n"
         f"👤 Submitter: <code>{submitter_user_id}</code>",
     )
-
     await safe_dm(
         client,
         submitter_user_id,
         "❌ Your submission was rejected by moderation.",
     )
-
     logger.info(
         "Reject flow complete",
-        extra={
-            "ctx_submitter": submitter_user_id,
-            "ctx_moderator": moderator_id,
-        },
+        extra={"ctx_submitter": submitter_user_id, "ctx_moderator": moderator_id},
     )
