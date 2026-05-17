@@ -45,6 +45,21 @@ class AppLifecycle:
             await self._bot.start()
             me = await self._bot.get_me()
             logger.info("Telegram client connected", extra={"ctx_bot_username": me.username})
+            
+            # Explicit startup logs for every registered handler group
+            handlers_count = 0
+            if hasattr(self._bot, "dispatcher") and hasattr(self._bot.dispatcher, "groups"):
+                for group_id, handlers in self._bot.dispatcher.groups.items():
+                    logger.info(
+                        "Handler group registered",
+                        extra={"ctx_group_id": group_id, "ctx_handlers_count": len(handlers)}
+                    )
+                    handlers_count += len(handlers)
+            
+            if handlers_count == 0:
+                logger.error("CRITICAL: No Pyrogram handlers registered! Update routing will fail.")
+            else:
+                logger.info("Telegram update routing activated", extra={"ctx_total_handlers": handlers_count})
         except Exception:
             logger.error("Failed to start Pyrogram client", exc_info=True)
             await DatabaseManager.disconnect()

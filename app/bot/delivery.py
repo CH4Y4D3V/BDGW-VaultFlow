@@ -37,7 +37,9 @@ async def execute_telegram_delivery(job_docs: List[dict], target_id: str) -> Non
 
         except FloodWait as e:
             # Propagate up to FloodWaitHandler explicitly
-            raise FloodWaitError(seconds=int(e.value))
+            val = e.value
+            seconds = int(val) if isinstance(val, (int, float, str)) else 0
+            raise FloodWaitError(seconds=seconds)
         except (ConnectionError, TimeoutError, RPCError) as e:
             if attempt == max_network_retries - 1:
                 raise DispatcherError(f"Telegram network failure after {max_network_retries} attempts: {e}") from e

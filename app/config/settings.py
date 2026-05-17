@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     CHANNEL_CONFIG_COLLECTION: str = "channel_config"
 
     # ── Channels ──────────────────────────────────────────────────────────────
-    VERIFICATION_CHANNEL_ID: int
+    VERIFICATION_GROUP_ID: int
     VAULT_CHANNEL_ID: int
     LOG_CHANNEL_ID: int = 0
 
@@ -117,4 +117,4 @@ class Settings(BaseSettings):
         return v.upper()
 
 
-settings = Settings()
+settings = Settings()  # type: ignore
