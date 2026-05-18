@@ -1,4 +1,3 @@
-# app/services/channel_service.py
 from __future__ import annotations
 
 from app.config import settings
@@ -16,12 +15,16 @@ class ChannelService:
 
     async def seed_channels(self) -> None:
         """
-        Seed distribution channels from env vars.
-        Fails loudly if neither destination is configured — a misconfigured
-        channel silently kills the entire distribution pipeline.
+        Seed distribution channels from env vars into channel_config collection.
+
+        CRITICAL: Both NSFW_GROUP_ID and PREMIUM_GROUP_ID default to 0.
+        A falsy guard (if settings.NSFW_GROUP_ID) silently skips seeding,
+        leaving channel_config empty and killing the entire distribution pipeline.
+
+        This method always runs at boot. If neither group is configured it logs
+        a hard error so the operator knows immediately why distribution is dead.
         """
         seeded: list[str] = []
-        warnings: list[str] = []
 
         if settings.NSFW_GROUP_ID and settings.NSFW_GROUP_ID != 0:
             await self._repo.upsert_channel(
@@ -35,8 +38,15 @@ class ChannelService:
                 },
             )
             seeded.append(f"NSFW → {settings.NSFW_GROUP_ID}")
+            logger.info(
+                "NSFW channel seeded",
+                extra={"ctx_group_id": settings.NSFW_GROUP_ID},
+            )
         else:
-            warnings.append("NSFW_GROUP_ID not set or zero — NSFW channel NOT seeded")
+            logger.warning(
+                "NSFW_GROUP_ID is 0 or not set — NSFW distribution channel NOT seeded. "
+                "Set NSFW_GROUP_ID in your environment to enable NSFW distribution."
+            )
 
         if settings.PREMIUM_GROUP_ID and settings.PREMIUM_GROUP_ID != 0:
             await self._repo.upsert_channel(
@@ -50,21 +60,24 @@ class ChannelService:
                 },
             )
             seeded.append(f"PREMIUM → {settings.PREMIUM_GROUP_ID}")
+            logger.info(
+                "PREMIUM channel seeded",
+                extra={"ctx_group_id": settings.PREMIUM_GROUP_ID},
+            )
         else:
-            warnings.append("PREMIUM_GROUP_ID not set or zero — PREMIUM channel NOT seeded")
-
-        for w in warnings:
-            logger.warning(w)
+            logger.warning(
+                "PREMIUM_GROUP_ID is 0 or not set — PREMIUM distribution channel NOT seeded. "
+                "Set PREMIUM_GROUP_ID in your environment to enable PREMIUM distribution."
+            )
 
         if not seeded:
             logger.error(
-                "CRITICAL: No distribution channels seeded. "
-                "Bot will start but distribution pipeline is dead. "
-                "Set NSFW_GROUP_ID and/or PREMIUM_GROUP_ID in your environment."
+                "CRITICAL: No distribution channels were seeded. "
+                "The distribution pipeline is completely dead. "
+                "Set NSFW_GROUP_ID and/or PREMIUM_GROUP_ID in your environment and restart."
             )
-            return
-
-        logger.info(
-            "Distribution channels seeded",
-            extra={"ctx_channels": seeded},
-        )
+        else:
+            logger.info(
+                "Distribution channels seeded successfully",
+                extra={"ctx_seeded": seeded},
+            )

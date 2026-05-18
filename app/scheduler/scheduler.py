@@ -13,11 +13,39 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Daily volume caps per destination ─────────────────────────────────────────
+# These are hard limits. The scheduler will not enqueue beyond these counts
+# within any 24-hour rolling window.
+#
+# NSFW:    70–80  posts/day  → cap at 75
+# PREMIUM: 130–150 posts/day → cap at 140
+#
+# Override via env vars DAILY_CAP_NSFW and DAILY_CAP_PREMIUM if needed.
+
+_DEFAULT_DAILY_CAPS: dict[str, int] = {
+    "nsfw": 75,
+    "premium": 140,
+}
+
+
+def _get_daily_cap(dest: str) -> int:
+    """Return the daily post cap for a destination. Reads from settings if available."""
+    env_key = f"DAILY_CAP_{dest.upper()}"
+    cap = getattr(settings, env_key, None)
+    if cap and isinstance(cap, int) and cap > 0:
+        return cap
+    return _DEFAULT_DAILY_CAPS.get(dest, 100)
+
 
 class DistributionScheduler:
     """
     APScheduler wrapper that ONLY inserts jobs into the queue.
     Never directly delivers content. Dispatcher workers handle delivery.
+
+    Daily volume cap enforcement:
+      Each cycle checks how many jobs have been completed for a destination
+      in the last 24 hours. If >= daily cap, that destination is skipped
+      for the cycle. This prevents all content posting in the first few minutes.
     """
 
     def __init__(
@@ -33,9 +61,6 @@ class DistributionScheduler:
         self._started = False
 
     def setup_jobs(self) -> None:
-        """Register all recurring scheduler jobs."""
-
-        # Main distribution cycle
         self._scheduler.add_job(
             self._distribution_cycle,
             trigger=IntervalTrigger(seconds=settings.SCHEDULER_INTERVAL_SECONDS),
@@ -47,7 +72,6 @@ class DistributionScheduler:
             misfire_grace_time=60,
         )
 
-        # Stale lock recovery sweep
         self._scheduler.add_job(
             self._stale_lock_sweep,
             trigger=IntervalTrigger(seconds=120),
@@ -59,7 +83,6 @@ class DistributionScheduler:
             misfire_grace_time=60,
         )
 
-        # Metrics collection
         self._scheduler.add_job(
             self._collect_metrics,
             trigger=IntervalTrigger(seconds=300),
@@ -71,7 +94,6 @@ class DistributionScheduler:
             misfire_grace_time=60,
         )
 
-        # P1-C: Queue deadline enforcement — runs every 60 seconds
         self._scheduler.add_job(
             self._deadline_sweep,
             trigger=IntervalTrigger(seconds=60),
@@ -93,7 +115,10 @@ class DistributionScheduler:
         self._started = True
         logger.info(
             "Distribution scheduler started",
-            extra={"ctx_interval": settings.SCHEDULER_INTERVAL_SECONDS},
+            extra={
+                "ctx_interval": settings.SCHEDULER_INTERVAL_SECONDS,
+                "ctx_daily_caps": _DEFAULT_DAILY_CAPS,
+            },
         )
 
     async def stop(self) -> None:
@@ -101,6 +126,19 @@ class DistributionScheduler:
             self._scheduler.shutdown(wait=True)
             self._started = False
             logger.info("Distribution scheduler stopped gracefully")
+
+    async def _get_posted_count_last_24h(self, source_channel_id: str) -> int:
+        """
+        Count how many jobs have been completed for a source channel
+        in the last 24 hours. Used to enforce daily caps.
+        """
+        queue_col = self._db[settings.QUEUE_COLLECTION]
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        return await queue_col.count_documents({
+            "source_channel_id": source_channel_id,
+            "status": JobStatus.COMPLETED,
+            "completed_at": {"$gte": since},
+        })
 
     async def _distribution_cycle(self) -> None:
         try:
@@ -121,16 +159,51 @@ class DistributionScheduler:
                 if not available_content or not target_channel_ids:
                     continue
 
+                # ── Daily cap enforcement ──────────────────────────────────────
+                # Extract destination from source_channel_id: "submission_nsfw" → "nsfw"
+                dest = source_channel_id.replace("submission_", "")
+                daily_cap = _get_daily_cap(dest)
+                posted_today = await self._get_posted_count_last_24h(source_channel_id)
+                remaining_cap = daily_cap - posted_today
+
+                if remaining_cap <= 0:
+                    logger.info(
+                        "Daily cap reached — skipping destination for this cycle",
+                        extra={
+                            "ctx_dest": dest,
+                            "ctx_posted_today": posted_today,
+                            "ctx_daily_cap": daily_cap,
+                        },
+                    )
+                    continue
+
+                logger.info(
+                    "Daily cap status",
+                    extra={
+                        "ctx_dest": dest,
+                        "ctx_posted_today": posted_today,
+                        "ctx_daily_cap": daily_cap,
+                        "ctx_remaining": remaining_cap,
+                    },
+                )
+
+                # ── Queue slot check ───────────────────────────────────────────
                 pending_count = await self._queue_repo.get_channel_pending_count(
                     source_channel_id
                 )
-                slots_available = settings.MAX_JOBS_PER_CYCLE - pending_count
+                # Respect both the MAX_JOBS_PER_CYCLE setting AND the remaining daily cap
+                slots_available = min(
+                    settings.MAX_JOBS_PER_CYCLE - pending_count,
+                    remaining_cap,
+                )
+
                 if slots_available <= 0:
                     logger.info(
-                        "Channel queue is full, skipping",
+                        "Channel queue is full or daily cap reached, skipping",
                         extra={
                             "ctx_channel": source_channel_id,
                             "ctx_pending": pending_count,
+                            "ctx_remaining_cap": remaining_cap,
                         },
                     )
                     continue
@@ -244,6 +317,12 @@ class DistributionScheduler:
             return False
 
     def _randomized_execute_time(self, index: int) -> datetime:
+        """
+        Spread posts across the posting window.
+        With 75 posts/day and RANDOMIZE_POSTING_WINDOW=300s (5min),
+        posts stagger within each scheduler cycle but spread naturally
+        across the day via the daily cap + cycle intervals.
+        """
         base_delay = random.uniform(0, settings.RANDOMIZE_POSTING_WINDOW)
         stagger = index * random.uniform(5, 15)
         total_delay = base_delay + stagger
@@ -265,10 +344,6 @@ class DistributionScheduler:
             )
 
     async def _deadline_sweep(self) -> None:
-        """
-        P1-C: Enforce queue_deadline on jobs.
-        Any job still PENDING or WATERMARKING past its deadline is moved to dead letter.
-        """
         try:
             overdue_jobs = await self._queue_repo.get_deadline_exceeded_jobs()
             if not overdue_jobs:

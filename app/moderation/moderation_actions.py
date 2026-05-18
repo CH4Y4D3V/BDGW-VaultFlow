@@ -80,7 +80,6 @@ def _get_watermark_config(dest: str) -> Optional[dict]:
 
 
 def _compute_checksum(file_unique_id: Optional[str], file_size: int) -> Optional[str]:
-    """SHA-256 checksum for vault deduplication. Returns None if no file_unique_id."""
     if not file_unique_id:
         return None
     raw = f"{file_unique_id}:{file_size}"
@@ -197,23 +196,25 @@ async def archive_to_vault(
     dest: str,
     submitter_user_id: int,
     consent_record_id: Optional[str] = None,
+    # BUG FIX: approve flow sets initial_status=POSTED so the scheduler
+    # never re-picks approved content. Queue flow uses QUEUED (default).
+    initial_status: str = ModerationState.QUEUED.value,
 ) -> list[int]:
     """
     Two-step vault archival:
     1. copy_message() to VAULT_CHANNEL_ID
-    2. Upsert metadata to MongoDB with:
-       - ModerationState enum values (not raw strings)
-       - distribution_state field (default: PENDING)
-       - submitter_user_id + consent_record_id for takedown traceability
-       - checksum for deduplication (M4)
-       - cooldown / usage fields (M5)
+    2. Upsert metadata to MongoDB
+
+    initial_status parameter:
+      - QUEUED  (default) : content goes into scheduler distribution pipeline
+      - POSTED            : content was already immediately posted (approve flow)
+                            prevents double-post by keeping it OUT of scheduler
 
     Returns list of vault_message_ids. Never raises.
     """
     if not messages:
         return []
 
-    # P1-D: fetch consent_record_id if not provided
     resolved_consent_id = consent_record_id
     if resolved_consent_id is None and submitter_user_id:
         try:
@@ -270,7 +271,6 @@ async def archive_to_vault(
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
     operations = []
-    skipped_duplicates = 0
 
     for i, msg in enumerate(messages):
         media = None
@@ -287,7 +287,6 @@ async def archive_to_vault(
         content_id = f"{msg.chat.id}_{msg.id}"
         vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
 
-        # M4: compute checksum for true deduplication
         checksum = _compute_checksum(file_unique_id, file_size or 0)
 
         operations.append(UpdateOne(
@@ -304,7 +303,6 @@ async def archive_to_vault(
                     "file_size": file_size,
                     "caption": msg.caption or msg.text or "",
                     "created_at": now,
-                    # M5: cooldown fields initialized to safe defaults
                     "usage_count": 0,
                     "last_posted_at": None,
                     "cooldown_until": None,
@@ -313,13 +311,13 @@ async def archive_to_vault(
                     "vault_message_id": vault_msg_id or None,
                     "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
                     "moderation_destination": dest,
-                    # P1-A: use ModerationState enum values — no raw strings
-                    "status": ModerationState.QUEUED.value,
+                    # BUG FIX: use initial_status param.
+                    # approve flow passes POSTED → scheduler never picks this up again.
+                    # queue flow passes QUEUED (default) → enters distribution pipeline.
+                    "status": initial_status,
                     "distribution_state": ModerationState.PENDING.value,
-                    # P1-D: submitter identity for takedown traceability
                     "submitter_user_id": submitter_user_id,
                     "consent_record_id": resolved_consent_id,
-                    # M4: checksum for deduplication
                     "checksum": checksum,
                     "updated_at": now,
                     "metadata": {
@@ -339,6 +337,7 @@ async def archive_to_vault(
                 extra={
                     "ctx_count": len(operations),
                     "ctx_dest": dest,
+                    "ctx_initial_status": initial_status,
                     "ctx_vault_copied": len([v for v in vault_message_ids if v]),
                     "ctx_submitter": submitter_user_id,
                 },
@@ -351,7 +350,6 @@ async def archive_to_vault(
         except Exception:
             logger.error("Vault MongoDB write failed", exc_info=True)
 
-    # P1-B: audit log for vault archival
     try:
         await get_audit().log(
             action=AuditAction.VAULT_ARCHIVE,
@@ -359,6 +357,7 @@ async def archive_to_vault(
             details={
                 "destination": dest,
                 "message_count": len(messages),
+                "initial_status": initial_status,
                 "consent_record_id": resolved_consent_id,
             },
         )
@@ -475,22 +474,29 @@ async def execute_approve(
     mod_card_chat_id: int,
     mod_card_message_id: int,
     moderator_name: str,
-    moderator_id: int,  # P1-B: required for audit
+    moderator_id: int,
 ) -> None:
     """
     Approve flow:
-    1. Archive to vault (with submitter_user_id + consent_record_id)
-    2. Verify vault write succeeded
-    3. Post immediately to destination group
-    4. Delete moderation card
-    5. Notify uploader
-    6. Write audit log (P1-B)
+    1. Archive to vault with status=POSTED (NOT QUEUED) — prevents scheduler double-post
+    2. Post immediately to destination group
+    3. Delete moderation card
+    4. Notify uploader
+    5. Write audit log
+
+    BUG FIX: original code archived with status=QUEUED, meaning the scheduler
+    would later pick up and re-post already-delivered content. Now we pass
+    initial_status=ModerationState.POSTED.value so the vault record is marked
+    as already delivered and the scheduler ignores it entirely.
     """
     display_name = _destination_display_name(dest)
 
+    # FIX: pass initial_status=POSTED — approved content is posted immediately,
+    # must NOT re-enter the scheduler distribution pipeline.
     vault_ids = await archive_to_vault(
         client, messages, dest,
         submitter_user_id=submitter_user_id,
+        initial_status=ModerationState.POSTED.value,
     )
 
     vault_success = any(vid for vid in vault_ids if vid)
@@ -538,7 +544,6 @@ async def execute_approve(
         f"✅ Your content was approved.\n\nDestination:\n{display_name}",
     )
 
-    # P1-B: audit log
     await get_audit().log(
         action=AuditAction.APPROVE,
         performed_by=moderator_id,
@@ -567,22 +572,23 @@ async def execute_queue(
     mod_card_chat_id: int,
     mod_card_message_id: int,
     moderator_name: str,
-    moderator_id: int,  # P1-B: required for audit
+    moderator_id: int,
 ) -> None:
     """
     Queue flow:
-    1. Archive to vault (with submitter_user_id + consent_record_id)
-    2. Verify vault write succeeded
-    3. Enqueue MODERATED-priority job
-    4. Delete moderation card
-    5. Notify uploader
-    6. Write audit log (P1-B)
+    1. Archive to vault with status=QUEUED — enters scheduler distribution pipeline
+    2. Enqueue MODERATED-priority job
+    3. Delete moderation card
+    4. Notify uploader
+    5. Write audit log
     """
     display_name = _destination_display_name(dest)
 
+    # Queue flow correctly uses QUEUED (default) so scheduler picks it up
     vault_ids = await archive_to_vault(
         client, messages, dest,
         submitter_user_id=submitter_user_id,
+        initial_status=ModerationState.QUEUED.value,
     )
 
     vault_success = any(vid for vid in vault_ids if vid)
@@ -624,7 +630,6 @@ async def execute_queue(
         f"✅ Your content has been queued for posting.\n\nDestination:\n{display_name}",
     )
 
-    # P1-B: audit log
     await get_audit().log(
         action=AuditAction.QUEUE,
         performed_by=moderator_id,
@@ -658,7 +663,7 @@ async def execute_reject(
     - Content not archived to vault, not distributed
     - Moderation card updated
     - Uploader notified
-    - Audit log written (P1-B)
+    - Audit log written
     """
     await safe_edit_message(
         client,
@@ -673,7 +678,6 @@ async def execute_reject(
         "❌ Your submission was rejected by moderation.",
     )
 
-    # P1-B: audit log
     await get_audit().log(
         action=AuditAction.REJECT,
         performed_by=moderator_id,

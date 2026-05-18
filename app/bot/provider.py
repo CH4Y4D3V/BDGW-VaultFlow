@@ -1,15 +1,36 @@
-# app/bot/provider.py  (replace the existing function)
-async def fetch_distribution_content() -> list[dict]:
+from datetime import datetime, timezone
+from typing import List, Dict
+
+from app.config import settings
+from app.core.database import DatabaseManager
+from app.core.models import ModerationState
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+async def fetch_distribution_content() -> List[Dict]:
+    """
+    Called by DistributionScheduler to fetch valid vault content.
+
+    Provides the data boundary ensuring only fully ingested, non-duplicate,
+    non-locked, non-cooldown content is released to the fairness selector.
+
+    Includes diagnostic logging so operators can see exactly why content
+    is or isn't flowing — previously this returned [] silently with no
+    indication of whether the channel_config was empty or vault was empty.
+    """
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
     channels = db[getattr(settings, "CHANNEL_CONFIG_COLLECTION", "channel_config")]
 
-    # Diagnostic: count total active channel configs
-    total_configs = await channels.count_documents({"is_active": True})
-    if total_configs == 0:
-        logger.warning(
-            "fetch_distribution_content: channel_config collection has NO active channels. "
-            "Seed missing — check NSFW_GROUP_ID / PREMIUM_GROUP_ID env vars."
+    # Diagnostic: detect missing channel config immediately
+    total_active_channels = await channels.count_documents({"is_active": True})
+    if total_active_channels == 0:
+        logger.error(
+            "fetch_distribution_content: channel_config has NO active channels. "
+            "Seed is missing — check NSFW_GROUP_ID / PREMIUM_GROUP_ID env vars "
+            "and ensure ChannelService.seed_channels() ran at boot."
         )
         return []
 
@@ -22,16 +43,25 @@ async def fetch_distribution_content() -> list[dict]:
 
         if not dest or not source_id:
             logger.warning(
-                "Skipping malformed channel config",
+                "Skipping malformed channel config — missing destination or source_channel_id",
                 extra={"ctx_config_id": str(config.get("_id"))},
             )
             continue
 
-        # Diagnostic: count eligible vault items before filtering
-        total_vault = await vault.count_documents(
-            {"moderation_destination": dest, "status": ModerationState.QUEUED.value}
-        )
+        # Diagnostic: count total queued vault items for this destination
+        total_queued = await vault.count_documents({
+            "moderation_destination": dest,
+            "status": ModerationState.QUEUED.value,
+        })
 
+        # Diagnostic: count items blocked by lock/cooldown
+        total_locked = await vault.count_documents({
+            "moderation_destination": dest,
+            "status": ModerationState.QUEUED.value,
+            "distribution_state": {"$in": ["locked", "removed"]},
+        })
+
+        # Main query: eligible content only
         cursor = vault.find({
             "moderation_destination": dest,
             "status": ModerationState.QUEUED.value,
@@ -46,10 +76,11 @@ async def fetch_distribution_content() -> list[dict]:
         content = await cursor.to_list(length=None)
 
         logger.info(
-            "Channel provider query",
+            "Channel provider query result",
             extra={
                 "ctx_dest": dest,
-                "ctx_total_queued": total_vault,
+                "ctx_total_queued": total_queued,
+                "ctx_locked_or_removed": total_locked,
                 "ctx_eligible": len(content),
             },
         )
@@ -61,5 +92,20 @@ async def fetch_distribution_content() -> list[dict]:
                 "content": content,
                 "watermark_config": config.get("watermark_config"),
             })
+        else:
+            if total_queued == 0:
+                logger.info(
+                    "No queued vault content for destination — vault is empty for this dest",
+                    extra={"ctx_dest": dest},
+                )
+            else:
+                logger.warning(
+                    "Vault has queued content but none eligible — all locked or on cooldown",
+                    extra={
+                        "ctx_dest": dest,
+                        "ctx_total_queued": total_queued,
+                        "ctx_locked": total_locked,
+                    },
+                )
 
     return active_configs
