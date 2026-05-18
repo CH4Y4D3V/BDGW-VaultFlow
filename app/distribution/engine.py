@@ -39,6 +39,10 @@ class DistributionEngine:
             - target_channel_ids: list[str]
             - content: list[dict]  (each with content_id, media_type, ...)
             - watermark_config: Optional[dict]
+
+    IMPORTANT: The engine assumes DatabaseManager.connect() has already been called
+    by the application lifecycle (AppLifecycle). The engine does NOT call connect()
+    or disconnect() — doing so would double-connect or tear down a shared connection.
     """
 
     def __init__(
@@ -56,13 +60,13 @@ class DistributionEngine:
         self._scheduler: Optional[DistributionScheduler] = None
         self._worker_pool: Optional[DispatcherWorkerPool] = None
         self._watermark_pool: Optional[WatermarkWorkerPool] = None
-        
+
         # Shared singletons across all distribution workers
         self._rate_limiter = RateLimiterService()
         self._flood_handler = FloodWaitHandler()
         self._balancer = TargetBalancer()
         self._supervisor = SystemSupervisor()
-        
+
         self._running = False
 
     async def start(self) -> None:
@@ -72,7 +76,10 @@ class DistributionEngine:
 
         logger.info("Distribution engine starting")
 
-        await DatabaseManager.connect()
+        # Bug 7 fix: do NOT call DatabaseManager.connect() here.
+        # AppLifecycle.start() already called it before engine.start().
+        # Calling it again would either no-op (if _initialized guard is in place) or
+        # re-open a second connection pool — both are wrong for a shared singleton.
         db = DatabaseManager.get_db()
 
         self._worker_pool = DispatcherWorkerPool(
@@ -126,7 +133,11 @@ class DistributionEngine:
         if self._watermark_pool:
             await self._watermark_pool.stop()
 
-        await DatabaseManager.disconnect()
+        # Bug 7 fix: do NOT call DatabaseManager.disconnect() here.
+        # AppLifecycle.stop() owns the DB connection lifecycle and will call
+        # disconnect() in the correct shutdown order AFTER the engine stops.
+        # Calling it here would tear down the shared connection while other
+        # components (e.g. subscription worker) may still be using it.
 
         self._running = False
         logger.info("Distribution engine stopped cleanly")
@@ -145,7 +156,7 @@ class DistributionEngine:
                 loop.add_signal_handler(sig, _signal_handler)
             except NotImplementedError:
                 pass  # Ignore on Windows
-                
+
         await self.start()
         try:
             await stop_event.wait()

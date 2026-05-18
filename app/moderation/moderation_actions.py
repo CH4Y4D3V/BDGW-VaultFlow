@@ -155,7 +155,8 @@ async def post_to_destination(
     dest: str,
 ) -> bool:
     """
-    Forward all messages to the destination group.
+    Copy all messages to the destination group using copy_message().
+    copy_message() does NOT expose source chat metadata (no forward headers).
     Returns True on success, False on terminal failure.
     """
     group_id = _destination_group_id(dest)
@@ -163,33 +164,32 @@ async def post_to_destination(
         logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
         return False
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            msg_ids = [m.id for m in messages]
-            source_chat_id = messages[0].chat.id
-            await client.forward_messages(
-                chat_id=group_id,
-                from_chat_id=source_chat_id,
-                message_ids=msg_ids,
-            )
-            return True
-        except FloodWait as e:
-            wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-            logger.warning(
-                "FloodWait posting to destination",
-                extra={"ctx_dest": dest, "ctx_wait": wait, "ctx_attempt": attempt + 1},
-            )
-            await asyncio.sleep(wait)
-        except RPCError as e:
-            logger.error(
-                "RPC error posting to destination",
-                extra={"ctx_dest": dest, "ctx_error": str(e), "ctx_attempt": attempt + 1},
-            )
-            if attempt == _MAX_RETRIES - 1:
-                return False
-            await asyncio.sleep(2 ** attempt)
+    for msg in messages:
+        for attempt in range(_MAX_RETRIES):
+            try:
+                await client.copy_message(
+                    chat_id=group_id,
+                    from_chat_id=msg.chat.id,
+                    message_id=msg.id,
+                )
+                break
+            except FloodWait as e:
+                wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
+                logger.warning(
+                    "FloodWait posting to destination",
+                    extra={"ctx_dest": dest, "ctx_wait": wait, "ctx_attempt": attempt + 1},
+                )
+                await asyncio.sleep(wait)
+            except RPCError as e:
+                logger.error(
+                    "RPC error posting to destination",
+                    extra={"ctx_dest": dest, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                )
+                if attempt == _MAX_RETRIES - 1:
+                    return False
+                await asyncio.sleep(2 ** attempt)
 
-    return False
+    return True
 
 
 # ── Vault archival ────────────────────────────────────────────────────────────
@@ -201,10 +201,10 @@ async def archive_to_vault(
 ) -> list[int]:
     """
     Two-step vault archival:
-    1. Forward every message to VAULT_CHANNEL_ID (Telegram CDN, permanent storage).
+    1. Copy every message to VAULT_CHANNEL_ID using copy_message() — no forward headers.
     2. Upsert metadata into MongoDB vault collection with destination + vault_message_id.
 
-    Returns list of vault_message_ids (0 for any message that failed to forward).
+    Returns list of vault_message_ids (0 for any message that failed to copy).
     Never raises — failures are logged so the moderation flow continues.
     """
     if not messages:
@@ -215,22 +215,22 @@ async def archive_to_vault(
     # ── Step 1: Telegram Vault Channel ────────────────────────────────────────
     if settings.VAULT_CHANNEL_ID:
         for msg in messages:
-            forwarded_id = 0
+            copied_id = 0
             for attempt in range(_MAX_RETRIES):
                 try:
-                    result = await client.forward_messages(
+                    # copy_message returns a Message object — use .id for vault_message_id
+                    result = await client.copy_message(
                         chat_id=settings.VAULT_CHANNEL_ID,
                         from_chat_id=msg.chat.id,
-                        message_ids=msg.id,
+                        message_id=msg.id,
                     )
-                    fwd = result[0] if isinstance(result, list) else result
-                    forwarded_id = fwd.id
+                    copied_id = result.id
                     break
                 except FloodWait as e:
                     await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
                 except RPCError as e:
                     logger.error(
-                        "Failed to forward message to vault channel",
+                        "Failed to copy message to vault channel",
                         extra={
                             "ctx_msg_id": msg.id,
                             "ctx_error": str(e),
@@ -240,7 +240,7 @@ async def archive_to_vault(
                     if attempt == _MAX_RETRIES - 1:
                         break
                     await asyncio.sleep(2 ** attempt)
-            vault_message_ids.append(forwarded_id)
+            vault_message_ids.append(copied_id)
     else:
         logger.warning("VAULT_CHANNEL_ID not configured — skipping Telegram vault archival")
         vault_message_ids = [0] * len(messages)
@@ -302,7 +302,7 @@ async def archive_to_vault(
                 extra={
                     "ctx_count": len(operations),
                     "ctx_dest": dest,
-                    "ctx_vault_forwarded": len([v for v in vault_message_ids if v]),
+                    "ctx_vault_copied": len([v for v in vault_message_ids if v]),
                 },
             )
         except BulkWriteError as e:
@@ -326,6 +326,7 @@ async def enqueue_for_distribution(
     """
     Enqueue a MODERATED-priority distribution job with correct watermark config.
     Queue deadline is enforced via queue_deadline field.
+    source_channel_id is set to "submission_{dest}" — NOT the submitter's DM chat ID.
     """
     db = DatabaseManager.get_db()
     queue_repo = QueueRepository(db)
@@ -348,6 +349,11 @@ async def enqueue_for_distribution(
         else f"mod_{messages[0].chat.id}_{messages[0].id}"
     )
 
+    # Bug 5 fix: use a stable, meaningful source_channel_id that is NOT the submitter DM.
+    # The submitter's DM chat ID is private metadata — it must never leak into the
+    # distribution pipeline as a "source channel".
+    source_channel_id = f"submission_{dest}"
+
     for i, msg in enumerate(messages):
         media = None
         if msg.media:
@@ -366,15 +372,11 @@ async def enqueue_for_distribution(
 
         item_content_id = f"{content_id}_{i}" if len(messages) > 1 else content_id
 
-        # When watermark is required, job starts in WATERMARKING state.
-        # The watermark worker needs a local file path, but at this point we only
-        # have a file_id.  The watermark worker must download first — which is the
-        # correct pattern.  We record media_file_id; the worker resolves the path.
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
         job = QueueJob(
             content_id=item_content_id,
-            source_channel_id=str(msg.chat.id),
+            source_channel_id=source_channel_id,
             target_channel_ids=[str(target_group_id)],
             media_type=media_type,
             media_file_id=file_id,
@@ -415,6 +417,7 @@ async def enqueue_for_distribution(
             "ctx_deadline": deadline.isoformat(),
             "ctx_count": len(messages),
             "ctx_watermark": watermark_required,
+            "ctx_source_channel_id": source_channel_id,
         },
     )
     return True
@@ -433,14 +436,35 @@ async def execute_approve(
 ) -> None:
     """
     Approve flow:
-    1. Archive to vault (Telegram channel + MongoDB)
-    2. Post immediately to destination group
-    3. Delete moderation card
-    4. Notify uploader
+    1. Archive to vault (copy_message to Telegram channel + MongoDB)
+    2. Verify vault write succeeded — abort with error card if all vault_ids are zero
+    3. Post immediately to destination group via copy_message
+    4. Delete moderation card
+    5. Notify uploader
     """
     display_name = _destination_display_name(dest)
 
-    await archive_to_vault(client, messages, dest)
+    vault_ids = await archive_to_vault(client, messages, dest)
+
+    # Bug 4 fix: verify vault write before proceeding.
+    # If every vault_id is 0, the Telegram copy failed for all messages.
+    # Edit the card with an error and bail — do NOT post to destination or delete card.
+    vault_success = any(vid for vid in vault_ids if vid)
+    if not vault_success:
+        logger.error(
+            "Approve aborted: vault archival returned no valid message IDs",
+            extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
+        )
+        await safe_edit_message(
+            client,
+            mod_card_chat_id,
+            mod_card_message_id,
+            f"⚠️ <b>Vault archival failed</b> — content NOT posted.\n"
+            f"Approved by {moderator_name} but vault write returned zero IDs.\n"
+            f"👤 Submitter: <code>{submitter_user_id}</code>\n\n"
+            f"Please retry or investigate vault channel access.",
+        )
+        return
 
     posted = await post_to_destination(client, messages, dest)
     if not posted:
@@ -487,14 +511,33 @@ async def execute_queue(
 ) -> None:
     """
     Queue flow:
-    1. Archive to vault (Telegram channel + MongoDB)
-    2. Enqueue MODERATED-priority job (with watermark config, deadline: QUEUE_DEADLINE_HOURS)
-    3. Delete moderation card
-    4. Notify uploader
+    1. Archive to vault (copy_message to Telegram channel + MongoDB)
+    2. Verify vault write succeeded — abort with error card if all vault_ids are zero
+    3. Enqueue MODERATED-priority job (with watermark config, deadline: QUEUE_DEADLINE_HOURS)
+    4. Delete moderation card
+    5. Notify uploader
     """
     display_name = _destination_display_name(dest)
 
-    await archive_to_vault(client, messages, dest)
+    vault_ids = await archive_to_vault(client, messages, dest)
+
+    # Bug 4 fix: same vault verification guard as execute_approve
+    vault_success = any(vid for vid in vault_ids if vid)
+    if not vault_success:
+        logger.error(
+            "Queue aborted: vault archival returned no valid message IDs",
+            extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
+        )
+        await safe_edit_message(
+            client,
+            mod_card_chat_id,
+            mod_card_message_id,
+            f"⚠️ <b>Vault archival failed</b> — content NOT queued.\n"
+            f"Queued by {moderator_name} but vault write returned zero IDs.\n"
+            f"👤 Submitter: <code>{submitter_user_id}</code>\n\n"
+            f"Please retry or investigate vault channel access.",
+        )
+        return
 
     queued = await enqueue_for_distribution(messages, dest, submitter_user_id)
     if not queued:

@@ -190,8 +190,11 @@ class DistributionScheduler:
 
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
+        # Bug 8 fix: QueueJob field is declared as `id` with alias `_id`.
+        # The correct Pydantic kwarg is `id=None`, NOT `_id=None`.
+        # Passing `_id=None` would either be ignored (Pydantic v2 by_alias=False construction)
+        # or raise a TypeError — it is never correct when constructing via Python kwargs.
         job = QueueJob(
-            _id=None,
             content_id=content_item["content_id"],
             source_channel_id=source_channel_id,
             target_channel_ids=target_channel_ids,

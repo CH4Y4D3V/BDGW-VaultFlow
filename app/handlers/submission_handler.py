@@ -6,9 +6,10 @@ from collections import defaultdict
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import Message
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
+from app.handlers.creator_onboarding import check_and_gate_creator
 from app.moderation import verification_hub
 from app.services import submission_service
 from app.utils.logger import get_logger
@@ -27,10 +28,11 @@ async def _safe_reply(
     message: Message,
     text: str,
     parse_mode: ParseMode = ParseMode.HTML,
+    reply_markup=None,
 ) -> None:
     for attempt in range(_MAX_REPLY_RETRIES):
         try:
-            await message.reply_text(text, parse_mode=parse_mode)
+            await message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
             return
         except FloodWait as e:
             wait = int(e.value) + _FLOOD_BUFFER
@@ -114,12 +116,28 @@ async def handle_start(client: Client, message: Message) -> None:
         return
 
     name = message.from_user.first_name or "there"
+
+    # Bug 3 fix: /start includes inline keyboard menu with 3 action buttons
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💎 Join Premium", callback_data="menu:premium"),
+        ],
+        [
+            InlineKeyboardButton("📤 Send Content Anonymously", callback_data="menu:submit"),
+        ],
+        [
+            InlineKeyboardButton("🆘 Need Help", callback_data="menu:support"),
+        ],
+    ])
+
     await _safe_reply(
         message,
         f"👋 Hello, <b>{name}</b>!\n\n"
         "Send me a photo, video, document, or animation and I'll forward it "
         "to our team for review.\n\n"
-        "You'll receive a notification once a decision has been made.",
+        "You'll receive a notification once a decision has been made.\n\n"
+        "Use the menu below to get started:",
+        reply_markup=keyboard,
     )
     logger.info("/start received", extra={"ctx_user_id": message.from_user.id})
 
@@ -130,6 +148,13 @@ async def handle_start(client: Client, message: Message) -> None:
 )
 async def handle_media_submission(client: Client, message: Message) -> None:
     if not message.from_user:
+        return
+
+    # Bug 3 fix: consent gate must be enforced FIRST.
+    # check_and_gate_creator() returns False and sends the onboarding prompt
+    # if the user has not completed consent. We return immediately in that case.
+    is_verified = await check_and_gate_creator(client, message)
+    if not is_verified:
         return
 
     user_id = message.from_user.id
