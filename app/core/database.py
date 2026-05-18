@@ -265,6 +265,82 @@ class DatabaseManager:
             IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
         ])
 
+        # ── User topics ───────────────────────────────────────────────────────
+        # Bug 9: unique compound index prevents duplicate (user_id, topic_type) pairs;
+        # single topic_id index supports get_user_by_topic() lookups.
+        await db["user_topics"].create_indexes([
+            IndexModel(
+                [("user_id", ASCENDING), ("topic_type", ASCENDING)],
+                name="user_topic_unique",
+                unique=True,
+                background=True,
+            ),
+            IndexModel(
+                [("topic_id", ASCENDING)],
+                name="user_topic_id_lookup",
+                background=True,
+            ),
+        ])
+
+        # ── Support messages ──────────────────────────────────────────────────
+        # Bug 9: topic_id and user_id indexes support the support message routing queries.
+        await db["support_messages"].create_indexes([
+            IndexModel(
+                [("topic_id", ASCENDING)],
+                name="support_msg_topic",
+                background=True,
+            ),
+            IndexModel(
+                [("user_id", ASCENDING)],
+                name="support_msg_user",
+                background=True,
+            ),
+        ])
+
+        # ── Moderation audit ──────────────────────────────────────────────────
+        # Bug 9: (performed_by, timestamp DESC) for admin action history queries;
+        # content_id and target_user_id for content/user dispute lookups.
+        await db["moderation_audit"].create_indexes([
+            IndexModel(
+                [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
+                name="audit_by_admin",
+                background=True,
+            ),
+            IndexModel(
+                [("content_id", ASCENDING)],
+                name="audit_by_content",
+                background=True,
+                sparse=True,
+            ),
+            IndexModel(
+                [("target_user_id", ASCENDING)],
+                name="audit_by_target_user",
+                background=True,
+                sparse=True,
+            ),
+        ])
+
+        # ── Consent records ───────────────────────────────────────────────────
+        # Bug 9: compound index on (user_id, record_type, is_active) matches the
+        # exact query pattern in ConsentService.get_active_consent().
+        await db["consent_records"].create_indexes([
+            IndexModel(
+                [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
+                name="consent_user_type_active",
+                background=True,
+            ),
+        ])
+
+        # ── Creator profiles ──────────────────────────────────────────────────
+        # Bug 9: unique index on user_id — one profile per user, enforced at DB level.
+        await db["creator_profiles"].create_indexes([
+            IndexModel(
+                [("user_id", ASCENDING)],
+                name="creator_profile_user_unique",
+                unique=True,
+            ),
+        ])
+
         logger.info("All MongoDB indexes verified/created")
 
 
