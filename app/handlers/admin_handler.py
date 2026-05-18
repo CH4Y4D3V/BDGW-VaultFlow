@@ -10,20 +10,13 @@ from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.core.permissions import is_moderator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
-
-
-def _is_admin(user_id: int) -> bool:
-    return (
-        user_id == settings.OWNER_ID
-        or user_id in settings.ADMIN_IDS
-        or user_id in settings.SUDO_IDS
-    )
 
 
 async def _safe_reply(
@@ -64,7 +57,7 @@ async def _probe_mongodb() -> tuple[str, float | None]:
 
 @Client.on_message(filters.command("ping"))
 async def handle_ping(client: Client, message: Message) -> None:
-    if not message.from_user or not _is_admin(message.from_user.id):
+    if not message.from_user or not is_moderator(message.from_user.id):
         return
 
     db_status, latency_ms = await _probe_mongodb()
@@ -88,7 +81,7 @@ async def handle_ping(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("status"))
 async def handle_status(client: Client, message: Message) -> None:
-    if not message.from_user or not _is_admin(message.from_user.id):
+    if not message.from_user or not is_moderator(message.from_user.id):
         return
 
     try:

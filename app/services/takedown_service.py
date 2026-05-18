@@ -35,10 +35,11 @@ class TakedownService:
     ) -> str:
         """
         Submit a takedown request:
-        1. Insert takedown record
+        1. Insert takedown record with status='pending', auto_locked=True
         2. Auto-lock vault item (distribution_state = 'locked')
-        3. Pause PENDING queue jobs for this content_id
+        3. Pause PENDING/WATERMARKING queue jobs for this content_id
         4. Notify admins via LOG_CHANNEL_ID
+        5. Write audit log
         Returns: record_id
         """
         db = DatabaseManager.get_db()
@@ -48,11 +49,12 @@ class TakedownService:
             "content_id": content_id,
             "reported_by": reported_by,
             "reason": reason,
-            "type": report_type,
+            "report_type": report_type,
             "status": "pending",
             "created_at": now,
             "reviewed_by": None,
             "reviewed_at": None,
+            "auto_locked": True,
         }
         result = await db["takedown_requests"].insert_one(doc)
         record_id = str(result.inserted_id)
@@ -64,22 +66,22 @@ class TakedownService:
                 "$set": {
                     "distribution_state": "locked",
                     "locked_at": now,
-                    "lock_reason": f"takedown_report:{record_id}",
+                    "lock_reason": f"report:{record_id}",
                 }
             },
         )
 
-        # Pause PENDING queue jobs for this content
+        # Pause PENDING and WATERMARKING queue jobs for this content
         queue_result = await db[settings.QUEUE_COLLECTION].update_many(
             {
                 "content_id": content_id,
-                "status": "pending",
+                "status": {"$in": ["pending", "watermarking"]},
             },
             {
                 "$set": {
                     "status": "locked",
                     "updated_at": now,
-                    "lock_reason": f"takedown_report:{record_id}",
+                    "lock_reason": "takedown_pending",
                 }
             },
         )
@@ -95,24 +97,46 @@ class TakedownService:
             },
         )
 
+        # Write audit log
+        await get_audit().log(
+            action=AuditAction.TAKEDOWN_REQUEST,
+            performed_by=reported_by,
+            content_id=content_id,
+            details={"reason": reason, "report_type": report_type},
+        )
+
         # Notify LOG_CHANNEL_ID
         if settings.LOG_CHANNEL_ID:
             try:
                 from app.bot.client import get_bot
                 bot = get_bot()
-                await bot.send_message(
-                    chat_id=settings.LOG_CHANNEL_ID,
-                    text=(
-                        f"⚠️ <b>Takedown Report [{report_type.upper()}]</b>\n"
-                        f"Content ID: <code>{content_id}</code>\n"
-                        f"Reported by: <code>{reported_by}</code>\n"
-                        f"Reason: {reason[:300]}\n"
-                        f"Record ID: <code>{record_id}</code>\n\n"
-                        f"To execute: <code>/execute_takedown {content_id}</code>\n"
-                        f"To dismiss: <code>/dismiss_report {content_id}</code>"
-                    ),
-                    parse_mode="html",
-                )
+                for attempt in range(3):
+                    try:
+                        await bot.send_message(
+                            chat_id=settings.LOG_CHANNEL_ID,
+                            text=(
+                                f"⚠️ <b>Takedown Report [{report_type.upper()}]</b>\n"
+                                f"Content ID: <code>{content_id}</code>\n"
+                                f"Reported by: <code>{reported_by}</code>\n"
+                                f"Reason: {reason[:300]}\n"
+                                f"Record ID: <code>{record_id}</code>\n\n"
+                                f"To execute: <code>/execute_takedown {content_id}</code>\n"
+                                f"To dismiss: <code>/dismiss_report {content_id}</code>"
+                            ),
+                            parse_mode="html",
+                        )
+                        break
+                    except Exception as e:
+                        import asyncio
+                        from pyrogram.errors import FloodWait
+                        if isinstance(e, FloodWait):
+                            await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                        else:
+                            logger.warning(
+                                "Failed to notify LOG_CHANNEL_ID",
+                                extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
+                            )
+                            break
             except Exception as e:
                 logger.warning(
                     "Failed to notify LOG_CHANNEL_ID",
@@ -126,6 +150,7 @@ class TakedownService:
         Execute a takedown:
         - Set vault distribution_state = 'removed'
         - Update takedown request status = 'executed'
+        - Move locked queue jobs to dead letter
         - Write audit log
         """
         db = DatabaseManager.get_db()
@@ -147,6 +172,21 @@ class TakedownService:
             },
         )
 
+        # Move locked queue jobs to dead letter
+        from app.repositories.queue_repository import QueueRepository
+        queue_repo = QueueRepository(db)
+        locked_jobs_cursor = db[settings.QUEUE_COLLECTION].find(
+            {"content_id": content_id, "status": "locked"}
+        )
+        async for job in locked_jobs_cursor:
+            try:
+                await queue_repo.move_to_dead_letter(str(job["_id"]), "takedown_executed")
+            except Exception as e:
+                logger.warning(
+                    "Could not dead-letter locked job during takedown",
+                    extra={"ctx_job_id": str(job["_id"]), "ctx_error": str(e)},
+                )
+
         await get_audit().log(
             action=AuditAction.TAKEDOWN_EXECUTE,
             performed_by=reviewed_by,
@@ -163,8 +203,8 @@ class TakedownService:
     async def dismiss_report(self, content_id: str, reviewed_by: int) -> bool:
         """
         Dismiss a takedown request:
-        - Restore vault distribution_state = 'pending' (ModerationState.PENDING.value)
-        - Restore LOCKED queue jobs back to PENDING
+        - Restore vault distribution_state = 'pending'
+        - Restore LOCKED queue jobs (with lock_reason='takedown_pending') back to PENDING
         - Update takedown request status = 'dismissed'
         - Write audit log
         """
@@ -185,11 +225,16 @@ class TakedownService:
 
         # Restore paused queue jobs
         queue_result = await db[settings.QUEUE_COLLECTION].update_many(
-            {"content_id": content_id, "status": "locked"},
+            {
+                "content_id": content_id,
+                "status": "locked",
+                "lock_reason": "takedown_pending",
+            },
             {
                 "$set": {
                     "status": "pending",
                     "lock_reason": None,
+                    "locked_by": None,
                     "updated_at": now,
                 }
             },
@@ -226,3 +271,11 @@ class TakedownService:
             },
         )
         return True
+
+    async def get_pending_reports(self) -> list[dict]:
+        """Return all pending takedown requests sorted by created_at DESC."""
+        db = DatabaseManager.get_db()
+        cursor = db["takedown_requests"].find(
+            {"status": "pending"}
+        ).sort("created_at", -1)
+        return await cursor.to_list(length=None)

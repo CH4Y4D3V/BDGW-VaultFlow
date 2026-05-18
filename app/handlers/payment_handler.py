@@ -2,16 +2,6 @@ from __future__ import annotations
 
 """
 Payment handler — premium subscription purchase flow.
-
-Flow:
-  /start → menu:premium → plan picker
-  → payment instructions + "Submit Payment Proof" button
-  → user state persisted to DB (bot_config)
-  → next private message captured as proof
-  → proof forwarded to user's payment topic in verification hub
-  → admin: /approve_payment {user_id} {plan} {days} in that topic
-    → SubscriptionService.grant() + InviteService.generate_premium_invite()
-    → invite DM'd to user
 """
 
 import asyncio
@@ -30,6 +20,7 @@ from pyrogram.types import (
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.core.permissions import is_payment_admin
 from app.models.subscription import Plan
 from app.services.subscription_service import SubscriptionService
 from app.services.invite_service import InviteService
@@ -53,16 +44,6 @@ _PLANS = [
 ]
 
 _PLAN_MAP = {p["callback"]: p for p in _PLANS}
-
-
-# ── Admin guard ───────────────────────────────────────────────────────────────
-
-def _is_payment_admin(user_id: int) -> bool:
-    return (
-        user_id == settings.OWNER_ID
-        or user_id in settings.ADMIN_IDS
-        or user_id in settings.SUDO_IDS
-    )
 
 
 # ── DB helpers for payment state ──────────────────────────────────────────────
@@ -131,12 +112,10 @@ async def _safe_send(client: Client, user_id: int, text: str, reply_markup=None)
 
 @Client.on_callback_query(filters.regex(r"^menu:premium$") & filters.private)
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
-    """Show plan selection keyboard."""
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(p["label"], callback_data=p["callback"])]
         for p in _PLANS
     ])
-
     await callback.message.edit_text(
         "💎 <b>Choose a Premium Plan</b>\n\n"
         "Select the plan that suits you. After selecting, you'll receive payment instructions.",
@@ -150,7 +129,6 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
 
 @Client.on_callback_query(filters.regex(r"^plan:premium:(30|90|lifetime)$") & filters.private)
 async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None:
-    """Show payment instructions and 'Submit Payment Proof' button."""
     plan_data = _PLAN_MAP.get(callback.data)
     if not plan_data:
         await callback.answer("Unknown plan.", show_alert=True)
@@ -180,7 +158,6 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
 
 @Client.on_callback_query(filters.regex(r"^payment:submit:premium:(30|90|lifetime)$") & filters.private)
 async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None:
-    """Set user payment state and ask them to send proof."""
     parts = callback.data.split(":")
     plan = parts[2]
     duration = parts[3]
@@ -204,22 +181,17 @@ async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None
     & filters.private
 )
 async def handle_payment_proof_capture(client: Client, message: Message) -> None:
-    """
-    If the user has an active payment_state, treat their next private message
-    as payment proof and route it to their payment topic.
-    """
     if not message.from_user:
         return
 
     user_id = message.from_user.id
     state = await _get_payment_state(user_id)
     if not state:
-        return  # Not waiting for proof — let other handlers take it
+        return
 
     plan = state.get("plan", "premium")
     duration = state.get("duration", "?")
 
-    # Create / retrieve payment topic for this user
     topic_service = get_topic_service()
     try:
         topic_id = await topic_service.get_or_create_user_topic(client, user_id, "payment")
@@ -234,7 +206,6 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
         )
         return
 
-    # Forward proof to the topic
     try:
         await client.copy_message(
             chat_id=settings.VERIFICATION_GROUP_ID,
@@ -242,8 +213,6 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
             message_id=message.id,
             message_thread_id=topic_id,
         )
-
-        # Post a context message so admins know what this is
         await client.send_message(
             chat_id=settings.VERIFICATION_GROUP_ID,
             text=(
@@ -266,7 +235,6 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
         )
         return
 
-    # Clear state so we don't capture subsequent messages
     await _clear_payment_state(user_id)
 
     await _safe_reply(
@@ -289,12 +257,7 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
 async def handle_approve_payment(client: Client, message: Message) -> None:
-    """
-    Admin command in verification hub payment topic.
-    Usage: /approve_payment {user_id} {plan} {days}
-    Example: /approve_payment 123456789 premium 30
-    """
-    if not message.from_user or not _is_payment_admin(message.from_user.id):
+    if not message.from_user or not is_payment_admin(message.from_user.id):
         return
 
     parts = message.text.split()
@@ -326,7 +289,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
 
     admin_id = message.from_user.id
 
-    # Grant subscription
     try:
         sub = await _sub_service.grant(
             user_id=user_id,
@@ -340,7 +302,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
         logger.error("Payment approval: subscription grant failed", extra={"ctx_error": str(e)})
         return
 
-    # Generate invite link for premium chat
     invite_link = None
     premium_chat_id = settings.PREMIUM_GROUP_ID
     if premium_chat_id:
@@ -359,7 +320,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
 
-    # DM user with approval + invite link
     expiry_info = f"{days} days" if days else "Lifetime ♾️"
     dm_text = (
         f"✅ <b>Payment Approved!</b>\n\n"
@@ -374,7 +334,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
 
     dm_sent = await _safe_send(client, user_id, dm_text)
 
-    # Audit log
     await get_audit().log(
         action=AuditAction.SUB_GRANT,
         performed_by=admin_id,
@@ -386,7 +345,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
         },
     )
 
-    # Confirm in topic
     await message.reply_text(
         f"✅ <b>Approved</b>\n"
         f"👤 User <code>{user_id}</code> granted <b>{plan_str}</b> ({expiry_info})\n"

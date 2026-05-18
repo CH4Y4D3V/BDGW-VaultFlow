@@ -9,6 +9,7 @@ from pyrogram.types import ChatMemberUpdated, Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.core.permissions import is_moderator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -20,7 +21,6 @@ _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 async def _get_welcome_config(chat_id: int) -> dict | None:
-    """Fetch per-chat welcome config from bot_config collection."""
     try:
         db = DatabaseManager.get_db()
         return await db["bot_config"].find_one({"key": f"welcome:{chat_id}"})
@@ -41,7 +41,6 @@ async def _set_welcome_config(chat_id: int, text: str, enabled: bool = True) -> 
 # ── Auto-delete helper ────────────────────────────────────────────────────────
 
 async def _delete_after(message: Message, delay: float = _WELCOME_DELETE_SECONDS) -> None:
-    """Delete a message after `delay` seconds. Best-effort, never raises."""
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -64,7 +63,6 @@ async def _send_welcome(client: Client, update: ChatMemberUpdated) -> None:
     name = user.first_name or "there"
     username_mention = f"@{user.username}" if user.username else f"<a href='tg://user?id={user.id}'>{name}</a>"
 
-    # Substitute placeholders
     text = (
         welcome_text
         .replace("{name}", name)
@@ -79,7 +77,6 @@ async def _send_welcome(client: Client, update: ChatMemberUpdated) -> None:
                 text=text,
                 parse_mode=ParseMode.HTML,
             )
-            # Schedule auto-delete — runs as a background task
             asyncio.create_task(
                 _delete_after(sent, _WELCOME_DELETE_SECONDS),
                 name=f"welcome-delete-{sent.id}",
@@ -106,8 +103,6 @@ async def _send_welcome(client: Client, update: ChatMemberUpdated) -> None:
 
 @Client.on_chat_member_updated()
 async def handle_new_member_welcome(client: Client, update: ChatMemberUpdated) -> None:
-    """Trigger welcome message when a new member joins a tracked group."""
-    # Only act on joins (not leaves, kicks, or role changes)
     if not update.new_chat_member or not update.old_chat_member:
         return
 
@@ -123,7 +118,6 @@ async def handle_new_member_welcome(client: Client, update: ChatMemberUpdated) -
     if not is_join:
         return
 
-    # Don't welcome in the verification hub or vault
     managed_internal = {settings.VERIFICATION_GROUP_ID, settings.VAULT_CHANNEL_ID}
     if update.chat.id in managed_internal:
         return
@@ -133,20 +127,11 @@ async def handle_new_member_welcome(client: Client, update: ChatMemberUpdated) -
 
 # ── Admin command: /setwelcome ────────────────────────────────────────────────
 
-def _is_admin(user_id: int) -> bool:
-    return (
-        user_id == settings.OWNER_ID
-        or user_id in settings.ADMIN_IDS
-        or user_id in settings.SUDO_IDS
-    )
-
-
 @Client.on_message(filters.command("setwelcome") & (filters.group | filters.private))
 async def handle_set_welcome(client: Client, message: Message) -> None:
-    if not message.from_user or not _is_admin(message.from_user.id):
+    if not message.from_user or not is_moderator(message.from_user.id):
         return
 
-    # /setwelcome <text>   OR   reply to a message with /setwelcome
     parts = message.text.split(None, 1)
     welcome_text = parts[1].strip() if len(parts) > 1 else ""
 
@@ -172,7 +157,6 @@ async def handle_set_welcome(client: Client, message: Message) -> None:
         f"<i>Auto-deletes after {_WELCOME_DELETE_SECONDS}s.</i>",
         parse_mode=ParseMode.HTML,
     )
-    # Clean up the confirm message too
     asyncio.create_task(_delete_after(confirm, 15.0))
     asyncio.create_task(_delete_after(message, 15.0))
 
@@ -184,7 +168,7 @@ async def handle_set_welcome(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("delwelcome") & (filters.group | filters.private))
 async def handle_del_welcome(client: Client, message: Message) -> None:
-    if not message.from_user or not _is_admin(message.from_user.id):
+    if not message.from_user or not is_moderator(message.from_user.id):
         return
 
     db = DatabaseManager.get_db()

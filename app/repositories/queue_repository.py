@@ -294,6 +294,14 @@ class QueueRepository:
     # ─── Completion ───────────────────────────────────────────────────────────
 
     async def mark_completed(self, job_id: str) -> None:
+        """
+        Mark a job as completed and update vault usage stats.
+        M5: Fetches job doc first to get content_id, then calls
+        update_vault_after_delivery() to set cooldown and increment usage_count.
+        """
+        # Fetch the job doc to get content_id before updating status
+        job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
+
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
@@ -306,6 +314,19 @@ class QueueRepository:
                 }
             },
         )
+
+        # M5: update vault cooldown / usage stats after successful delivery
+        if job_doc:
+            content_id = job_doc.get("content_id")
+            if content_id:
+                try:
+                    await self.update_vault_after_delivery(content_id)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to update vault after delivery",
+                        extra={"ctx_job_id": job_id, "ctx_content_id": content_id, "ctx_error": str(e)},
+                    )
+
         logger.info("Job completed", extra={"ctx_job_id": job_id})
 
     async def mark_failed(

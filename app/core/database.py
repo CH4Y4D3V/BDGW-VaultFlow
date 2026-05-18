@@ -266,8 +266,6 @@ class DatabaseManager:
         ])
 
         # ── User topics ───────────────────────────────────────────────────────
-        # Bug 9: unique compound index prevents duplicate (user_id, topic_type) pairs;
-        # single topic_id index supports get_user_by_topic() lookups.
         await db["user_topics"].create_indexes([
             IndexModel(
                 [("user_id", ASCENDING), ("topic_type", ASCENDING)],
@@ -283,7 +281,6 @@ class DatabaseManager:
         ])
 
         # ── Support messages ──────────────────────────────────────────────────
-        # Bug 9: topic_id and user_id indexes support the support message routing queries.
         await db["support_messages"].create_indexes([
             IndexModel(
                 [("topic_id", ASCENDING)],
@@ -298,8 +295,6 @@ class DatabaseManager:
         ])
 
         # ── Moderation audit ──────────────────────────────────────────────────
-        # Bug 9: (performed_by, timestamp DESC) for admin action history queries;
-        # content_id and target_user_id for content/user dispute lookups.
         await db["moderation_audit"].create_indexes([
             IndexModel(
                 [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
@@ -321,8 +316,6 @@ class DatabaseManager:
         ])
 
         # ── Consent records ───────────────────────────────────────────────────
-        # Bug 9: compound index on (user_id, record_type, is_active) matches the
-        # exact query pattern in ConsentService.get_active_consent().
         await db["consent_records"].create_indexes([
             IndexModel(
                 [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
@@ -332,12 +325,84 @@ class DatabaseManager:
         ])
 
         # ── Creator profiles ──────────────────────────────────────────────────
-        # Bug 9: unique index on user_id — one profile per user, enforced at DB level.
         await db["creator_profiles"].create_indexes([
             IndexModel(
                 [("user_id", ASCENDING)],
                 name="creator_profile_user_unique",
                 unique=True,
+            ),
+        ])
+
+        # ── M3: submissions collection ────────────────────────────────────────
+        await db["submissions"].create_indexes([
+            IndexModel(
+                [("status", ASCENDING), ("created_at", ASCENDING)],
+                name="submissions_status_created",
+                background=True,
+            ),
+            IndexModel([("user_id", ASCENDING)], name="submissions_user", background=True),
+        ])
+
+        # ── M3: takedown_requests collection ─────────────────────────────────
+        await db["takedown_requests"].create_indexes([
+            IndexModel(
+                [("content_id", ASCENDING), ("status", ASCENDING)],
+                name="takedown_content_status",
+                background=True,
+            ),
+            IndexModel([("reported_by", ASCENDING)], name="takedown_reporter", background=True),
+            IndexModel([("created_at", DESCENDING)], name="takedown_recency", background=True),
+            IndexModel(
+                [("status", ASCENDING), ("created_at", DESCENDING)],
+                name="takedown_pending_sweep",
+                background=True,
+            ),
+        ])
+
+        # ── M3: floodwait_tracking collection ─────────────────────────────────
+        await db["floodwait_tracking"].create_indexes([
+            IndexModel(
+                [("target_id", ASCENDING), ("recorded_at", DESCENDING)],
+                name="fw_target_time",
+                background=True,
+            ),
+            IndexModel(
+                [("recorded_at", ASCENDING)],
+                name="fw_ttl",
+                background=True,
+                expireAfterSeconds=2592000,  # 30-day retention
+            ),
+        ])
+
+        # ── M3: distribution_jobs (metrics history alias) ─────────────────────
+        await db["distribution_jobs"].create_indexes([
+            IndexModel([("content_id", ASCENDING)], name="distjob_content", background=True),
+            IndexModel(
+                [("status", ASCENDING), ("created_at", ASCENDING)],
+                name="distjob_status_created",
+                background=True,
+            ),
+        ])
+
+        # ── M3: vault_items additional indexes (checksum, cooldown, submitter) ─
+        await db[settings.VAULT_COLLECTION].create_indexes([
+            IndexModel(
+                [("checksum", ASCENDING)],
+                name="vault_checksum_unique",
+                unique=True,
+                sparse=True,
+                background=True,
+            ),
+            IndexModel(
+                [("distribution_state", ASCENDING), ("cooldown_until", ASCENDING)],
+                name="vault_state_cooldown",
+                background=True,
+            ),
+            IndexModel(
+                [("submitter_user_id", ASCENDING)],
+                name="vault_submitter",
+                background=True,
+                sparse=True,
             ),
         ])
 

@@ -5,6 +5,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
+from app.core.permissions import is_moderator
 from app.moderation.verification_hub import parse_callback_data
 from app.moderation.moderation_actions import (
     execute_approve,
@@ -16,16 +17,6 @@ from app.services import submission_service
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-# ── Access control ────────────────────────────────────────────────────────────
-
-def _is_moderator(user_id: int) -> bool:
-    return (
-        user_id == settings.OWNER_ID
-        or user_id in settings.ADMIN_IDS
-        or user_id in settings.SUDO_IDS
-    )
 
 
 # ── Destination selection keyboard ────────────────────────────────────────────
@@ -77,7 +68,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
 
     # ── Gate 2: authorisation ────────────────────────────────────────────────
     moderator_id = callback.from_user.id
-    if not _is_moderator(moderator_id):
+    if not is_moderator(moderator_id):
         await callback.answer("⛔ You are not authorised to action submissions.", show_alert=True)
         logger.warning(
             "Unauthorised moderation attempt",
@@ -121,7 +112,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
-                moderator_id=moderator_id,  # P1-B: wired through
+                moderator_id=moderator_id,
             )
             return
 
@@ -178,7 +169,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
-                moderator_id=moderator_id,  # P1-B: wired through
+                moderator_id=moderator_id,
             )
         elif action == "queue":
             await execute_queue(
@@ -189,5 +180,5 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
-                moderator_id=moderator_id,  # P1-B: wired through
+                moderator_id=moderator_id,
             )

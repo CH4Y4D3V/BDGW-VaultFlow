@@ -11,5 +11,8 @@ restartPolicyMaxRetries = 10
 sleepApplication = false
 
 [deploy.healthcheck]
-type = "command"
-command = "python -c \"import app; print('ok')\""
+type = "http"
+path = "/health"
+port = 8080
+initialDelaySeconds = 15
+periodSeconds = 30

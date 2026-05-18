@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     CHANNEL_CONFIG_COLLECTION: str = "channel_config"
     PENDING_COLLECTION: str = "pending_submissions"
 
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_GROUP_ID: int
     VAULT_CHANNEL_ID: int
@@ -51,6 +54,12 @@ class Settings(BaseSettings):
     OWNER_ID: int = 0
     ADMIN_IDS: List[int] = Field(default_factory=list)
     SUDO_IDS: List[int] = Field(default_factory=list)
+
+    # ── F2: Granular role lists ───────────────────────────────────────────────
+    MODERATOR_IDS: List[int] = Field(default_factory=list)
+    SUPPORT_ADMIN_IDS: List[int] = Field(default_factory=list)
+    PAYMENT_ADMIN_IDS: List[int] = Field(default_factory=list)
+    SCHEDULER_ADMIN_IDS: List[int] = Field(default_factory=list)
 
     # ── Worker Pools ──────────────────────────────────────────────────────────
     DISPATCHER_WORKER_COUNT: int = 4
@@ -98,14 +107,10 @@ class Settings(BaseSettings):
     FFMPEG_TIMEOUT: float = 120.0
 
     # ── Watermark assets — per-destination logos ──────────────────────────────
-    # Place your PNG files at these paths before deploying.
     WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"
     WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
-
-    # Legacy single-path fallback (kept for backwards-compat; per-dest paths take priority)
     WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
 
-    # Per-destination text overlay (used when logo is unavailable)
     WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
@@ -124,7 +129,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "JSON"
 
-    @field_validator("ADMIN_IDS", "SUDO_IDS", mode="before")
+    @field_validator(
+        "ADMIN_IDS", "SUDO_IDS", "MODERATOR_IDS",
+        "SUPPORT_ADMIN_IDS", "PAYMENT_ADMIN_IDS", "SCHEDULER_ADMIN_IDS",
+        mode="before",
+    )
     @classmethod
     def _parse_id_lists(cls, v: str | List[int]) -> List[int]:
         if isinstance(v, str):

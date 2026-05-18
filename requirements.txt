@@ -12,3 +12,6 @@ pydantic-settings==2.2.1
 
 # Scheduler
 APScheduler==3.10.4
+
+# Health check HTTP server
+aiohttp>=3.9.0
