@@ -1,32 +1,14 @@
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
-
 from aiohttp import web
 
-from app.core.database import DatabaseManager
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_start_time = time.monotonic()
-
-
 async def health_handler(request: web.Request) -> web.Response:
-    uptime = round(time.monotonic() - _start_time, 1)
-    db_status = "connected"
-    try:
-        db = DatabaseManager.get_db()
-        await db.command("ping")
-    except Exception:
-        db_status = "disconnected"
-
     return web.json_response({
         "status": "ok",
-        "uptime_seconds": uptime,
-        "db": db_status,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
     })
 
 

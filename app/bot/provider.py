@@ -3,6 +3,7 @@ from typing import List, Dict
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.core.models import ModerationState
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,12 +23,16 @@ async def fetch_distribution_content() -> List[Dict]:
     now = datetime.now(timezone.utc)
 
     async for config in channels.find({"is_active": True}):
-        source_id = config["source_channel_id"]
+        dest = config.get("destination")
+        source_id = config.get("source_channel_id")
+        
+        if not dest or not source_id:
+            continue
 
         # M5: exclude locked/removed items and items still within cooldown window
         cursor = vault.find({
-            "source_channel_id": source_id,
-            "status": "pending_distribution",
+            "moderation_destination": dest,
+            "status": ModerationState.QUEUED.value,
             "distribution_state": {"$nin": ["locked", "removed"]},
             "$or": [
                 {"cooldown_until": None},

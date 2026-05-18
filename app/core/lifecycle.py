@@ -1,13 +1,16 @@
 import asyncio
+import os
 import sys
-from typing import Optional
+from typing import Optional, Any
 
 from app.config import settings
 from app.core.database import DatabaseManager
 from app.core.logger import get_logger
 from app.distribution.engine import DistributionEngine
+from app.services.channel_service import ChannelService
 from app.bot.client import get_bot
 from app.workers.subscription_worker import SubscriptionWorker
+from app.health import start_health_server
 
 logger = get_logger(__name__)
 
@@ -27,6 +30,7 @@ class AppLifecycle:
         self._engine: Optional[DistributionEngine] = None
         self._subscription_worker: Optional[SubscriptionWorker] = None
         self._bot = get_bot()
+        self._health_runner: Optional[Any] = None
         self._running = False
 
     async def start(self) -> None:
@@ -35,12 +39,23 @@ class AppLifecycle:
 
         logger.info("Bootstrapping VaultFlow runtime environment...")
 
+        # 0. Start health server immediately for Railway liveness probe
+        try:
+            port = int(os.environ.get("PORT", 8080))
+            self._health_runner = await start_health_server(port)
+        except Exception:
+            logger.error("Failed to start health server", exc_info=True)
+
         # 1. Config Validation
         self._validate_config()
 
         # 2. Database
         try:
             await DatabaseManager.connect()
+            
+            # Seed distribution channels
+            channel_service = ChannelService()
+            await channel_service.seed_channels()
         except Exception:
             logger.error("Failed to connect to MongoDB", exc_info=True)
             sys.exit(1)
@@ -130,6 +145,13 @@ class AppLifecycle:
             await DatabaseManager.disconnect()
         except Exception:
             logger.error("Error disconnecting MongoDB", exc_info=True)
+
+        # 5. Health Server
+        if self._health_runner:
+            try:
+                await self._health_runner.cleanup()
+            except Exception:
+                logger.error("Error stopping health server", exc_info=True)
 
         self._running = False
         logger.info("Shutdown complete.")

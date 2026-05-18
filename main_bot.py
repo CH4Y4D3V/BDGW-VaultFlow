@@ -15,7 +15,6 @@ async def async_main() -> None:
 
     lifecycle = AppLifecycle()
     stop_event = asyncio.Event()
-    health_runner = None
 
     def _signal_handler() -> None:
         logger.info("OS Signal trapped, marking stop event for graceful shutdown...")
@@ -31,22 +30,11 @@ async def async_main() -> None:
     try:
         await lifecycle.start()
 
-        # F1: Start HTTP health check server
-        port = int(os.environ.get("PORT", 8080))
-        health_runner = await start_health_server(port)
-
         logger.info("Main loop running. Waiting for shutdown signal.")
         await stop_event.wait()
     except asyncio.CancelledError:
         logger.info("Main loop cancelled via async propagation")
     finally:
-        # F1: Clean up health server before stopping lifecycle
-        if health_runner is not None:
-            try:
-                await health_runner.cleanup()
-            except Exception:
-                pass
-
         await lifecycle.stop()
         logger.info("Main process exit complete")
 
