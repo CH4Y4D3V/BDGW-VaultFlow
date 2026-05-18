@@ -1,4 +1,5 @@
 import random
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,15 +14,6 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Daily volume caps per destination ─────────────────────────────────────────
-# These are hard limits. The scheduler will not enqueue beyond these counts
-# within any 24-hour rolling window.
-#
-# NSFW:    70–80  posts/day  → cap at 75
-# PREMIUM: 130–150 posts/day → cap at 140
-#
-# Override via env vars DAILY_CAP_NSFW and DAILY_CAP_PREMIUM if needed.
-
 _DEFAULT_DAILY_CAPS: dict[str, int] = {
     "nsfw": 75,
     "premium": 140,
@@ -29,7 +21,6 @@ _DEFAULT_DAILY_CAPS: dict[str, int] = {
 
 
 def _get_daily_cap(dest: str) -> int:
-    """Return the daily post cap for a destination. Reads from settings if available."""
     env_key = f"DAILY_CAP_{dest.upper()}"
     cap = getattr(settings, env_key, None)
     if cap and isinstance(cap, int) and cap > 0:
@@ -38,16 +29,6 @@ def _get_daily_cap(dest: str) -> int:
 
 
 class DistributionScheduler:
-    """
-    APScheduler wrapper that ONLY inserts jobs into the queue.
-    Never directly delivers content. Dispatcher workers handle delivery.
-
-    Daily volume cap enforcement:
-      Each cycle checks how many jobs have been completed for a destination
-      in the last 24 hours. If >= daily cap, that destination is skipped
-      for the cycle. This prevents all content posting in the first few minutes.
-    """
-
     def __init__(
         self,
         db: AsyncIOMotorDatabase,
@@ -71,7 +52,6 @@ class DistributionScheduler:
             coalesce=True,
             misfire_grace_time=60,
         )
-
         self._scheduler.add_job(
             self._stale_lock_sweep,
             trigger=IntervalTrigger(seconds=120),
@@ -82,7 +62,6 @@ class DistributionScheduler:
             coalesce=True,
             misfire_grace_time=60,
         )
-
         self._scheduler.add_job(
             self._collect_metrics,
             trigger=IntervalTrigger(seconds=300),
@@ -93,7 +72,6 @@ class DistributionScheduler:
             coalesce=True,
             misfire_grace_time=60,
         )
-
         self._scheduler.add_job(
             self._deadline_sweep,
             trigger=IntervalTrigger(seconds=60),
@@ -104,7 +82,6 @@ class DistributionScheduler:
             coalesce=True,
             misfire_grace_time=30,
         )
-
         logger.info("Scheduler jobs configured")
 
     async def start(self) -> None:
@@ -128,10 +105,6 @@ class DistributionScheduler:
             logger.info("Distribution scheduler stopped gracefully")
 
     async def _get_posted_count_last_24h(self, source_channel_id: str) -> int:
-        """
-        Count how many jobs have been completed for a source channel
-        in the last 24 hours. Used to enforce daily caps.
-        """
         queue_col = self._db[settings.QUEUE_COLLECTION]
         since = datetime.now(timezone.utc) - timedelta(hours=24)
         return await queue_col.count_documents({
@@ -141,26 +114,40 @@ class DistributionScheduler:
         })
 
     async def _distribution_cycle(self) -> None:
+        # Step 1: fetch channel configs — isolated try so traceback is always visible
         try:
             logger.info("Distribution cycle started")
-
             channel_configs = await self._content_provider()
-            if not channel_configs:
-                logger.info("No active channels returned by content provider")
-                return
+        except Exception as e:
+            logger.error(
+                "Distribution cycle FAILED at content_provider step: "
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            )
+            return
 
-            total_enqueued = 0
+        if not channel_configs:
+            logger.info("No active channels returned by content provider")
+            return
 
-            for config in channel_configs:
+        total_enqueued = 0
+
+        for config in channel_configs:
+            # Step 2: validate config keys
+            try:
                 source_channel_id = config["source_channel_id"]
                 target_channel_ids = config["target_channel_ids"]
                 available_content = config.get("content", [])
+            except Exception as e:
+                logger.error(
+                    f"Distribution cycle: malformed config — {type(e).__name__}: {e}"
+                )
+                continue
 
-                if not available_content or not target_channel_ids:
-                    continue
+            if not available_content or not target_channel_ids:
+                continue
 
-                # ── Daily cap enforcement ──────────────────────────────────────
-                # Extract destination from source_channel_id: "submission_nsfw" → "nsfw"
+            # Step 3: daily cap enforcement
+            try:
                 dest = source_channel_id.replace("submission_", "")
                 daily_cap = _get_daily_cap(dest)
                 posted_today = await self._get_posted_count_last_24h(source_channel_id)
@@ -168,7 +155,7 @@ class DistributionScheduler:
 
                 if remaining_cap <= 0:
                     logger.info(
-                        "Daily cap reached — skipping destination for this cycle",
+                        "Daily cap reached — skipping",
                         extra={
                             "ctx_dest": dest,
                             "ctx_posted_today": posted_today,
@@ -186,65 +173,88 @@ class DistributionScheduler:
                         "ctx_remaining": remaining_cap,
                     },
                 )
+            except Exception as e:
+                logger.error(
+                    f"Distribution cycle: daily cap check FAILED — "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                )
+                continue
 
-                # ── Queue slot check ───────────────────────────────────────────
+            # Step 4: queue slot check
+            try:
                 pending_count = await self._queue_repo.get_channel_pending_count(
                     source_channel_id
                 )
-                # Respect both the MAX_JOBS_PER_CYCLE setting AND the remaining daily cap
                 slots_available = min(
                     settings.MAX_JOBS_PER_CYCLE - pending_count,
                     remaining_cap,
                 )
-
                 if slots_available <= 0:
                     logger.info(
-                        "Channel queue is full or daily cap reached, skipping",
+                        "No slots available, skipping",
                         extra={
                             "ctx_channel": source_channel_id,
                             "ctx_pending": pending_count,
-                            "ctx_remaining_cap": remaining_cap,
                         },
                     )
                     continue
+            except Exception as e:
+                logger.error(
+                    f"Distribution cycle: pending count check FAILED — "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                )
+                continue
 
+            # Step 5: fairness selection
+            try:
                 selected_content = await self._fairness.select_eligible_content(
                     available_content=available_content,
                     source_channel_id=source_channel_id,
                     max_count=slots_available,
                 )
+            except Exception as e:
+                logger.error(
+                    f"Distribution cycle: fairness selector FAILED — "
+                    f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                )
+                continue
 
-                group_execute_times: dict = {}
-                group_index = 0
+            # Step 6: enqueue selected content
+            group_execute_times: dict = {}
+            group_index = 0
 
-                for content_item in selected_content:
-                    group_id = content_item.get("media_group_id") or content_item.get("content_id")
+            for content_item in selected_content:
+                try:
+                    group_id = (
+                        content_item.get("media_group_id")
+                        or content_item.get("content_id")
+                    )
                     if group_id not in group_execute_times:
-                        group_execute_times[group_id] = self._randomized_execute_time(group_index)
+                        group_execute_times[group_id] = self._randomized_execute_time(
+                            group_index
+                        )
                         group_index += 1
 
-                    execute_after = group_execute_times[group_id]
                     enqueued = await self._enqueue_content(
                         content_item=content_item,
                         source_channel_id=source_channel_id,
                         target_channel_ids=target_channel_ids,
-                        execute_after=execute_after,
+                        execute_after=group_execute_times[group_id],
                         watermark_config=config.get("watermark_config"),
                     )
                     if enqueued:
                         total_enqueued += 1
+                except Exception as e:
+                    logger.error(
+                        f"Distribution cycle: enqueue item FAILED — "
+                        f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                    )
+                    continue
 
-            logger.info(
-                "Distribution cycle completed",
-                extra={"ctx_enqueued": total_enqueued},
-            )
-
-        except Exception as e:
-            logger.error(
-                "Distribution cycle failed",
-                extra={"ctx_error": str(e)},
-                exc_info=True,
-            )
+        logger.info(
+            "Distribution cycle completed",
+            extra={"ctx_enqueued": total_enqueued},
+        )
 
     async def _enqueue_content(
         self,
@@ -297,36 +307,23 @@ class DistributionScheduler:
                 },
             )
             return True
-
         except DuplicateJobError:
             logger.debug(
                 "Skipping duplicate content",
                 extra={"ctx_content_id": content_item.get("content_id")},
             )
             return False
-
         except Exception as e:
             logger.error(
-                "Failed to enqueue content",
-                extra={
-                    "ctx_content_id": content_item.get("content_id"),
-                    "ctx_error": str(e),
-                },
-                exc_info=True,
+                f"Failed to enqueue {content_item.get('content_id')} — "
+                f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             )
             return False
 
     def _randomized_execute_time(self, index: int) -> datetime:
-        """
-        Spread posts across the posting window.
-        With 75 posts/day and RANDOMIZE_POSTING_WINDOW=300s (5min),
-        posts stagger within each scheduler cycle but spread naturally
-        across the day via the daily cap + cycle intervals.
-        """
         base_delay = random.uniform(0, settings.RANDOMIZE_POSTING_WINDOW)
         stagger = index * random.uniform(5, 15)
-        total_delay = base_delay + stagger
-        return datetime.now(timezone.utc) + timedelta(seconds=total_delay)
+        return datetime.now(timezone.utc) + timedelta(seconds=base_delay + stagger)
 
     async def _stale_lock_sweep(self) -> None:
         try:
@@ -338,9 +335,7 @@ class DistributionScheduler:
                 )
         except Exception as e:
             logger.error(
-                "Stale lock sweep failed",
-                extra={"ctx_error": str(e)},
-                exc_info=True,
+                f"Stale lock sweep FAILED — {type(e).__name__}: {e}\n{traceback.format_exc()}"
             )
 
     async def _deadline_sweep(self) -> None:
@@ -348,12 +343,10 @@ class DistributionScheduler:
             overdue_jobs = await self._queue_repo.get_deadline_exceeded_jobs()
             if not overdue_jobs:
                 return
-
             logger.warning(
                 "Deadline sweep found overdue jobs",
                 extra={"ctx_count": len(overdue_jobs)},
             )
-
             for job in overdue_jobs:
                 job_id = str(job["_id"])
                 try:
@@ -361,24 +354,16 @@ class DistributionScheduler:
                         job_id, "queue_deadline_exceeded"
                     )
                     logger.warning(
-                        "Job moved to dead letter — deadline exceeded",
-                        extra={
-                            "ctx_job_id": job_id,
-                            "ctx_content_id": job.get("content_id"),
-                            "ctx_deadline": str(job.get("queue_deadline")),
-                        },
+                        "Job dead-lettered — deadline exceeded",
+                        extra={"ctx_job_id": job_id},
                     )
                 except Exception as e:
                     logger.error(
-                        "Failed to dead-letter deadline-exceeded job",
-                        extra={"ctx_job_id": job_id, "ctx_error": str(e)},
+                        f"Failed to dead-letter job {job_id} — {type(e).__name__}: {e}"
                     )
-
         except Exception as e:
             logger.error(
-                "Deadline sweep failed",
-                extra={"ctx_error": str(e)},
-                exc_info=True,
+                f"Deadline sweep FAILED — {type(e).__name__}: {e}\n{traceback.format_exc()}"
             )
 
     async def _collect_metrics(self) -> None:
@@ -395,9 +380,7 @@ class DistributionScheduler:
             )
         except Exception as e:
             logger.error(
-                "Metrics collection failed",
-                extra={"ctx_error": str(e)},
-                exc_info=True,
+                f"Metrics collection FAILED — {type(e).__name__}: {e}\n{traceback.format_exc()}"
             )
 
     def add_custom_job(
