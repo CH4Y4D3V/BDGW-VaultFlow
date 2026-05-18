@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError
+from pymongo.errors import BulkWriteError, DuplicateKeyError
 from pyrogram.client import Client
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
@@ -17,16 +18,20 @@ from app.core.models import (
     JobStatus,
     MediaType,
     ModerationDestination,
+    ModerationState,
     QueueJob,
 )
 from app.core.database import DatabaseManager
 from app.repositories.queue_repository import QueueRepository
 from app.core.exceptions import DuplicateJobError
+from app.services.audit_service import get_audit, AuditAction
+from app.services.consent_service import ConsentService
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
 _MAX_RETRIES = 3
+_consent_service = ConsentService()
 
 
 # ── Destination helpers ───────────────────────────────────────────────────────
@@ -48,11 +53,6 @@ def _destination_display_name(dest: str) -> str:
 
 
 def _get_watermark_config(dest: str) -> Optional[dict]:
-    """
-    Return per-destination watermark config.
-    Falls back to text-only if the logo file is missing.
-    Returns None if neither logo nor text is configured (watermark disabled).
-    """
     if dest == ModerationDestination.NSFW:
         logo_path = settings.WATERMARK_LOGO_PATH_NSFW
         text = settings.WATERMARK_TEXT_NSFW
@@ -79,13 +79,17 @@ def _get_watermark_config(dest: str) -> Optional[dict]:
     }
 
 
+def _compute_checksum(file_unique_id: Optional[str], file_size: int) -> Optional[str]:
+    """SHA-256 checksum for vault deduplication. Returns None if no file_unique_id."""
+    if not file_unique_id:
+        return None
+    raw = f"{file_unique_id}:{file_size}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 # ── Safe Telegram ops ─────────────────────────────────────────────────────────
 
 async def safe_dm(client: Client, user_id: int, text: str) -> None:
-    """
-    Send a DM to the uploader.
-    Swallows all exceptions so the moderation pipeline is never blocked.
-    """
     for attempt in range(_MAX_RETRIES):
         try:
             await client.send_message(
@@ -113,7 +117,6 @@ async def safe_dm(client: Client, user_id: int, text: str) -> None:
 
 
 async def safe_delete_message(client: Client, chat_id: int, message_id: int) -> None:
-    """Delete the moderation card. Best-effort."""
     try:
         await client.delete_messages(chat_id=chat_id, message_ids=message_id)
     except Exception as e:
@@ -129,7 +132,6 @@ async def safe_edit_message(
     message_id: int,
     text: str,
 ) -> None:
-    """Edit the moderation card in place. Best-effort."""
     for attempt in range(_MAX_RETRIES):
         try:
             await client.edit_message_text(
@@ -154,11 +156,6 @@ async def post_to_destination(
     messages: list,
     dest: str,
 ) -> bool:
-    """
-    Copy all messages to the destination group using copy_message().
-    copy_message() does NOT expose source chat metadata (no forward headers).
-    Returns True on success, False on terminal failure.
-    """
     group_id = _destination_group_id(dest)
     if not group_id:
         logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
@@ -198,17 +195,41 @@ async def archive_to_vault(
     client: Client,
     messages: list,
     dest: str,
+    submitter_user_id: int,
+    consent_record_id: Optional[str] = None,
 ) -> list[int]:
     """
     Two-step vault archival:
-    1. Copy every message to VAULT_CHANNEL_ID using copy_message() — no forward headers.
-    2. Upsert metadata into MongoDB vault collection with destination + vault_message_id.
+    1. copy_message() to VAULT_CHANNEL_ID
+    2. Upsert metadata to MongoDB with:
+       - ModerationState enum values (not raw strings)
+       - distribution_state field (default: PENDING)
+       - submitter_user_id + consent_record_id for takedown traceability
+       - checksum for deduplication (M4)
+       - cooldown / usage fields (M5)
 
-    Returns list of vault_message_ids (0 for any message that failed to copy).
-    Never raises — failures are logged so the moderation flow continues.
+    Returns list of vault_message_ids. Never raises.
     """
     if not messages:
         return []
+
+    # P1-D: fetch consent_record_id if not provided
+    resolved_consent_id = consent_record_id
+    if resolved_consent_id is None and submitter_user_id:
+        try:
+            consent_doc = await _consent_service.get_active_consent(submitter_user_id)
+            if consent_doc:
+                resolved_consent_id = str(consent_doc["_id"])
+            else:
+                logger.warning(
+                    "No active consent record found for submitter",
+                    extra={"ctx_user_id": submitter_user_id},
+                )
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch consent record — proceeding without it",
+                extra={"ctx_user_id": submitter_user_id, "ctx_error": str(e)},
+            )
 
     vault_message_ids: list[int] = []
 
@@ -218,7 +239,6 @@ async def archive_to_vault(
             copied_id = 0
             for attempt in range(_MAX_RETRIES):
                 try:
-                    # copy_message returns a Message object — use .id for vault_message_id
                     result = await client.copy_message(
                         chat_id=settings.VAULT_CHANNEL_ID,
                         from_chat_id=msg.chat.id,
@@ -250,6 +270,7 @@ async def archive_to_vault(
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
     operations = []
+    skipped_duplicates = 0
 
     for i, msg in enumerate(messages):
         media = None
@@ -261,9 +282,13 @@ async def archive_to_vault(
 
         file_unique_id = getattr(media, "file_unique_id", None) if media else None
         file_id = getattr(media, "file_id", None) if media else None
+        file_size = getattr(media, "file_size", 0) if media else 0
         media_type_str = msg.media.value if msg.media else "text"
         content_id = f"{msg.chat.id}_{msg.id}"
         vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
+
+        # M4: compute checksum for true deduplication
+        checksum = _compute_checksum(file_unique_id, file_size or 0)
 
         operations.append(UpdateOne(
             {"content_id": content_id},
@@ -276,14 +301,26 @@ async def archive_to_vault(
                     "media_type": media_type_str,
                     "file_id": file_id,
                     "file_unique_id": file_unique_id,
+                    "file_size": file_size,
                     "caption": msg.caption or msg.text or "",
                     "created_at": now,
+                    # M5: cooldown fields initialized to safe defaults
+                    "usage_count": 0,
+                    "last_posted_at": None,
+                    "cooldown_until": None,
                 },
                 "$set": {
                     "vault_message_id": vault_msg_id or None,
                     "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
                     "moderation_destination": dest,
-                    "status": "pending_distribution",
+                    # P1-A: use ModerationState enum values — no raw strings
+                    "status": ModerationState.QUEUED.value,
+                    "distribution_state": ModerationState.PENDING.value,
+                    # P1-D: submitter identity for takedown traceability
+                    "submitter_user_id": submitter_user_id,
+                    "consent_record_id": resolved_consent_id,
+                    # M4: checksum for deduplication
+                    "checksum": checksum,
                     "updated_at": now,
                     "metadata": {
                         "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
@@ -296,13 +333,14 @@ async def archive_to_vault(
 
     if operations:
         try:
-            result = await vault_col.bulk_write(operations, ordered=False)
+            await vault_col.bulk_write(operations, ordered=False)
             logger.info(
                 "Vault archival complete",
                 extra={
                     "ctx_count": len(operations),
                     "ctx_dest": dest,
                     "ctx_vault_copied": len([v for v in vault_message_ids if v]),
+                    "ctx_submitter": submitter_user_id,
                 },
             )
         except BulkWriteError as e:
@@ -312,6 +350,20 @@ async def archive_to_vault(
             )
         except Exception:
             logger.error("Vault MongoDB write failed", exc_info=True)
+
+    # P1-B: audit log for vault archival
+    try:
+        await get_audit().log(
+            action=AuditAction.VAULT_ARCHIVE,
+            performed_by=submitter_user_id,
+            details={
+                "destination": dest,
+                "message_count": len(messages),
+                "consent_record_id": resolved_consent_id,
+            },
+        )
+    except Exception as e:
+        logger.warning("Audit log failed for vault archive", extra={"ctx_error": str(e)})
 
     return vault_message_ids
 
@@ -323,11 +375,6 @@ async def enqueue_for_distribution(
     dest: str,
     submitter_user_id: int,
 ) -> bool:
-    """
-    Enqueue a MODERATED-priority distribution job with correct watermark config.
-    Queue deadline is enforced via queue_deadline field.
-    source_channel_id is set to "submission_{dest}" — NOT the submitter's DM chat ID.
-    """
     db = DatabaseManager.get_db()
     queue_repo = QueueRepository(db)
 
@@ -349,9 +396,6 @@ async def enqueue_for_distribution(
         else f"mod_{messages[0].chat.id}_{messages[0].id}"
     )
 
-    # Bug 5 fix: use a stable, meaningful source_channel_id that is NOT the submitter DM.
-    # The submitter's DM chat ID is private metadata — it must never leak into the
-    # distribution pipeline as a "source channel".
     source_channel_id = f"submission_{dest}"
 
     for i, msg in enumerate(messages):
@@ -371,7 +415,6 @@ async def enqueue_for_distribution(
             media_type = MediaType.TEXT
 
         item_content_id = f"{content_id}_{i}" if len(messages) > 1 else content_id
-
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
         job = QueueJob(
@@ -417,7 +460,6 @@ async def enqueue_for_distribution(
             "ctx_deadline": deadline.isoformat(),
             "ctx_count": len(messages),
             "ctx_watermark": watermark_required,
-            "ctx_source_channel_id": source_channel_id,
         },
     )
     return True
@@ -433,22 +475,24 @@ async def execute_approve(
     mod_card_chat_id: int,
     mod_card_message_id: int,
     moderator_name: str,
+    moderator_id: int,  # P1-B: required for audit
 ) -> None:
     """
     Approve flow:
-    1. Archive to vault (copy_message to Telegram channel + MongoDB)
-    2. Verify vault write succeeded — abort with error card if all vault_ids are zero
-    3. Post immediately to destination group via copy_message
+    1. Archive to vault (with submitter_user_id + consent_record_id)
+    2. Verify vault write succeeded
+    3. Post immediately to destination group
     4. Delete moderation card
     5. Notify uploader
+    6. Write audit log (P1-B)
     """
     display_name = _destination_display_name(dest)
 
-    vault_ids = await archive_to_vault(client, messages, dest)
+    vault_ids = await archive_to_vault(
+        client, messages, dest,
+        submitter_user_id=submitter_user_id,
+    )
 
-    # Bug 4 fix: verify vault write before proceeding.
-    # If every vault_id is 0, the Telegram copy failed for all messages.
-    # Edit the card with an error and bail — do NOT post to destination or delete card.
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(
@@ -494,9 +538,24 @@ async def execute_approve(
         f"✅ Your content was approved.\n\nDestination:\n{display_name}",
     )
 
+    # P1-B: audit log
+    await get_audit().log(
+        action=AuditAction.APPROVE,
+        performed_by=moderator_id,
+        details={
+            "destination": dest,
+            "submitter_user_id": submitter_user_id,
+            "vault_message_ids": vault_ids,
+        },
+    )
+
     logger.info(
         "Approve flow complete",
-        extra={"ctx_submitter": submitter_user_id, "ctx_dest": dest, "ctx_moderator": moderator_name},
+        extra={
+            "ctx_submitter": submitter_user_id,
+            "ctx_dest": dest,
+            "ctx_moderator": moderator_id,
+        },
     )
 
 
@@ -508,20 +567,24 @@ async def execute_queue(
     mod_card_chat_id: int,
     mod_card_message_id: int,
     moderator_name: str,
+    moderator_id: int,  # P1-B: required for audit
 ) -> None:
     """
     Queue flow:
-    1. Archive to vault (copy_message to Telegram channel + MongoDB)
-    2. Verify vault write succeeded — abort with error card if all vault_ids are zero
-    3. Enqueue MODERATED-priority job (with watermark config, deadline: QUEUE_DEADLINE_HOURS)
+    1. Archive to vault (with submitter_user_id + consent_record_id)
+    2. Verify vault write succeeded
+    3. Enqueue MODERATED-priority job
     4. Delete moderation card
     5. Notify uploader
+    6. Write audit log (P1-B)
     """
     display_name = _destination_display_name(dest)
 
-    vault_ids = await archive_to_vault(client, messages, dest)
+    vault_ids = await archive_to_vault(
+        client, messages, dest,
+        submitter_user_id=submitter_user_id,
+    )
 
-    # Bug 4 fix: same vault verification guard as execute_approve
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(
@@ -561,12 +624,22 @@ async def execute_queue(
         f"✅ Your content has been queued for posting.\n\nDestination:\n{display_name}",
     )
 
+    # P1-B: audit log
+    await get_audit().log(
+        action=AuditAction.QUEUE,
+        performed_by=moderator_id,
+        details={
+            "destination": dest,
+            "submitter_user_id": submitter_user_id,
+        },
+    )
+
     logger.info(
         "Queue flow complete",
         extra={
             "ctx_submitter": submitter_user_id,
             "ctx_dest": dest,
-            "ctx_moderator": moderator_name,
+            "ctx_moderator": moderator_id,
             "ctx_deadline_hours": settings.QUEUE_DEADLINE_HOURS,
         },
     )
@@ -582,10 +655,10 @@ async def execute_reject(
 ) -> None:
     """
     Reject flow:
-    - Content stays in verification group (not deleted)
-    - Not archived to vault
-    - Not distributed
+    - Content not archived to vault, not distributed
+    - Moderation card updated
     - Uploader notified
+    - Audit log written (P1-B)
     """
     await safe_edit_message(
         client,
@@ -599,6 +672,15 @@ async def execute_reject(
         submitter_user_id,
         "❌ Your submission was rejected by moderation.",
     )
+
+    # P1-B: audit log
+    await get_audit().log(
+        action=AuditAction.REJECT,
+        performed_by=moderator_id,
+        target_user_id=submitter_user_id,
+        details={"submitter_user_id": submitter_user_id},
+    )
+
     logger.info(
         "Reject flow complete",
         extra={"ctx_submitter": submitter_user_id, "ctx_moderator": moderator_id},

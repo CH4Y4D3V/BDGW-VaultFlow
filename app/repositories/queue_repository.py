@@ -21,10 +21,6 @@ class QueueRepository:
     # ─── Enqueue ─────────────────────────────────────────────────────────────
 
     async def enqueue(self, job: QueueJob) -> str:
-        """
-        Insert a new job. Raises DuplicateJobError if the same content_id
-        is already pending/processing for any of the same target channels.
-        """
         doc = job.model_dump(by_alias=False, exclude={"id"})
         doc["created_at"] = datetime.now(timezone.utc)
         doc["updated_at"] = datetime.now(timezone.utc)
@@ -35,7 +31,7 @@ class QueueRepository:
             raise DuplicateJobError(
                 f"Active job already exists for content_id={job.content_id}"
             )
-            
+
         job_id = str(result.inserted_id)
         logger.info(
             "Job enqueued",
@@ -46,6 +42,29 @@ class QueueRepository:
             },
         )
         return job_id
+
+    # ─── Vault state cross-check ──────────────────────────────────────────────
+
+    async def skip_locked_vault_items(self, content_ids: list[str]) -> set[str]:
+        """
+        Query the vault collection for any content_ids that are locked or removed.
+        Returns the set of content_ids that should be skipped by the dispatcher.
+        """
+        if not content_ids:
+            return set()
+
+        vault = self._db[settings.VAULT_COLLECTION]
+        cursor = vault.find(
+            {
+                "content_id": {"$in": content_ids},
+                "distribution_state": {"$in": ["locked", "removed"]},
+            },
+            {"content_id": 1},
+        )
+        locked: set[str] = set()
+        async for doc in cursor:
+            locked.add(doc["content_id"])
+        return locked
 
     # ─── Claim / Lock ─────────────────────────────────────────────────────────
 
@@ -75,18 +94,20 @@ class QueueRepository:
     async def claim_next(self, worker_id: str, batch_size: int = 1) -> List[dict]:
         """
         Atomically claim the next N pending jobs.
-        If a claimed job is part of a media group, atomically claim the ENTIRE group
-        so they are processed and dispatched as an atomic album.
+        Cross-checks vault collection to skip locked/removed items.
+        If a claimed job is part of a media group, atomically claims the ENTIRE group.
         """
         now = datetime.now(timezone.utc)
         claimed = []
         claimed_ids = []
+        skipped_content_ids: set[str] = set()
 
         for _ in range(batch_size):
             doc = await self._queue.find_one_and_update(
                 {
                     "status": JobStatus.PENDING,
                     "_id": {"$nin": claimed_ids},
+                    "content_id": {"$nin": list(skipped_content_ids)},
                     "$or": [
                         {"execute_after": None},
                         {"execute_after": {"$lte": now}},
@@ -103,21 +124,47 @@ class QueueRepository:
                 sort=[("priority", -1), ("execute_after", 1), ("_id", 1)],
                 return_document=True,
             )
-            
+
             if not doc:
                 break
-                
+
+            content_id = doc.get("content_id", "")
+
+            # ── Vault cross-check ─────────────────────────────────────────────
+            locked_set = await self.skip_locked_vault_items([content_id])
+            if content_id in locked_set:
+                await self._queue.update_one(
+                    {"_id": doc["_id"]},
+                    {
+                        "$set": {
+                            "status": JobStatus.PENDING,
+                            "locked_by": None,
+                            "locked_at": None,
+                            "updated_at": now,
+                        }
+                    },
+                )
+                skipped_content_ids.add(content_id)
+                claimed_ids.append(doc["_id"])
+                logger.debug(
+                    "Skipping job — vault item is locked/removed",
+                    extra={"ctx_content_id": content_id, "ctx_worker": worker_id},
+                )
+                continue
+
             group_id = doc.get("metadata", {}).get("media_group_id")
             if group_id:
-                # Ensure no other items in the group are still watermarking or processing
                 unready_count = await self._queue.count_documents({
                     "metadata.media_group_id": group_id,
                     "_id": {"$ne": doc["_id"]},
-                    "status": {"$in": [JobStatus.WATERMARKING, JobStatus.LOCKED, JobStatus.PROCESSING]}
+                    "status": {"$in": [
+                        JobStatus.WATERMARKING,
+                        JobStatus.LOCKED,
+                        JobStatus.PROCESSING,
+                    ]},
                 })
-                
+
                 if unready_count > 0:
-                    # Rollback this claim, the album is not fully ready
                     await self._queue.update_one(
                         {"_id": doc["_id"]},
                         {
@@ -127,12 +174,11 @@ class QueueRepository:
                                 "locked_at": None,
                                 "updated_at": now,
                             }
-                        }
+                        },
                     )
                     claimed_ids.append(doc["_id"])
                     continue
-                
-                # Atomically lock the rest of the media group
+
                 result = await self._queue.update_many(
                     {
                         "status": JobStatus.PENDING,
@@ -146,9 +192,9 @@ class QueueRepository:
                             "locked_at": now,
                             "updated_at": now,
                         }
-                    }
+                    },
                 )
-                
+
                 claimed.append(doc)
                 claimed_ids.append(doc["_id"])
 
@@ -157,9 +203,9 @@ class QueueRepository:
                         "status": JobStatus.LOCKED,
                         "locked_by": worker_id,
                         "metadata.media_group_id": group_id,
-                        "_id": {"$ne": doc["_id"]}
+                        "_id": {"$ne": doc["_id"]},
                     }).sort([("metadata.message_id", 1), ("_id", 1)])
-                    
+
                     async for sibling in cursor:
                         claimed.append(sibling)
                         claimed_ids.append(sibling["_id"])
@@ -183,7 +229,6 @@ class QueueRepository:
         return result.modified_count > 0
 
     async def release_claim(self, job_id: str) -> None:
-        """Revert a locked/processing job back to pending (e.g., lock contention, graceful shutdown)."""
         doc = await self._queue.find_one({"_id": ObjectId(job_id)})
         if not doc:
             return
@@ -285,7 +330,7 @@ class QueueRepository:
             job_doc.get("watermark_required") and not job_doc.get("watermark_applied")
         ) else JobStatus.PENDING
 
-        update_ops = {
+        update_ops: dict = {
             "$set": {
                 "status": next_status,
                 "last_error": error,
@@ -349,15 +394,11 @@ class QueueRepository:
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
     async def recover_stale_processing_jobs(self) -> int:
-        """
-        On worker startup or crash recovery sweep.
-        Jobs that have been in LOCKED/PROCESSING for too long get reset.
-        """
         threshold = datetime.now(timezone.utc) - timedelta(
             seconds=settings.STALE_LOCK_THRESHOLD_SECONDS
         )
         now = datetime.now(timezone.utc)
-        
+
         result_dispatch = await self._queue.update_many(
             {
                 "status": {"$in": [JobStatus.LOCKED, JobStatus.PROCESSING]},
@@ -372,7 +413,7 @@ class QueueRepository:
                 }
             },
         )
-        
+
         result_wm = await self._queue.update_many(
             {
                 "status": JobStatus.WATERMARKING,
@@ -386,7 +427,7 @@ class QueueRepository:
                 }
             },
         )
-        
+
         total = result_dispatch.modified_count + result_wm.modified_count
         if total:
             logger.warning(
@@ -394,6 +435,42 @@ class QueueRepository:
                 extra={"ctx_count": total},
             )
         return total
+
+    # ─── Deadline Enforcement ─────────────────────────────────────────────────
+
+    async def get_deadline_exceeded_jobs(self) -> list[dict]:
+        """
+        Return all jobs where queue_deadline has passed and status is still actionable.
+        Called by the scheduler deadline sweep every 60 seconds.
+        """
+        now = datetime.now(timezone.utc)
+        cursor = self._queue.find({
+            "status": {"$in": [JobStatus.PENDING, JobStatus.WATERMARKING]},
+            "queue_deadline": {"$ne": None, "$lt": now},
+        })
+        return await cursor.to_list(length=None)
+
+    # ─── Vault delivery update ────────────────────────────────────────────────
+
+    async def update_vault_after_delivery(self, content_id: str) -> None:
+        """
+        After successful dispatch, increment usage count, set last_posted_at,
+        and enforce cooldown to prevent reposting within REPOST_PREVENTION_HOURS.
+        """
+        now = datetime.now(timezone.utc)
+        cooldown_until = now + timedelta(hours=settings.REPOST_PREVENTION_HOURS)
+
+        vault = self._db[settings.VAULT_COLLECTION]
+        await vault.update_one(
+            {"content_id": content_id},
+            {
+                "$inc": {"usage_count": 1},
+                "$set": {
+                    "last_posted_at": now,
+                    "cooldown_until": cooldown_until,
+                },
+            },
+        )
 
     # ─── Scheduler Queries ────────────────────────────────────────────────────
 
@@ -409,7 +486,7 @@ class QueueRepository:
             },
             {"content_id": 1},
         )
-        ids = set()
+        ids: set[str] = set()
         async for doc in cursor:
             ids.add(doc["content_id"])
         return ids

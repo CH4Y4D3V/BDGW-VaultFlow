@@ -31,11 +31,10 @@ def _is_moderator(user_id: int) -> bool:
 # ── Destination selection keyboard ────────────────────────────────────────────
 
 def _destination_keyboard(action: str, submitter_id: int, msg_id: int) -> InlineKeyboardMarkup:
-    """Build the second-step destination picker keyboard."""
     if action == "approve":
         label_nsfw = "🔞 NSFW"
         label_premium = "⭐ Premium"
-    else:  # queue
+    else:
         label_nsfw = "🔞 NSFW Queue"
         label_premium = "⭐ Premium Queue"
 
@@ -60,12 +59,12 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
     """
     Two-step moderation state machine.
 
-    Step 1 — moderator clicks Approve / Queue / Reject:
-      - Reject: executes immediately (no destination needed)
-      - Approve / Queue: edits card to destination picker
+    Step 1 — Approve / Queue / Reject:
+      - Reject: executes immediately
+      - Approve / Queue: show destination picker
 
-    Step 2 — moderator picks NSFW / Premium:
-      - Executes the full approve or queue flow
+    Step 2 — Pick NSFW / Premium:
+      - Execute the full approve or queue flow with moderator_id for audit.
     """
     # ── Gate 1: correct chat ─────────────────────────────────────────────────
     if callback.message.chat.id != settings.VERIFICATION_GROUP_ID:
@@ -107,7 +106,6 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
         msg_id = parsed["msg_id"]
 
         if action == "reject":
-            # Reject needs no destination — execute immediately
             entry = submission_service.pop_pending(msg_id)
             if entry is None:
                 await callback.answer(
@@ -123,11 +121,10 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
-                moderator_id=moderator_id,
+                moderator_id=moderator_id,  # P1-B: wired through
             )
             return
 
-        # Approve or Queue — need destination, show picker
         prompt = (
             "Select destination:" if action == "approve"
             else "Queue for which destination?"
@@ -157,7 +154,6 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
         submitter_id = parsed["submitter_id"]
         msg_id = parsed["msg_id"]
 
-        # Pop the pending entry — this is the point of no return
         entry = submission_service.pop_pending(msg_id)
         if entry is None:
             await callback.answer(
@@ -182,6 +178,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
+                moderator_id=moderator_id,  # P1-B: wired through
             )
         elif action == "queue":
             await execute_queue(
@@ -192,4 +189,5 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_chat_id=chat_id,
                 mod_card_message_id=card_message_id,
                 moderator_name=moderator_name,
+                moderator_id=moderator_id,  # P1-B: wired through
             )

@@ -18,10 +18,6 @@ class DistributionScheduler:
     """
     APScheduler wrapper that ONLY inserts jobs into the queue.
     Never directly delivers content. Dispatcher workers handle delivery.
-
-    Content source (channels, targets, content metadata) must be provided
-    via the content_provider_callback injected at construction time.
-    This keeps the scheduler decoupled from Telegram/content layer.
     """
 
     def __init__(
@@ -46,7 +42,7 @@ class DistributionScheduler:
             id="distribution_cycle",
             name="Distribution Cycle",
             replace_existing=True,
-            max_instances=1,  # Prevent concurrent scheduler runs
+            max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
         )
@@ -75,6 +71,18 @@ class DistributionScheduler:
             misfire_grace_time=60,
         )
 
+        # P1-C: Queue deadline enforcement — runs every 60 seconds
+        self._scheduler.add_job(
+            self._deadline_sweep,
+            trigger=IntervalTrigger(seconds=60),
+            id="deadline_sweep",
+            name="Queue Deadline Sweep",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+
         logger.info("Scheduler jobs configured")
 
     async def start(self) -> None:
@@ -95,12 +103,6 @@ class DistributionScheduler:
             logger.info("Distribution scheduler stopped gracefully")
 
     async def _distribution_cycle(self) -> None:
-        """
-        Main scheduling cycle.
-        1. Fetches available channels and their content from the content provider
-        2. Applies fairness selection
-        3. Inserts queue jobs with randomized execute_after times
-        """
         try:
             logger.info("Distribution cycle started")
 
@@ -119,7 +121,6 @@ class DistributionScheduler:
                 if not available_content or not target_channel_ids:
                     continue
 
-                # Check how many pending jobs already exist for this channel
                 pending_count = await self._queue_repo.get_channel_pending_count(
                     source_channel_id
                 )
@@ -140,10 +141,10 @@ class DistributionScheduler:
                     max_count=slots_available,
                 )
 
-                group_execute_times = {}
+                group_execute_times: dict = {}
                 group_index = 0
 
-                for i, content_item in enumerate(selected_content):
+                for content_item in selected_content:
                     group_id = content_item.get("media_group_id") or content_item.get("content_id")
                     if group_id not in group_execute_times:
                         group_execute_times[group_id] = self._randomized_execute_time(group_index)
@@ -190,10 +191,6 @@ class DistributionScheduler:
 
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
-        # Bug 8 fix: QueueJob field is declared as `id` with alias `_id`.
-        # The correct Pydantic kwarg is `id=None`, NOT `_id=None`.
-        # Passing `_id=None` would either be ignored (Pydantic v2 by_alias=False construction)
-        # or raise a TypeError — it is never correct when constructing via Python kwargs.
         job = QueueJob(
             content_id=content_item["content_id"],
             source_channel_id=source_channel_id,
@@ -247,12 +244,7 @@ class DistributionScheduler:
             return False
 
     def _randomized_execute_time(self, index: int) -> datetime:
-        """
-        Spread jobs across the posting window to avoid burst posting.
-        Each successive job gets a random delay up to RANDOMIZE_POSTING_WINDOW seconds.
-        """
         base_delay = random.uniform(0, settings.RANDOMIZE_POSTING_WINDOW)
-        # Stagger multiple jobs to prevent all firing at once
         stagger = index * random.uniform(5, 15)
         total_delay = base_delay + stagger
         return datetime.now(timezone.utc) + timedelta(seconds=total_delay)
@@ -268,6 +260,48 @@ class DistributionScheduler:
         except Exception as e:
             logger.error(
                 "Stale lock sweep failed",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )
+
+    async def _deadline_sweep(self) -> None:
+        """
+        P1-C: Enforce queue_deadline on jobs.
+        Any job still PENDING or WATERMARKING past its deadline is moved to dead letter.
+        """
+        try:
+            overdue_jobs = await self._queue_repo.get_deadline_exceeded_jobs()
+            if not overdue_jobs:
+                return
+
+            logger.warning(
+                "Deadline sweep found overdue jobs",
+                extra={"ctx_count": len(overdue_jobs)},
+            )
+
+            for job in overdue_jobs:
+                job_id = str(job["_id"])
+                try:
+                    await self._queue_repo.move_to_dead_letter(
+                        job_id, "queue_deadline_exceeded"
+                    )
+                    logger.warning(
+                        "Job moved to dead letter — deadline exceeded",
+                        extra={
+                            "ctx_job_id": job_id,
+                            "ctx_content_id": job.get("content_id"),
+                            "ctx_deadline": str(job.get("queue_deadline")),
+                        },
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to dead-letter deadline-exceeded job",
+                        extra={"ctx_job_id": job_id, "ctx_error": str(e)},
+                    )
+
+        except Exception as e:
+            logger.error(
+                "Deadline sweep failed",
                 extra={"ctx_error": str(e)},
                 exc_info=True,
             )
@@ -298,7 +332,6 @@ class DistributionScheduler:
         _id: str,
         **kwargs,
     ) -> None:
-        """Allow external registration of custom scheduler jobs."""
         self._scheduler.add_job(
             func,
             trigger=trigger,
