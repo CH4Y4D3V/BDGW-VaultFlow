@@ -1,23 +1,17 @@
-from datetime import datetime, timezone
-from typing import List, Dict
-
-from app.config import settings
-from app.core.database import DatabaseManager
-from app.core.models import ModerationState
-from app.utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-
-async def fetch_distribution_content() -> List[Dict]:
-    """
-    Called by DistributionScheduler to fetch valid vault content.
-    Provides the data boundary ensuring only fully ingested, non-duplicate,
-    non-locked, non-cooldown content is released to the fairness selector.
-    """
+# app/bot/provider.py  (replace the existing function)
+async def fetch_distribution_content() -> list[dict]:
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
     channels = db[getattr(settings, "CHANNEL_CONFIG_COLLECTION", "channel_config")]
+
+    # Diagnostic: count total active channel configs
+    total_configs = await channels.count_documents({"is_active": True})
+    if total_configs == 0:
+        logger.warning(
+            "fetch_distribution_content: channel_config collection has NO active channels. "
+            "Seed missing — check NSFW_GROUP_ID / PREMIUM_GROUP_ID env vars."
+        )
+        return []
 
     active_configs = []
     now = datetime.now(timezone.utc)
@@ -25,11 +19,19 @@ async def fetch_distribution_content() -> List[Dict]:
     async for config in channels.find({"is_active": True}):
         dest = config.get("destination")
         source_id = config.get("source_channel_id")
-        
+
         if not dest or not source_id:
+            logger.warning(
+                "Skipping malformed channel config",
+                extra={"ctx_config_id": str(config.get("_id"))},
+            )
             continue
 
-        # M5: exclude locked/removed items and items still within cooldown window
+        # Diagnostic: count eligible vault items before filtering
+        total_vault = await vault.count_documents(
+            {"moderation_destination": dest, "status": ModerationState.QUEUED.value}
+        )
+
         cursor = vault.find({
             "moderation_destination": dest,
             "status": ModerationState.QUEUED.value,
@@ -42,6 +44,15 @@ async def fetch_distribution_content() -> List[Dict]:
         }).sort("message_id", 1).limit(getattr(settings, "MAX_JOBS_PER_CYCLE", 100))
 
         content = await cursor.to_list(length=None)
+
+        logger.info(
+            "Channel provider query",
+            extra={
+                "ctx_dest": dest,
+                "ctx_total_queued": total_vault,
+                "ctx_eligible": len(content),
+            },
+        )
 
         if content:
             active_configs.append({

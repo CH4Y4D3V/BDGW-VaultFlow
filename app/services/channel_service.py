@@ -1,3 +1,4 @@
+# app/services/channel_service.py
 from __future__ import annotations
 
 from app.config import settings
@@ -14,9 +15,15 @@ class ChannelService:
         self._repo = ChannelRepository()
 
     async def seed_channels(self) -> None:
-        """Seed default distribution channels from environment variables."""
-        # Seed NSFW
-        if settings.NSFW_GROUP_ID:
+        """
+        Seed distribution channels from env vars.
+        Fails loudly if neither destination is configured — a misconfigured
+        channel silently kills the entire distribution pipeline.
+        """
+        seeded: list[str] = []
+        warnings: list[str] = []
+
+        if settings.NSFW_GROUP_ID and settings.NSFW_GROUP_ID != 0:
             await self._repo.upsert_channel(
                 destination=ModerationDestination.NSFW.value,
                 doc={
@@ -27,9 +34,11 @@ class ChannelService:
                     "watermark_config": _get_watermark_config(ModerationDestination.NSFW),
                 },
             )
+            seeded.append(f"NSFW → {settings.NSFW_GROUP_ID}")
+        else:
+            warnings.append("NSFW_GROUP_ID not set or zero — NSFW channel NOT seeded")
 
-        # Seed Premium
-        if settings.PREMIUM_GROUP_ID:
+        if settings.PREMIUM_GROUP_ID and settings.PREMIUM_GROUP_ID != 0:
             await self._repo.upsert_channel(
                 destination=ModerationDestination.PREMIUM.value,
                 doc={
@@ -40,4 +49,22 @@ class ChannelService:
                     "watermark_config": _get_watermark_config(ModerationDestination.PREMIUM),
                 },
             )
-        logger.info("Distribution channels seeded successfully")
+            seeded.append(f"PREMIUM → {settings.PREMIUM_GROUP_ID}")
+        else:
+            warnings.append("PREMIUM_GROUP_ID not set or zero — PREMIUM channel NOT seeded")
+
+        for w in warnings:
+            logger.warning(w)
+
+        if not seeded:
+            logger.error(
+                "CRITICAL: No distribution channels seeded. "
+                "Bot will start but distribution pipeline is dead. "
+                "Set NSFW_GROUP_ID and/or PREMIUM_GROUP_ID in your environment."
+            )
+            return
+
+        logger.info(
+            "Distribution channels seeded",
+            extra={"ctx_channels": seeded},
+        )
