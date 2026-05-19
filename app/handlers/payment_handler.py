@@ -192,7 +192,7 @@ async def _safe_send(
 
 # ── Callback: menu:premium ────────────────────────────────────────────────────
 
-@Client.on_callback_query(filters.regex(r"^menu:premium$") & filters.private)
+@Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
     logger.info(
         "HANDLER: handle_premium_menu entered",
@@ -235,7 +235,7 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
 # ── Callback: plan:{plan}:{duration} ─────────────────────────────────────────
 
 @Client.on_callback_query(
-    filters.regex(r"^plan:premium:(30|90|lifetime)$") & filters.private
+    filters.regex(r"^plan:premium:(30|90|lifetime)$")
 )
 async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None:
     logger.info(
@@ -295,7 +295,7 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
 # ── Callback: payment:submit:{plan}:{duration} ────────────────────────────────
 
 @Client.on_callback_query(
-    filters.regex(r"^payment:submit:premium:(30|90|lifetime)$") & filters.private
+    filters.regex(r"^payment:submit:premium:(30|90|lifetime)$")
 )
 async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None:
     logger.info(

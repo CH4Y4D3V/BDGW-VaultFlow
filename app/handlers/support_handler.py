@@ -74,7 +74,7 @@ async def _safe_reply(
 
 # ── Callback: menu:support ────────────────────────────────────────────────────
 
-@Client.on_callback_query(filters.regex(r"^menu:support$") & filters.private)
+@Client.on_callback_query(filters.regex(r"^menu:support$"))
 async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     logger.info(
         "HANDLER: handle_support_menu entered",

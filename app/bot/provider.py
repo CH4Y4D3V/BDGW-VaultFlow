@@ -16,15 +16,21 @@ async def fetch_distribution_content() -> List[Dict]:
     Provides the data boundary ensuring only fully ingested, non-duplicate,
     non-locked, non-cooldown content is released to the fairness selector.
 
-    Includes diagnostic logging so operators can see exactly why content
-    is or isn't flowing — previously this returned [] silently with no
-    indication of whether the channel_config was empty or vault was empty.
+    LOG CLARITY FIX: the previous implementation emitted
+    "No active channels returned by content provider" even when channels
+    existed and were queried but their vault was simply empty. This was
+    misleading — operators interpreted it as a seeding failure when in
+    reality the system was working correctly and just had no content to post.
+    The final log now distinguishes three cases clearly:
+      A) No channels configured at all (seeding failure)
+      B) Channels configured, some have eligible content
+      C) Channels configured, ALL vaults empty / all locked
     """
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
     channels = db[getattr(settings, "CHANNEL_CONFIG_COLLECTION", "channel_config")]
 
-    # Diagnostic: detect missing channel config immediately
+    # Case A: no channels at all — seeding failure
     total_active_channels = await channels.count_documents({"is_active": True})
     if total_active_channels == 0:
         logger.error(
@@ -48,20 +54,18 @@ async def fetch_distribution_content() -> List[Dict]:
             )
             continue
 
-        # Diagnostic: count total queued vault items for this destination
+        # Diagnostic counts so operators can see exactly why content is or isn't flowing
         total_queued = await vault.count_documents({
             "moderation_destination": dest,
             "status": ModerationState.QUEUED.value,
         })
 
-        # Diagnostic: count items blocked by lock/cooldown
         total_locked = await vault.count_documents({
             "moderation_destination": dest,
             "status": ModerationState.QUEUED.value,
             "distribution_state": {"$in": ["locked", "removed"]},
         })
 
-        # Main query: eligible content only
         cursor = vault.find({
             "moderation_destination": dest,
             "status": ModerationState.QUEUED.value,
@@ -95,17 +99,31 @@ async def fetch_distribution_content() -> List[Dict]:
         else:
             if total_queued == 0:
                 logger.info(
-                    "No queued vault content for destination — vault is empty for this dest",
+                    "Vault is empty for destination — no content has been approved yet. "
+                    "Submit and approve content through the moderation pipeline to begin distribution.",
                     extra={"ctx_dest": dest},
                 )
             else:
                 logger.warning(
-                    "Vault has queued content but none eligible — all locked or on cooldown",
+                    "Vault has queued content but none is eligible — "
+                    "all items are locked, removed, or on cooldown.",
                     extra={
                         "ctx_dest": dest,
                         "ctx_total_queued": total_queued,
                         "ctx_locked": total_locked,
                     },
                 )
+
+    # LOG CLARITY FIX: distinguish empty vault (normal on fresh deploy) from
+    # missing channel config (seeding failure). The old message fired for both.
+    if not active_configs:
+        logger.info(
+            "fetch_distribution_content: returning no eligible content this cycle. "
+            "Channels are configured (%d active) but all destination vaults are "
+            "empty or fully locked. This is normal on a fresh deployment — "
+            "submit content via the bot and approve it through moderation.",
+            total_active_channels,
+            extra={"ctx_active_channels": total_active_channels},
+        )
 
     return active_configs
