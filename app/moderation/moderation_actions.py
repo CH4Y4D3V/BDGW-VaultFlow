@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from pymongo import UpdateOne
-from pymongo.errors import BulkWriteError, DuplicateKeyError
+from pymongo.errors import BulkWriteError
 from pyrogram.client import Client
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
@@ -155,6 +155,12 @@ async def post_to_destination(
     messages: list,
     dest: str,
 ) -> bool:
+    """
+    Bug 1 fix: use copy_message() instead of forward_messages().
+    forward_messages() attaches a visible "Forwarded from" header that exposes
+    the submitter's private chat ID and username to all public channel subscribers.
+    copy_message() produces a clean copy with no metadata leak.
+    """
     group_id = _destination_group_id(dest)
     if not group_id:
         logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
@@ -196,13 +202,11 @@ async def archive_to_vault(
     dest: str,
     submitter_user_id: int,
     consent_record_id: Optional[str] = None,
-    # BUG FIX: approve flow sets initial_status=POSTED so the scheduler
-    # never re-picks approved content. Queue flow uses QUEUED (default).
     initial_status: str = ModerationState.QUEUED.value,
 ) -> list[int]:
     """
     Two-step vault archival:
-    1. copy_message() to VAULT_CHANNEL_ID
+    1. copy_message() to VAULT_CHANNEL_ID  (Bug 1 fix: no forward headers on vault copies)
     2. Upsert metadata to MongoDB
 
     initial_status parameter:
@@ -235,6 +239,7 @@ async def archive_to_vault(
     vault_message_ids: list[int] = []
 
     # ── Step 1: Telegram Vault Channel ────────────────────────────────────────
+    # Bug 1 fix: copy_message() — no "Forwarded from" header on vault copies.
     if settings.VAULT_CHANNEL_ID:
         for msg in messages:
             copied_id = 0
@@ -311,9 +316,6 @@ async def archive_to_vault(
                     "vault_message_id": vault_msg_id or None,
                     "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
                     "moderation_destination": dest,
-                    # BUG FIX: use initial_status param.
-                    # approve flow passes POSTED → scheduler never picks this up again.
-                    # queue flow passes QUEUED (default) → enters distribution pipeline.
                     "status": initial_status,
                     "distribution_state": ModerationState.PENDING.value,
                     "submitter_user_id": submitter_user_id,
@@ -395,6 +397,9 @@ async def enqueue_for_distribution(
         else f"mod_{messages[0].chat.id}_{messages[0].id}"
     )
 
+    # Bug 5 fix: use f"submission_{dest}" not str(msg.chat.id).
+    # msg.chat.id is the submitter's private DM — not a channel.
+    # submission_{dest} matches the value seeded by ChannelService.seed_channels().
     source_channel_id = f"submission_{dest}"
 
     for i, msg in enumerate(messages):
@@ -478,27 +483,23 @@ async def execute_approve(
 ) -> None:
     """
     Approve flow:
-    1. Archive to vault with status=POSTED (NOT QUEUED) — prevents scheduler double-post
-    2. Post immediately to destination group
-    3. Delete moderation card
-    4. Notify uploader
-    5. Write audit log
-
-    BUG FIX: original code archived with status=QUEUED, meaning the scheduler
-    would later pick up and re-post already-delivered content. Now we pass
-    initial_status=ModerationState.POSTED.value so the vault record is marked
-    as already delivered and the scheduler ignores it entirely.
+    1. Archive to vault with status=POSTED — prevents scheduler double-post
+    2. Verify vault write succeeded (Bug 4 fix)
+    3. Post immediately to destination group
+    4. Delete moderation card
+    5. Notify uploader
+    6. Write audit log
     """
     display_name = _destination_display_name(dest)
 
-    # FIX: pass initial_status=POSTED — approved content is posted immediately,
-    # must NOT re-enter the scheduler distribution pipeline.
     vault_ids = await archive_to_vault(
         client, messages, dest,
         submitter_user_id=submitter_user_id,
         initial_status=ModerationState.POSTED.value,
     )
 
+    # Bug 4 fix: verify vault write before proceeding.
+    # If all IDs are zero/empty the vault copy failed — abort, do NOT post publicly.
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(
@@ -577,20 +578,21 @@ async def execute_queue(
     """
     Queue flow:
     1. Archive to vault with status=QUEUED — enters scheduler distribution pipeline
-    2. Enqueue MODERATED-priority job
-    3. Delete moderation card
-    4. Notify uploader
-    5. Write audit log
+    2. Verify vault write succeeded (Bug 4 fix)
+    3. Enqueue MODERATED-priority job
+    4. Delete moderation card
+    5. Notify uploader
+    6. Write audit log
     """
     display_name = _destination_display_name(dest)
 
-    # Queue flow correctly uses QUEUED (default) so scheduler picks it up
     vault_ids = await archive_to_vault(
         client, messages, dest,
         submitter_user_id=submitter_user_id,
         initial_status=ModerationState.QUEUED.value,
     )
 
+    # Bug 4 fix: verify vault write before proceeding.
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(

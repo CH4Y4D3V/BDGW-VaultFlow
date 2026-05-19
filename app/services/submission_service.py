@@ -24,10 +24,11 @@ _pipeline: MediaIngestionPipeline = MediaIngestionPipeline()
 #   register_pending() → populated after successful forward to verification group
 #   pop_pending()      → consumed on any moderator action (approve/queue/reject)
 #
-# NOTE: Message objects are NOT persisted to DB and cannot be reconstructed on
-# restart. The DB record (PENDING_COLLECTION) is metadata-only for auditing.
-# Submissions in-flight at restart time are simply lost from the active registry —
-# operators must re-submit. The DB record survives for logging purposes.
+# Bug 2 fix: this dict is complemented by MongoDB persistence in PENDING_COLLECTION.
+# Message objects are NOT persisted to DB and cannot be reconstructed on restart.
+# The DB record (PENDING_COLLECTION) is metadata-only for auditing/logging.
+# Submissions in-flight at restart are lost from the active registry —
+# operators must re-submit. The DB record survives for audit purposes.
 _pending_submissions: dict[int, tuple[int, list[Message]]] = {}
 
 
@@ -39,15 +40,15 @@ async def _persist_pending(
     messages: list[Message],
 ) -> None:
     """
-    Write pending submission metadata to MongoDB.
+    Bug 2 fix: write pending submission metadata to MongoDB on register.
+    Schema: {key, submitter_user_id, chat_id, message_ids, expires_at, created_at}
+    TTL index on expires_at (24h) handles automatic cleanup.
     Never raises — DB failure is logged but does not block the in-memory path.
-    Schema: {key, submitter_user_id, chat_id, message_ids, expires_at}
     """
     try:
         db = DatabaseManager.get_db()
         col = db[settings.PENDING_COLLECTION]
         now = datetime.now(timezone.utc)
-        # TTL set to 24 hours — long enough for any moderation cycle
         expires_at = now + timedelta(hours=24)
         doc = {
             "key": key,
@@ -75,7 +76,7 @@ async def _persist_pending(
 
 async def _delete_pending_from_db(key: int) -> None:
     """
-    Remove pending submission record from MongoDB on consumption.
+    Bug 2 fix: remove pending submission record from MongoDB on consumption.
     Never raises — DB failure is logged only.
     """
     try:
@@ -102,7 +103,8 @@ async def register_pending(
 ) -> int:
     """
     Store a pending submission after it has been forwarded to the verification group.
-    Writes to both in-memory cache and MongoDB (metadata only).
+
+    Bug 2 fix: writes to both in-memory cache AND MongoDB (metadata only).
     Returns the registry key (first message ID).
     """
     if not messages:
@@ -113,7 +115,7 @@ async def register_pending(
     # 1. Write to in-memory fast-path cache
     _pending_submissions[key] = (submitter_user_id, messages)
 
-    # 2. Persist metadata to MongoDB for auditing / restart logging
+    # 2. Bug 2 fix: persist metadata to MongoDB for auditing / restart logging
     await _persist_pending(key, submitter_user_id, messages)
 
     logger.info(
@@ -130,12 +132,11 @@ async def register_pending(
 def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
     """
     Atomically remove and return a pending submission from in-memory cache.
-    Also schedules deletion from MongoDB (fire-and-forget via asyncio task if event loop
-    is running, otherwise logs warning).
-    Used by callback_handler on any moderation action.
+
+    Bug 2 fix: also schedules deletion from MongoDB via asyncio task.
+    Fire-and-forget is acceptable here — the DB record is audit-only.
 
     Returns (submitter_user_id, messages) or None if not found.
-    This is the single consumption point — once popped, the entry is gone.
     """
     entry = _pending_submissions.pop(msg_id, None)
     if entry is None:
@@ -145,14 +146,12 @@ def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
         )
         return None
 
-    # Schedule async DB deletion without blocking the synchronous pop path.
-    # The DB record is metadata/audit only — fire and forget is acceptable here.
+    # Bug 2 fix: schedule async DB deletion without blocking the synchronous pop path.
     import asyncio
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_delete_pending_from_db(msg_id))
     except RuntimeError:
-        # No running event loop — log and move on (should not happen in normal operation)
         logger.warning(
             "pop_pending: no running event loop for DB cleanup",
             extra={"ctx_msg_id": msg_id},
@@ -165,9 +164,6 @@ async def ingest_approved(msg_id: int) -> Optional[int]:
     """
     Legacy path kept for any direct callers.
     Prefer pop_pending() + moderation_actions.archive_to_vault() in new code.
-
-    Pops the pending entry and runs it through the ingestion pipeline.
-    Returns submitter_user_id or None.
     """
     entry = pop_pending(msg_id)
     if entry is None:
@@ -190,9 +186,6 @@ async def reject_pending(msg_id: int) -> Optional[int]:
     """
     Legacy path kept for any direct callers.
     Prefer pop_pending() in new code.
-
-    Pops and discards the pending entry. No vault writes.
-    Returns submitter_user_id or None.
     """
     entry = pop_pending(msg_id)
     if entry is None:
