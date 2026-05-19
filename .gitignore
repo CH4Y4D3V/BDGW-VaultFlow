@@ -23,6 +23,9 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+Lib/
+Scripts/
+Include/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json

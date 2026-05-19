@@ -114,6 +114,7 @@ class Settings(BaseSettings):
 
     WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
+    WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
     WATERMARK_OPACITY: float = 0.8
