@@ -57,10 +57,12 @@ class SubscriptionWorker:
     async def stop(self) -> None:
         self._running = False
         if self._task and not self._task.done():
+            # WARNING fix: replace asyncio.shield which can hang indefinitely.
+            # Use the direct cancel-and-join pattern matching dispatcher_worker.py.
             self._task.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(self._task), timeout=15.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+                await self._task
+            except asyncio.CancelledError:
                 pass
         logger.info("Subscription worker stopped")
 

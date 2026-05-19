@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from typing import List
 
 from pyrogram.client import Client
@@ -11,6 +12,34 @@ from app.core.models import MediaType
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _try_delete_local_file(path: str, context: str) -> None:
+    """
+    WARNING fix (media cleanup): delete a local processed file after
+    successful Telegram upload. Best-effort — never raises.
+    Only deletes real filesystem paths (not Telegram file_ids).
+    """
+    if not path:
+        return
+    # Telegram file_ids are long alphanumeric strings, never start with /
+    # and are never valid filesystem paths on the server.
+    if not path.startswith("/") and not path.startswith("./") and len(path) > 60:
+        # Looks like a Telegram file_id, not a local path — skip
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+        logger.debug(
+            "Delivered: local file deleted",
+            extra={"ctx_path": path, "ctx_context": context},
+        )
+    except OSError:
+        pass  # Already gone — fine
+    except Exception as e:
+        logger.warning(
+            "Could not delete local file after delivery",
+            extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
+        )
 
 
 async def execute_telegram_delivery(job_docs: List[dict], target_id: str) -> None:
@@ -69,20 +98,28 @@ async def _send_single(bot: Client, job: dict, target_id: str) -> None:
     else:
         await bot.send_document(chat_id=target_id, document=media, caption=caption)
 
+    # WARNING fix (media cleanup): delete the local processed file after successful upload.
+    # processed_media_path is the FFmpeg output; media_path may be a downloaded temp file.
+    # Only delete processed_media_path here — media_path (original) may be shared.
+    processed_path = job.get("processed_media_path")
+    if processed_path:
+        job_id = str(job.get("_id", ""))
+        _try_delete_local_file(processed_path, context=f"single_delivery:{job_id}")
+
 
 async def _send_album(bot: Client, job_docs: List[dict], target_id: str) -> None:
     media_group = []
-    
+
     # Sort deterministically by message_id to preserve native Telegram ordering safely
     sorted_docs = sorted(job_docs, key=lambda x: (x.get("metadata", {}).get("message_id", 0), str(x["_id"])))
-    
+
     for i, job in enumerate(sorted_docs):
         media_type = job.get("media_type")
         raw_media = job.get("processed_media_path") or job.get("media_path") or job.get("media_file_id")
-        
+
         if not raw_media:
             continue
-            
+
         media = str(raw_media)
         caption = str(job.get("caption", "")) if i == 0 else ""
         has_spoiler = bool(job.get("metadata", {}).get("has_spoiler", False))
@@ -93,6 +130,13 @@ async def _send_album(bot: Client, job_docs: List[dict], target_id: str) -> None
             media_group.append(InputMediaVideo(media=media, caption=caption, has_spoiler=has_spoiler))
         else:
             media_group.append(InputMediaDocument(media=media, caption=caption))
-            
+
     if media_group:
         await bot.send_media_group(chat_id=target_id, media=media_group)
+
+        # WARNING fix (media cleanup): delete processed output files after successful album upload.
+        for job in sorted_docs:
+            processed_path = job.get("processed_media_path")
+            if processed_path:
+                job_id = str(job.get("_id", ""))
+                _try_delete_local_file(processed_path, context=f"album_delivery:{job_id}")

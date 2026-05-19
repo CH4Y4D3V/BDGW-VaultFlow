@@ -15,6 +15,32 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _safe_unlink(path: Optional[str], context: str) -> None:
+    """
+    Delete a file from disk. Best-effort — never raises.
+    Handles the case where the file is already gone (missing_ok equivalent).
+    """
+    if not path:
+        return
+    try:
+        Path(path).unlink(missing_ok=True)
+        logger.debug(
+            "Temp file deleted",
+            extra={"ctx_path": path, "ctx_context": context},
+        )
+    except OSError as e:
+        # File already gone or permission issue — non-fatal
+        logger.debug(
+            "Could not delete temp file (already gone or permission denied)",
+            extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
+        )
+    except Exception as e:
+        logger.warning(
+            "Unexpected error deleting temp file",
+            extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
+        )
+
+
 class WatermarkWorker:
     """
     Pulls jobs in WATERMARKING status and processes them with FFmpeg.
@@ -169,6 +195,10 @@ class WatermarkWorker:
     async def _process_job(self, job_doc: dict) -> None:
         job_id = str(job_doc["_id"])
         corr_token = set_correlation_id(f"wm_{job_id}")
+        # Track paths for cleanup after successful processing
+        downloaded_media_path: Optional[str] = None
+        processed_output_path: Optional[str] = None
+
         try:
             media_type = job_doc.get("media_type")
             watermark_config = job_doc.get("watermark_config") or {}
@@ -178,6 +208,15 @@ class WatermarkWorker:
             # The original code only read job_doc.get("media_path") which is None for
             # all moderation-queued jobs (they only have media_file_id).
             media_path = await self._resolve_media_path(job_doc, job_id)
+
+            # Track whether we downloaded this file (i.e., it's a temp file we own)
+            original_media_path = job_doc.get("media_path")
+            is_downloaded = (
+                media_path is not None
+                and media_path != original_media_path
+            )
+            if is_downloaded:
+                downloaded_media_path = media_path
 
             if not media_path:
                 logger.error(
@@ -215,7 +254,7 @@ class WatermarkWorker:
                 )
 
                 if media_type == MediaType.VIDEO:
-                    processed_path = await self._ffmpeg.apply_video_watermark(
+                    processed_output_path = await self._ffmpeg.apply_video_watermark(
                         input_path=media_path,
                         watermark_path=watermark_path,
                         position=position,
@@ -223,7 +262,7 @@ class WatermarkWorker:
                         scale=scale,
                     )
                 elif media_type == MediaType.PHOTO:
-                    processed_path = await self._ffmpeg.apply_image_watermark(
+                    processed_output_path = await self._ffmpeg.apply_image_watermark(
                         input_path=media_path,
                         watermark_path=watermark_path,
                         position=position,
@@ -233,14 +272,29 @@ class WatermarkWorker:
                 else:
                     # Non-visual media (document, text, etc.) — skip watermark, push to dispatch
                     await self._queue.mark_watermark_applied(job_id, media_path)
+                    # For non-visual, media_path IS the final path — don't delete it here;
+                    # the dispatcher will upload it. Only clean up downloads.
+                    if is_downloaded:
+                        # media_path == processed output for non-visual, keep it for dispatcher.
+                        # But track it so we can delete after delivery in delivery.py instead.
+                        pass
                     return
 
-                await self._queue.mark_watermark_applied(job_id, processed_path)
+                # Mark job ready for dispatcher — processed_output_path is the watermarked file
+                await self._queue.mark_watermark_applied(job_id, processed_output_path)
+
+                # WARNING fix: delete the downloaded input file now that watermarking
+                # succeeded. The output (processed_output_path) must stay on disk until
+                # the dispatcher uploads it via execute_telegram_delivery.
+                if is_downloaded and downloaded_media_path:
+                    _safe_unlink(downloaded_media_path, context=f"wm_input_cleanup:{job_id}")
+                    downloaded_media_path = None  # prevent double-delete in finally
+
                 logger.info(
                     "Watermark applied successfully",
                     extra={
                         "ctx_job_id": job_id,
-                        "ctx_output": processed_path,
+                        "ctx_output": processed_output_path,
                     },
                 )
 
@@ -270,7 +324,14 @@ class WatermarkWorker:
                 else:
                     delay = calculate_retry_delay(retry_count)
                     await self._queue.mark_failed(job_id, str(e), next_retry_delay_seconds=delay)
+
         finally:
+            # Cleanup any downloaded temp input that wasn't cleaned up above
+            # (e.g. on error paths). processed_output_path is NOT cleaned here —
+            # the dispatcher must upload it first; delivery.py handles that cleanup.
+            if downloaded_media_path:
+                _safe_unlink(downloaded_media_path, context=f"wm_input_finally:{job_id}")
+
             reset_correlation_id(corr_token)
 
 

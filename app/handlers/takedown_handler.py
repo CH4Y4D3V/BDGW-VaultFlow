@@ -21,6 +21,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import Message
 
+from app.core.permissions import Role, permission_required
 from app.services.takedown_service import TakedownService
 from app.utils.logger import get_logger
 
@@ -190,15 +191,14 @@ async def handle_content_claim(client: Client, message: Message) -> None:
 
 
 # ── /execute_takedown (admin only) ────────────────────────────────────────────
+# ADVISORY fix: replaced inline is_moderator() check with @permission_required
+# decorator matching the established pattern in admin_handler.py and payment_handler.py.
+# Added user-facing denial message (handled by permission_required, silent=False default).
 
 @Client.on_message(filters.command("execute_takedown"))
+@permission_required(Role.MODERATOR)
 async def handle_execute_takedown(client: Client, message: Message) -> None:
     if not message.from_user:
-        return
-
-    from app.core.permissions import is_moderator
-    moderator_id = message.from_user.id
-    if not is_moderator(moderator_id):
         return
 
     parts = message.text.split(None, 1)
@@ -210,6 +210,7 @@ async def handle_execute_takedown(client: Client, message: Message) -> None:
         return
 
     content_id = parts[1].strip()
+    moderator_id = message.from_user.id
 
     try:
         success = await _takedown_service.execute_takedown(
@@ -242,15 +243,12 @@ async def handle_execute_takedown(client: Client, message: Message) -> None:
 
 
 # ── /dismiss_report (admin only) ─────────────────────────────────────────────
+# ADVISORY fix: replaced inline is_moderator() check with @permission_required.
 
 @Client.on_message(filters.command("dismiss_report"))
+@permission_required(Role.MODERATOR)
 async def handle_dismiss_report(client: Client, message: Message) -> None:
     if not message.from_user:
-        return
-
-    from app.core.permissions import is_moderator
-    moderator_id = message.from_user.id
-    if not is_moderator(moderator_id):
         return
 
     parts = message.text.split(None, 1)
@@ -262,6 +260,7 @@ async def handle_dismiss_report(client: Client, message: Message) -> None:
         return
 
     content_id = parts[1].strip()
+    moderator_id = message.from_user.id
 
     try:
         await _takedown_service.dismiss_report(
@@ -287,16 +286,11 @@ async def handle_dismiss_report(client: Client, message: Message) -> None:
 
 
 # ── /pending_reports (admin only) ─────────────────────────────────────────────
+# ADVISORY fix: replaced inline is_moderator() check with @permission_required.
 
 @Client.on_message(filters.command("pending_reports"))
+@permission_required(Role.MODERATOR)
 async def handle_pending_reports(client: Client, message: Message) -> None:
-    if not message.from_user:
-        return
-
-    from app.core.permissions import is_moderator
-    if not is_moderator(message.from_user.id):
-        return
-
     try:
         reports = await _takedown_service.get_pending_reports()
     except Exception as e:

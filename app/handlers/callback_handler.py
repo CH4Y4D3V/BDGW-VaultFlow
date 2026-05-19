@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
@@ -45,6 +47,97 @@ def _destination_keyboard(
     ])
 
 
+# ── Pending restart recovery ──────────────────────────────────────────────────
+
+async def _recover_pending_from_db(
+    client: Client,
+    msg_id: int,
+) -> Optional[tuple[int, list]]:
+    """
+    WARNING fix: race condition — pop_pending() returns None after restart.
+
+    When the in-memory pending registry is empty (e.g. after bot restart),
+    look up the submission in MongoDB and re-fetch messages from Telegram.
+
+    Returns (submitter_user_id, messages) on success, None otherwise.
+    Never raises.
+    """
+    try:
+        from app.core.database import DatabaseManager
+        db = DatabaseManager.get_db()
+        pending_doc = await db[settings.PENDING_COLLECTION].find_one({"key": msg_id})
+    except Exception as e:
+        logger.warning(
+            "_recover_pending_from_db: DB lookup failed",
+            extra={"ctx_msg_id": msg_id, "ctx_error": str(e)},
+        )
+        return None
+
+    if not pending_doc:
+        # Not in DB either — genuinely already actioned or expired
+        return None
+
+    chat_id = pending_doc.get("chat_id", 0)
+    message_ids = pending_doc.get("message_ids", [])
+    submitter_user_id = pending_doc.get("submitter_user_id", 0)
+
+    if not chat_id or not message_ids:
+        logger.warning(
+            "_recover_pending_from_db: DB record incomplete",
+            extra={"ctx_msg_id": msg_id, "ctx_doc": str(pending_doc)},
+        )
+        return None
+
+    logger.info(
+        "_recover_pending_from_db: found in DB, re-fetching from Telegram",
+        extra={
+            "ctx_msg_id": msg_id,
+            "ctx_chat_id": chat_id,
+            "ctx_submitter": submitter_user_id,
+            "ctx_message_count": len(message_ids),
+        },
+    )
+
+    try:
+        messages = await client.get_messages(
+            chat_id=chat_id,
+            message_ids=message_ids,
+        )
+        # get_messages can return a single Message or a list
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        # Filter out empty/deleted messages
+        messages = [m for m in messages if m and m.id]
+
+        if not messages:
+            logger.warning(
+                "_recover_pending_from_db: Telegram messages no longer exist",
+                extra={"ctx_msg_id": msg_id, "ctx_chat_id": chat_id},
+            )
+            return None
+
+        logger.info(
+            "_recover_pending_from_db: messages re-fetched successfully",
+            extra={
+                "ctx_msg_id": msg_id,
+                "ctx_recovered_count": len(messages),
+            },
+        )
+        return (submitter_user_id, messages)
+
+    except Exception as e:
+        logger.warning(
+            "_recover_pending_from_db: Telegram re-fetch failed",
+            extra={
+                "ctx_msg_id": msg_id,
+                "ctx_chat_id": chat_id,
+                "ctx_error": str(e),
+            },
+        )
+        return None
+
+
 # ── Handler ───────────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^mod_(approve|queue|reject|dest):"))
@@ -58,6 +151,8 @@ async def handle_moderation_callback(
     RC-3 fix: top-level try-except — moderation failures are logged
               and the admin receives an actionable error message instead
               of the callback timing out silently.
+    WARNING fix: when pop_pending() returns None, attempt DB + Telegram recovery
+                 before surfacing "already actioned" error.
     """
     logger.info(
         "HANDLER: handle_moderation_callback entered",
@@ -143,15 +238,28 @@ async def handle_moderation_callback(
             if action == "reject":
                 entry = submission_service.pop_pending(msg_id)
                 if entry is None:
-                    await callback.answer(
-                        "Submission not found — already actioned.",
-                        show_alert=True,
-                    )
+                    # WARNING fix: attempt DB + Telegram recovery before giving up
                     logger.warning(
-                        "Reject: submission already actioned",
+                        "Reject: pop_pending returned None — attempting DB recovery",
                         extra={"ctx_msg_id": msg_id, "ctx_moderator": moderator_id},
                     )
-                    return
+                    recovered = await _recover_pending_from_db(client, msg_id)
+                    if recovered is None:
+                        await callback.answer(
+                            "Submission not found — already actioned or expired.",
+                            show_alert=True,
+                        )
+                        logger.warning(
+                            "Reject: submission not recoverable from DB or Telegram",
+                            extra={"ctx_msg_id": msg_id, "ctx_moderator": moderator_id},
+                        )
+                        return
+                    # Recovery succeeded — use recovered submitter_id
+                    submitter_id = recovered[0]
+                    logger.info(
+                        "Reject: recovered submitter from DB",
+                        extra={"ctx_msg_id": msg_id, "ctx_submitter": submitter_id},
+                    )
 
                 await callback.answer("❌ Rejected.", show_alert=False)
                 await execute_reject(
@@ -207,12 +315,11 @@ async def handle_moderation_callback(
 
             entry = submission_service.pop_pending(msg_id)
             if entry is None:
-                await callback.answer(
-                    "Submission not found — already actioned.",
-                    show_alert=True,
-                )
+                # WARNING fix: attempt DB + Telegram recovery before giving up.
+                # This is the critical path — after a bot restart the in-memory
+                # pending registry is empty but the submission may still be valid.
                 logger.warning(
-                    "Step-2 moderation: submission already actioned",
+                    "Step-2 moderation: pop_pending returned None — attempting DB recovery",
                     extra={
                         "ctx_msg_id": msg_id,
                         "ctx_action": action,
@@ -220,9 +327,34 @@ async def handle_moderation_callback(
                         "ctx_moderator": moderator_id,
                     },
                 )
-                return
-
-            _, messages = entry
+                recovered = await _recover_pending_from_db(client, msg_id)
+                if recovered is None:
+                    await callback.answer(
+                        "Submission not found — already actioned or expired.",
+                        show_alert=True,
+                    )
+                    logger.warning(
+                        "Step-2 moderation: submission not recoverable from DB or Telegram",
+                        extra={
+                            "ctx_msg_id": msg_id,
+                            "ctx_action": action,
+                            "ctx_dest": dest,
+                            "ctx_moderator": moderator_id,
+                        },
+                    )
+                    return
+                # Recovery succeeded — use the re-fetched data
+                submitter_id, messages = recovered
+                logger.info(
+                    "Step-2 moderation: submission recovered from DB and Telegram",
+                    extra={
+                        "ctx_msg_id": msg_id,
+                        "ctx_submitter": submitter_id,
+                        "ctx_recovered_count": len(messages),
+                    },
+                )
+            else:
+                _, messages = entry
 
             await callback.answer(
                 "✅ Processing..." if action == "approve" else "⏳ Queuing...",

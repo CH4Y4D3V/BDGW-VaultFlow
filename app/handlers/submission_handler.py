@@ -99,6 +99,30 @@ async def _safe_reply(
     return False
 
 
+# ── Payment state check helper ────────────────────────────────────────────────
+
+async def _has_active_payment_session(user_id: int) -> bool:
+    """
+    Middleware conflict fix: check whether the user is mid-payment before
+    routing media to the submission pipeline.
+
+    Replicates the same DB lookup used by payment_handler._get_payment_state()
+    so no circular import is needed. Returns True if a payment session is active.
+    Never raises — returns False on any DB error (fail-open is safer here).
+    """
+    try:
+        from app.core.database import DatabaseManager
+        db = DatabaseManager.get_db()
+        doc = await db["bot_config"].find_one({"key": f"payment_state:{user_id}"})
+        return doc is not None
+    except Exception as e:
+        logger.warning(
+            "_has_active_payment_session: DB error, defaulting to False",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        return False
+
+
 # ── Internal pipeline ────────────────────────────────────────────────────────
 
 async def _submit_for_review(
@@ -340,6 +364,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
     RC-5 fix: check_and_gate_creator is wrapped so DB errors give user feedback.
     RC-7 fix: entry logging.
     RC-9 fix: every code path acknowledges the user.
+    Middleware conflict fix: skip if user is in an active payment flow.
     """
     logger.info(
         "HANDLER: handle_media_submission entered",
@@ -358,6 +383,27 @@ async def handle_media_submission(client: Client, message: Message) -> None:
             return
 
         user_id = message.from_user.id
+
+        # ── Middleware conflict fix: skip if user is in active payment flow ──
+        # payment_handler.handle_payment_proof_capture() owns media messages
+        # while the user is mid-payment. Without this guard, both handlers fire
+        # and the photo is incorrectly routed to both the submission pipeline and
+        # the payment proof capture path.
+        try:
+            payment_active = await _has_active_payment_session(user_id)
+        except Exception as e:
+            logger.warning(
+                "handle_media_submission: payment state check failed, proceeding",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
+            payment_active = False
+
+        if payment_active:
+            logger.info(
+                "HANDLER: handle_media_submission — user in payment flow, skipping",
+                extra={"ctx_user_id": user_id},
+            )
+            return
 
         # RC-5 fix: consent gate wrapped in its own try-except
         try:
