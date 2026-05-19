@@ -24,7 +24,6 @@ share/python-wheels/
 *.egg
 MANIFEST
 Lib/
-Scripts/
 Include/
 .vscode/*
 !.vscode/settings.json
