@@ -32,19 +32,27 @@ async def trace_message_update(client: Client, message: Message) -> None:
 
 @Client.on_callback_query(group=-1)
 async def trace_callback_update(client: Client, callback: CallbackQuery) -> None:
+    # FIX: CallbackQuery.message can be None (e.g. when the message is too old,
+    # was deleted, or the callback originates from an inline query result).
+    # Previously this crashed with "'CallbackQuery' object has no attribute 'chat'"
+    # because the code tried to access callback.message.chat without guarding.
     try:
+        chat_id = None
+        message_id = None
+
+        if callback.message is not None:
+            # message.chat may itself be None on certain update types
+            chat_id = callback.message.chat.id if getattr(callback.message, "chat", None) else None
+            message_id = callback.message.id
+
         logger.info(
             "UPDATE_TRACE: callback_query",
             extra={
                 "ctx_callback_id": callback.id,
                 "ctx_from_user_id": callback.from_user.id if callback.from_user else None,
                 "ctx_data": callback.data,
-                "ctx_chat_id": (
-                    callback.message.chat.id
-                    if callback.message and callback.message.chat
-                    else None
-                ),
-                "ctx_message_id": callback.message.id if callback.message else None,
+                "ctx_chat_id": chat_id,
+                "ctx_message_id": message_id,
             },
         )
     except Exception as e:

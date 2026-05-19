@@ -56,7 +56,29 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
 
     Step 2 — Pick NSFW / Premium:
       - Execute the full approve or queue flow with moderator_id for audit.
+
+    FIX: callback.message can be None when the originating message has been
+    deleted or is otherwise unavailable. All access to callback.message is now
+    guarded before use.
     """
+    # ── Guard: message must exist ────────────────────────────────────────────
+    # CallbackQuery.message is None when Pyrogram cannot retrieve the original
+    # message (deleted, too old, or inline-mode origin). Without this guard
+    # every subsequent .chat / .id access raises AttributeError.
+    if callback.message is None:
+        await callback.answer(
+            "This action is no longer available (message not found).",
+            show_alert=True,
+        )
+        logger.warning(
+            "Moderation callback received with no associated message",
+            extra={
+                "ctx_user_id": callback.from_user.id if callback.from_user else None,
+                "ctx_data": callback.data,
+            },
+        )
+        return
+
     # ── Gate 1: correct chat ─────────────────────────────────────────────────
     if callback.message.chat.id != settings.VERIFICATION_GROUP_ID:
         await callback.answer("This action is not available here.", show_alert=True)

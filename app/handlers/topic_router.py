@@ -14,6 +14,10 @@ Guard logic (critical — prevents routing loops and noise):
   3. Sender must NOT be a bot (prevents routing the bot's own notifications back)
   4. The topic must exist in user_topics collection
   5. Skip messages that are the bot's own moderation cards (has reply_markup with mod_ callbacks)
+
+Handler group: 1  (runs AFTER default group 0, which includes support_handler's
+persist handler — this ordering ensures the DB record is written before routing
+fires, though each is independent and the order does not affect correctness).
 """
 
 import asyncio
@@ -55,11 +59,19 @@ def _is_moderation_card(message: Message) -> bool:
     """
     Detect if this message is a bot-generated moderation card.
     We never want to re-route those back to users.
+
+    FIX: previously the try/except silently swallowed AttributeError when
+    reply_markup was not an InlineKeyboardMarkup (e.g. ReplyKeyboardMarkup).
+    Now we guard the inline_keyboard attribute explicitly before iterating.
     """
     if not message.reply_markup:
         return False
+    # Only InlineKeyboardMarkup has inline_keyboard rows
+    inline_keyboard = getattr(message.reply_markup, "inline_keyboard", None)
+    if not inline_keyboard:
+        return False
     try:
-        for row in message.reply_markup.inline_keyboard:
+        for row in inline_keyboard:
             for btn in row:
                 data = getattr(btn, "callback_data", "") or ""
                 if data.startswith("mod_"):
@@ -109,12 +121,16 @@ async def _deliver_to_user(client: Client, user_id: int, message: Message) -> bo
     return False
 
 
-@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
+@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID), group=1)
 async def route_admin_reply_to_user(client: Client, message: Message) -> None:
     """
     Main routing handler.
     Fires on every message in the verification hub, then gates out
     everything that shouldn't be routed.
+
+    Uses group=1 so it runs after the default group (0) handlers, e.g. the
+    support_handler persistence handler. This avoids any ordering confusion
+    but does NOT affect correctness since both handlers are independent.
     """
     # ── Gate 1: must be inside a topic ───────────────────────────────────────
     thread_id = _get_thread_id(message)

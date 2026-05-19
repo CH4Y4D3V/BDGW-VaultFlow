@@ -1,10 +1,8 @@
 import asyncio
-import os
 import signal
 
 from app.core.logger import setup_logging, get_logger
 from app.core.lifecycle import AppLifecycle
-from app.health import start_health_server
 
 logger = get_logger("main")
 
@@ -28,6 +26,10 @@ async def async_main() -> None:
             pass  # Windows compatibility fallback
 
     try:
+        # NOTE: AppLifecycle.start() already starts the health server internally
+        # on the PORT env var (default 8080). Do NOT call start_health_server()
+        # here — doing so binds the same port twice and raises OSError: [Errno 98]
+        # Address already in use.
         await lifecycle.start()
 
         logger.info("Main loop running. Waiting for shutdown signal.")

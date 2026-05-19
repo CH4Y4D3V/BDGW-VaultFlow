@@ -13,6 +13,12 @@ routing that `topic_router.py::route_admin_reply_to_user` already performs.
 For support topics, users were receiving every admin reply TWICE. This handler
 now only persists the support message to the DB — routing is handled exclusively
 by topic_router.py.
+
+HANDLER GROUP FIX: All @Client.on_message(filters.chat(VERIFICATION_GROUP_ID))
+handlers in this file use the default group (0). The routing handler in
+topic_router.py uses group=1, so persistence always runs before routing.
+This is intentional — both are independent and the order does not affect
+correctness, but explicit groups make the priority unambiguous.
 """
 
 import asyncio
@@ -70,6 +76,29 @@ async def _safe_reply(
             if attempt == _MAX_RETRIES - 1:
                 return
             await asyncio.sleep(2 ** attempt)
+
+
+def _is_moderation_card(message: Message) -> bool:
+    """
+    Detect if this message is a bot-generated moderation card.
+
+    FIX: guard inline_keyboard attribute explicitly — reply_markup may be
+    ReplyKeyboardMarkup or other types that lack inline_keyboard, causing
+    AttributeError previously swallowed by a bare except that hid the bug.
+    """
+    if not message.reply_markup:
+        return False
+    inline_keyboard = getattr(message.reply_markup, "inline_keyboard", None)
+    if not inline_keyboard:
+        return False
+    try:
+        for row in inline_keyboard:
+            for btn in row:
+                if getattr(btn, "callback_data", "").startswith("mod_"):
+                    return True
+    except Exception:
+        pass
+    return False
 
 
 # ── Callback: menu:support ────────────────────────────────────────────────────
@@ -150,7 +179,7 @@ async def handle_private_message_support(client: Client, message: Message) -> No
     the broken ~filters.command([]) which matched everything.
 
     Returns early (no-op) for users without an existing support topic.
-    For users WITH a support topic, their private text/media is routed there.
+    For users WITH a support topic, their private text/non-media is routed there.
     """
     if not message.from_user:
         return
@@ -202,9 +231,10 @@ async def handle_private_message_support(client: Client, message: Message) -> No
 # FIX:
 #   This handler now ONLY persists the admin reply to the support_messages
 #   collection for audit/history purposes. It does NOT deliver to the user.
-#   Delivery is handled exclusively by topic_router.py::route_admin_reply_to_user.
+#   Delivery is handled exclusively by topic_router.py::route_admin_reply_to_user
+#   (group=1), which runs after this handler (group=0).
 
-@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
+@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID), group=0)
 async def handle_hub_support_message_persist(
     client: Client, message: Message
 ) -> None:
@@ -214,6 +244,8 @@ async def handle_hub_support_message_persist(
     RC-6 fix: DOES NOT route the message to the user. That is done by
     topic_router.py::route_admin_reply_to_user which fires for all topic types.
     This handler's sole responsibility is the DB persistence audit record.
+
+    Handler group 0 (default): runs before topic_router.py group=1 routing.
     """
     try:
         thread_id = (
@@ -227,14 +259,8 @@ async def handle_hub_support_message_persist(
             return
 
         # Only skip the bot's own moderation cards
-        if message.reply_markup:
-            try:
-                for row in message.reply_markup.inline_keyboard:
-                    for btn in row:
-                        if getattr(btn, "callback_data", "").startswith("mod_"):
-                            return
-            except Exception:
-                pass
+        if _is_moderation_card(message):
+            return
 
         topic_service = get_topic_service()
         topic_doc = await topic_service.get_user_by_topic(thread_id)
