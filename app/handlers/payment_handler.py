@@ -2,20 +2,6 @@ from __future__ import annotations
 
 """
 Payment handler — premium subscription purchase flow.
-
-RC-2 FIX: _safe_reply and _safe_send now catch ALL exceptions, not just
-          FloodWait and RPCError.
-RC-3 FIX: Every handler has a top-level try-except with fallback user response.
-RC-7 FIX: Entry-point logging on every handler.
-
-IMPORTANT — handler ordering note:
-  handle_payment_proof_capture matches (photo | document | text) & private.
-  handle_media_submission in submission_handler.py also matches (photo | ...) & private.
-  Both handlers fire (Pyrogram dispatches to ALL matching handlers in group 0).
-  handle_payment_proof_capture returns immediately when no payment state exists,
-  so it does NOT block the submission handler.
-  If handle_payment_proof_capture raises, the exception is now caught here and
-  does NOT propagate to kill the submission handler's turn.
 """
 
 import asyncio
@@ -34,7 +20,7 @@ from pyrogram.types import (
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.core.permissions import is_payment_admin
+from app.core.permissions import Role, permission_required
 from app.models.subscription import Plan
 from app.services.subscription_service import SubscriptionService
 from app.services.invite_service import InviteService
@@ -49,8 +35,6 @@ _invite_service = InviteService()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
-# ── Plan definitions ──────────────────────────────────────────────────────────
-
 _PLANS = [
     {"label": "30 Days — Premium 🌟", "callback": "plan:premium:30", "days": 30},
     {"label": "90 Days — Premium 💎", "callback": "plan:premium:90", "days": 90},
@@ -59,8 +43,6 @@ _PLANS = [
 
 _PLAN_MAP = {p["callback"]: p for p in _PLANS}
 
-
-# ── DB helpers for payment state ──────────────────────────────────────────────
 
 async def _set_payment_state(user_id: int, plan: str, duration: str) -> None:
     try:
@@ -115,13 +97,7 @@ async def _clear_payment_state(user_id: int) -> None:
         )
 
 
-# ── Safe messaging helpers ────────────────────────────────────────────────────
-
 async def _safe_reply(message: Message, text: str, reply_markup=None) -> bool:
-    """
-    RC-2 fix: catches ALL exception types including non-RPCError.
-    Returns True on success.
-    """
     for attempt in range(_MAX_RETRIES):
         try:
             await message.reply_text(
@@ -141,7 +117,6 @@ async def _safe_reply(message: Message, text: str, reply_markup=None) -> bool:
                 return False
             await asyncio.sleep(2 ** attempt)
         except Exception as e:
-            # RC-2 fix: catch all other exceptions
             logger.error(
                 "_safe_reply: unexpected exception",
                 extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
@@ -156,10 +131,6 @@ async def _safe_reply(message: Message, text: str, reply_markup=None) -> bool:
 async def _safe_send(
     client: Client, user_id: int, text: str, reply_markup=None
 ) -> bool:
-    """
-    RC-2 fix: catches ALL exception types.
-    Returns True on success, False if user unreachable.
-    """
     for attempt in range(_MAX_RETRIES):
         try:
             await client.send_message(
@@ -178,7 +149,6 @@ async def _safe_send(
                 return False
             await asyncio.sleep(2 ** attempt)
         except Exception as e:
-            # RC-2 fix: catch all other exceptions
             logger.error(
                 "_safe_send: unexpected exception",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
@@ -190,17 +160,11 @@ async def _safe_send(
     return False
 
 
-# ── Callback: menu:premium ────────────────────────────────────────────────────
-
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
     logger.info(
         "HANDLER: handle_premium_menu entered",
-        extra={
-            "ctx_from_user": (
-                callback.from_user.id if callback.from_user else None
-            ),
-        },
+        extra={"ctx_from_user": callback.from_user.id if callback.from_user else None},
     )
 
     try:
@@ -232,18 +196,12 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
             pass
 
 
-# ── Callback: plan:{plan}:{duration} ─────────────────────────────────────────
-
-@Client.on_callback_query(
-    filters.regex(r"^plan:premium:(30|90|lifetime)$")
-)
+@Client.on_callback_query(filters.regex(r"^plan:premium:(30|90|lifetime)$"))
 async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None:
     logger.info(
         "HANDLER: handle_plan_selection entered",
         extra={
-            "ctx_from_user": (
-                callback.from_user.id if callback.from_user else None
-            ),
+            "ctx_from_user": callback.from_user.id if callback.from_user else None,
             "ctx_data": callback.data,
         },
     )
@@ -285,25 +243,17 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
             exc_info=True,
         )
         try:
-            await callback.answer(
-                "⚠️ Error. Please try again.", show_alert=True
-            )
+            await callback.answer("⚠️ Error. Please try again.", show_alert=True)
         except Exception:
             pass
 
 
-# ── Callback: payment:submit:{plan}:{duration} ────────────────────────────────
-
-@Client.on_callback_query(
-    filters.regex(r"^payment:submit:premium:(30|90|lifetime)$")
-)
+@Client.on_callback_query(filters.regex(r"^payment:submit:premium:(30|90|lifetime)$"))
 async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None:
     logger.info(
         "HANDLER: handle_payment_submit entered",
         extra={
-            "ctx_from_user": (
-                callback.from_user.id if callback.from_user else None
-            ),
+            "ctx_from_user": callback.from_user.id if callback.from_user else None,
             "ctx_data": callback.data,
         },
     )
@@ -336,39 +286,21 @@ async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None
             exc_info=True,
         )
         try:
-            await callback.answer(
-                "⚠️ Error. Please try again.", show_alert=True
-            )
+            await callback.answer("⚠️ Error. Please try again.", show_alert=True)
         except Exception:
             pass
 
-
-# ── Private message: capture payment proof ────────────────────────────────────
 
 @Client.on_message(
     (filters.photo | filters.document | filters.text)
     & filters.private
 )
 async def handle_payment_proof_capture(client: Client, message: Message) -> None:
-    """
-    Captures payment proof screenshots from users who are in the payment flow.
-
-    IMPORTANT: This handler ALSO matches photos/documents that are content
-    submissions. It returns immediately when no payment state exists, so it
-    does NOT block handle_media_submission from executing.
-
-    RC-3 fix: full top-level try-except so any exception here does NOT
-    propagate and interfere with other handlers for the same update.
-
-    RC-7 fix: entry logging only when payment state exists (avoids noise
-    for every private message).
-    """
     if not message.from_user:
         return
 
     user_id = message.from_user.id
 
-    # Fast-path: no payment state — return immediately without any side effects
     try:
         state = await _get_payment_state(user_id)
     except Exception as e:
@@ -377,12 +309,11 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             exc_info=True,
         )
-        return  # RC-3: don't block other handlers
+        return
 
     if not state:
         return
 
-    # Payment state exists — this IS a payment proof message
     logger.info(
         "HANDLER: handle_payment_proof_capture — payment proof received",
         extra={
@@ -475,27 +406,21 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
         )
 
 
-# ── Admin command: /approve_payment ──────────────────────────────────────────
-
 @Client.on_message(
     filters.command("approve_payment")
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
+@permission_required(Role.PAYMENT_ADMIN)
 async def handle_approve_payment(client: Client, message: Message) -> None:
     logger.info(
         "HANDLER: handle_approve_payment entered",
         extra={
-            "ctx_from_user": (
-                message.from_user.id if message.from_user else None
-            ),
+            "ctx_from_user": message.from_user.id if message.from_user else None,
             "ctx_text": (message.text or "")[:80],
         },
     )
 
     try:
-        if not message.from_user or not is_payment_admin(message.from_user.id):
-            return
-
         parts = message.text.split()
         if len(parts) < 4:
             await message.reply_text(
@@ -573,7 +498,8 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
         if invite_link:
             dm_text += (
                 f"🔗 <b>Join the premium channel:</b>\n{invite_link}\n\n"
-                "<i>This invite link expires in 24 hours and is single-use.</i>"
+                f"<i>This invite link expires in {settings.INVITE_EXPIRY_MINUTES} minutes "
+                f"and is single-use.</i>"
             )
         else:
             dm_text += (

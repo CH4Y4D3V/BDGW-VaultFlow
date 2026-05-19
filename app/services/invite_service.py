@@ -6,6 +6,7 @@ from typing import Optional
 
 from pyrogram.client import Client
 
+from app.config import settings
 from app.models.invite import Invite, InviteStatus
 from app.repositories.invite_repository import InviteRepository
 from app.services.audit_service import get_audit, AuditAction
@@ -29,12 +30,15 @@ class InviteService:
         plan: str,
     ) -> Invite:
         """
-        Create a single-use, 24-hour invite link to the premium chat.
-        Persists the invite record and writes an audit log entry.
-        Returns the Invite with telegram_link set.
+        Create a single-use invite link to the premium chat.
+
+        Security hardening: expire_date is now INVITE_EXPIRY_MINUTES (default 30)
+        from now, not 24 hours. A 24-hour window gives too much time for link
+        sharing. 30 minutes is sufficient for the user to act and limits exposure.
+        member_limit=1 ensures single-use enforcement at the Telegram layer.
         """
         now = datetime.now(_UTC)
-        expires_at = now + timedelta(hours=24)
+        expires_at = now + timedelta(minutes=settings.INVITE_EXPIRY_MINUTES)
 
         tg_result = await client.create_chat_invite_link(
             chat_id=chat_id,
@@ -69,6 +73,7 @@ class InviteService:
                 "chat_id": chat_id,
                 "plan": plan,
                 "expires_at": expires_at.isoformat(),
+                "expiry_minutes": settings.INVITE_EXPIRY_MINUTES,
             },
         )
 
@@ -79,6 +84,8 @@ class InviteService:
                 "ctx_chat_id": chat_id,
                 "ctx_plan": plan,
                 "ctx_granted_by": granted_by,
+                "ctx_expires_at": expires_at.isoformat(),
+                "ctx_expiry_minutes": settings.INVITE_EXPIRY_MINUTES,
             },
         )
         return invite

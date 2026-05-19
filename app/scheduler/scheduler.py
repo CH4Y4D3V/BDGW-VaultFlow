@@ -2,9 +2,13 @@ import random
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.mongodb import MongoDBJobStore
 from apscheduler.triggers.interval import IntervalTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import MongoClient
+
 from app.config import settings
 from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority
 from app.core.exceptions import DuplicateJobError
@@ -28,6 +32,27 @@ def _get_daily_cap(dest: str) -> int:
     return _DEFAULT_DAILY_CAPS.get(dest, 100)
 
 
+def _build_jobstore() -> MongoDBJobStore:
+    """
+    Build a persistent MongoDB job store for APScheduler.
+
+    APScheduler's MongoDBJobStore requires a synchronous PyMongo client —
+    it does not support Motor (async). We create a dedicated sync client
+    here solely for the job store. This client is separate from the Motor
+    client used everywhere else and does not interfere with it.
+
+    Jobs persisted here survive process restarts, so the scheduler recovers
+    its schedule automatically on boot without any re-registration dance.
+    """
+    # APScheduler needs a sync PyMongo client — Motor is async-only
+    sync_client = MongoClient(settings.MONGO_URI)
+    return MongoDBJobStore(
+        database=settings.MONGO_DB_NAME,
+        collection=settings.SCHEDULER_JOBS_COLLECTION,
+        client=sync_client,
+    )
+
+
 class DistributionScheduler:
     def __init__(
         self,
@@ -38,7 +63,13 @@ class DistributionScheduler:
         self._queue_repo = QueueRepository(db)
         self._fairness = FairnessSelector(db)
         self._content_provider = content_provider_callback
-        self._scheduler = AsyncIOScheduler(timezone="UTC")
+
+        # Persistent MongoDB job store — scheduler state survives restarts
+        jobstores = {"default": _build_jobstore()}
+        self._scheduler = AsyncIOScheduler(
+            jobstores=jobstores,
+            timezone="UTC",
+        )
         self._started = False
 
     def setup_jobs(self) -> None:
@@ -91,10 +122,11 @@ class DistributionScheduler:
         self._scheduler.start()
         self._started = True
         logger.info(
-            "Distribution scheduler started",
+            "Distribution scheduler started (persistent MongoDB job store)",
             extra={
                 "ctx_interval": settings.SCHEDULER_INTERVAL_SECONDS,
                 "ctx_daily_caps": _DEFAULT_DAILY_CAPS,
+                "ctx_jobstore_collection": settings.SCHEDULER_JOBS_COLLECTION,
             },
         )
 
@@ -114,7 +146,6 @@ class DistributionScheduler:
         })
 
     async def _distribution_cycle(self) -> None:
-        # Step 1: fetch channel configs — isolated try so traceback is always visible
         try:
             logger.info("Distribution cycle started")
             channel_configs = await self._content_provider()
@@ -132,7 +163,6 @@ class DistributionScheduler:
         total_enqueued = 0
 
         for config in channel_configs:
-            # Step 2: validate config keys
             try:
                 source_channel_id = config["source_channel_id"]
                 target_channel_ids = config["target_channel_ids"]
@@ -146,7 +176,6 @@ class DistributionScheduler:
             if not available_content or not target_channel_ids:
                 continue
 
-            # Step 3: daily cap enforcement
             try:
                 dest = source_channel_id.replace("submission_", "")
                 daily_cap = _get_daily_cap(dest)
@@ -180,7 +209,6 @@ class DistributionScheduler:
                 )
                 continue
 
-            # Step 4: queue slot check
             try:
                 pending_count = await self._queue_repo.get_channel_pending_count(
                     source_channel_id
@@ -205,7 +233,6 @@ class DistributionScheduler:
                 )
                 continue
 
-            # Step 5: fairness selection
             try:
                 selected_content = await self._fairness.select_eligible_content(
                     available_content=available_content,
@@ -219,7 +246,6 @@ class DistributionScheduler:
                 )
                 continue
 
-            # Step 6: enqueue selected content
             group_execute_times: dict = {}
             group_index = 0
 

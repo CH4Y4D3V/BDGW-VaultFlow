@@ -10,7 +10,7 @@ from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.core.permissions import is_moderator
+from app.core.permissions import Role, permission_required
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -24,10 +24,6 @@ async def _safe_reply(
     text: str,
     parse_mode: ParseMode = ParseMode.HTML,
 ) -> bool:
-    """
-    RC-2 fix: catches ALL exception types.
-    Returns True on success.
-    """
     for attempt in range(_MAX_RETRIES):
         try:
             await message.reply_text(text, parse_mode=parse_mode)
@@ -44,7 +40,6 @@ async def _safe_reply(
                 return False
             await asyncio.sleep(2 ** attempt)
         except Exception as e:
-            # RC-2 fix
             logger.error(
                 "_safe_reply: unexpected exception",
                 extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
@@ -71,6 +66,7 @@ async def _probe_mongodb() -> tuple[str, float | None]:
 
 
 @Client.on_message(filters.command("ping"))
+@permission_required(Role.MODERATOR)
 async def handle_ping(client: Client, message: Message) -> None:
     logger.info(
         "HANDLER: handle_ping entered",
@@ -83,9 +79,6 @@ async def handle_ping(client: Client, message: Message) -> None:
     )
 
     try:
-        if not message.from_user or not is_moderator(message.from_user.id):
-            return
-
         db_status, latency_ms = await _probe_mongodb()
         latency_line = (
             f" <code>({latency_ms} ms)</code>" if latency_ms is not None else ""
@@ -116,6 +109,7 @@ async def handle_ping(client: Client, message: Message) -> None:
 
 
 @Client.on_message(filters.command("status"))
+@permission_required(Role.MODERATOR)
 async def handle_status(client: Client, message: Message) -> None:
     logger.info(
         "HANDLER: handle_status entered",
@@ -128,9 +122,6 @@ async def handle_status(client: Client, message: Message) -> None:
     )
 
     try:
-        if not message.from_user or not is_moderator(message.from_user.id):
-            return
-
         try:
             me = await client.get_me()
             bot_display = (

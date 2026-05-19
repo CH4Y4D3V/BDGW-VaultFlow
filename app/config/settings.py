@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     VAULT_COLLECTION: str = "vault"
     CHANNEL_CONFIG_COLLECTION: str = "channel_config"
     PENDING_COLLECTION: str = "pending_submissions"
+    SCHEDULER_JOBS_COLLECTION: str = "scheduler_jobs"
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -55,7 +56,7 @@ class Settings(BaseSettings):
     ADMIN_IDS: List[int] = Field(default_factory=list)
     SUDO_IDS: List[int] = Field(default_factory=list)
 
-    # ── F2: Granular role lists ───────────────────────────────────────────────
+    # ── Granular role lists ───────────────────────────────────────────────────
     MODERATOR_IDS: List[int] = Field(default_factory=list)
     SUPPORT_ADMIN_IDS: List[int] = Field(default_factory=list)
     PAYMENT_ADMIN_IDS: List[int] = Field(default_factory=list)
@@ -123,6 +124,9 @@ class Settings(BaseSettings):
 
     # ── Subscriptions ─────────────────────────────────────────────────────────
     GRACE_PERIOD_DAYS: int = 3
+
+    # ── Invite security ───────────────────────────────────────────────────────
+    INVITE_EXPIRY_MINUTES: int = 30
 
     # ── Runtime ───────────────────────────────────────────────────────────────
     DEBUG: bool = False

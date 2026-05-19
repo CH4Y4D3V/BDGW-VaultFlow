@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m app.watermark.dispatcher_worker"
+restartPolicyType = "always"
+numReplicas = 1

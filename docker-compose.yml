@@ -1,25 +1,76 @@
 version: "3.9"
 
+# ── Shared environment ────────────────────────────────────────────────────────
+x-bot-env: &bot-env
+  env_file: .env
+  environment:
+    - PYTHONUNBUFFERED=1
+    - REDIS_URL=redis://redis:6379/0
+
+# ── Shared volume mounts ──────────────────────────────────────────────────────
+x-shared-volumes: &shared-volumes
+  - ./sessions:/app/sessions
+  - ./processed:/app/processed
+  - ./watermark_cache:/app/watermark_cache
+  - ./assets:/app/assets
+  - ./logs:/app/logs
+
 services:
+
+  # ── Bot process: Pyrogram client + handlers + health server ──────────────────
   bot:
     build: .
-    env_file: .env
+    <<: *bot-env
     restart: unless-stopped
+    command: python main_bot.py
     depends_on:
       mongo:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - ./sessions:/app/sessions
-      - ./processed:/app/processed
-      - ./watermark_cache:/app/watermark_cache
-      - ./assets:/app/assets
-      - ./logs:/app/logs
-    environment:
-      - PYTHONUNBUFFERED=1
-      - REDIS_URL=redis://redis:6379/0
+    volumes: *shared-volumes
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
+  # ── Dispatcher workers: queue polling + Telegram delivery ────────────────────
+  # Runs independently of the bot process.
+  # Scale horizontally: docker-compose up --scale dispatcher=3
+  dispatcher:
+    build: .
+    <<: *bot-env
+    restart: unless-stopped
+    command: python -m app.workers.dispatcher_entrypoint
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      bot:
+        condition: service_healthy
+    volumes: *shared-volumes
+
+  # ── Watermark workers: FFmpeg processing ─────────────────────────────────────
+  watermark:
+    build: .
+    <<: *bot-env
+    restart: unless-stopped
+    command: python -m app.workers.watermark_entrypoint
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      bot:
+        condition: service_healthy
+    volumes: *shared-volumes
+
+  # ── MongoDB ───────────────────────────────────────────────────────────────────
   mongo:
     image: mongo:7
     restart: unless-stopped
@@ -34,6 +85,7 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── Redis ─────────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped

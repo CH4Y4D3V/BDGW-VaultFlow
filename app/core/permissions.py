@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import functools
 from enum import Enum
-from typing import List
+from typing import Callable, List
+
+from pyrogram.types import CallbackQuery, Message
 
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class Role(str, Enum):
@@ -59,3 +66,79 @@ def is_scheduler_admin(user_id: int) -> bool:
 
 def is_any_admin(user_id: int) -> bool:
     return bool(get_user_roles(user_id))
+
+
+# ── Permission guard decorator ────────────────────────────────────────────────
+
+def permission_required(role: Role, silent: bool = False):
+    """
+    Pyrogram handler decorator that enforces role-based access control.
+
+    Works on both Message and CallbackQuery handlers.
+
+    Args:
+        role:   The minimum Role required to execute the handler.
+        silent: If True, unauthorized calls are dropped without any reply.
+                If False (default), unauthorized users receive a denial message.
+
+    Usage:
+        @Client.on_message(filters.command("approve_payment"))
+        @permission_required(Role.PAYMENT_ADMIN)
+        async def handle_approve_payment(client, message): ...
+
+        @Client.on_callback_query(filters.regex(r"^mod_"))
+        @permission_required(Role.MODERATOR)
+        async def handle_moderation_callback(client, callback): ...
+    """
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        async def wrapper(client, update, *args, **kwargs):
+            # Resolve user_id from either Message or CallbackQuery
+            if isinstance(update, Message):
+                from_user = update.from_user
+            elif isinstance(update, CallbackQuery):
+                from_user = update.from_user
+            else:
+                # Unknown update type — deny by default
+                logger.warning(
+                    "permission_required: unknown update type",
+                    extra={"ctx_type": type(update).__name__, "ctx_role": role.value},
+                )
+                return
+
+            if not from_user:
+                return
+
+            user_id = from_user.id
+
+            if not has_role(user_id, role):
+                logger.warning(
+                    "permission_required: access denied",
+                    extra={
+                        "ctx_user_id": user_id,
+                        "ctx_required_role": role.value,
+                        "ctx_handler": func.__name__,
+                    },
+                )
+                if not silent:
+                    try:
+                        if isinstance(update, CallbackQuery):
+                            await update.answer(
+                                "⛔ You are not authorised to perform this action.",
+                                show_alert=True,
+                            )
+                        elif isinstance(update, Message):
+                            await update.reply_text(
+                                "⛔ You are not authorised to perform this action."
+                            )
+                    except Exception as e:
+                        logger.debug(
+                            "permission_required: could not send denial",
+                            extra={"ctx_error": str(e)},
+                        )
+                return
+
+            return await func(client, update, *args, **kwargs)
+
+        return wrapper
+    return decorator

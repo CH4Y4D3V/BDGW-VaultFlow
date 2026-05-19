@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m app.scheduler.scheduler"
+restartPolicyType = "always"
+numReplicas = 1
