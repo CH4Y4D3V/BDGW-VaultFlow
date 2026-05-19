@@ -85,6 +85,93 @@ class InviteRepository(BaseRepository):
             {"$set": {"status": InviteStatus.EXPIRED.value}},
         )
 
+    async def revoke_all_active_for_user_chat(
+        self, user_id: int, chat_id: int
+    ) -> list[str]:
+        """
+        B-02 Step 3: Cancel all previously issued, unexpired ACTIVE invites
+        for a given (user_id, chat_id) combination.
+
+        Finds all invite documents where:
+          - notes contains f"user_{user_id}" (the intended recipient marker)
+          - chat_id matches
+          - status is ACTIVE
+          - expires_at > utcnow()
+
+        Updates them all to status=REVOKED, revoked_at=utcnow().
+
+        Returns the list of telegram_link strings that were revoked so the
+        caller can also revoke them on the Telegram side via the API.
+        """
+        now = datetime.now(timezone.utc)
+        user_marker = f"user_{user_id}"
+
+        # Find all qualifying documents first to collect their invite links
+        cursor = self.collection.find(
+            {
+                "chat_id": chat_id,
+                "status": InviteStatus.ACTIVE.value,
+                "notes": {"$regex": user_marker},
+                "$or": [
+                    {"expires_at": None},
+                    {"expires_at": {"$gt": now}},
+                ],
+            }
+        )
+        docs = await cursor.to_list(length=None)
+        if not docs:
+            return []
+
+        revoked_links: list[str] = [
+            d["telegram_link"] for d in docs if d.get("telegram_link")
+        ]
+        token_list = [d["token"] for d in docs]
+
+        # Bulk-revoke them atomically
+        await self.collection.update_many(
+            {
+                "token": {"$in": token_list},
+                "status": InviteStatus.ACTIVE.value,
+            },
+            {
+                "$set": {
+                    "status": InviteStatus.REVOKED.value,
+                    "revoked_at": now,
+                }
+            },
+        )
+
+        return revoked_links
+
+    async def get_active_invite_for_user_chat(
+        self, user_id: int, chat_id: int
+    ) -> Optional[Invite]:
+        """
+        B-02 Step 1 helper: find an ACTIVE invite intended for this specific
+        user in this specific chat.
+
+        Invites intended for a user are identified by notes containing
+        f"user_{user_id}" (set by invite_service.generate_premium_invite).
+
+        Returns the most recently created matching invite, or None.
+        """
+        now = datetime.now(timezone.utc)
+        user_marker = f"user_{user_id}"
+        docs = await self.find_many(
+            {
+                "chat_id": chat_id,
+                "status": InviteStatus.ACTIVE.value,
+                "notes": {"$regex": user_marker},
+                "$or": [
+                    {"expires_at": None},
+                    {"expires_at": {"$gt": now}},
+                ],
+            },
+            sort=[("created_at", -1)],
+            limit=1,
+        )
+        return Invite.from_dict(docs[0]) if docs else None
+
     # ── List queries ──────────────────────────────────────────────────────────
 
     async def get_by_creator(

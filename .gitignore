@@ -6,6 +6,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.ai
 build/
 bot_data.db
 dist/
@@ -24,6 +25,7 @@ share/python-wheels/
 *.egg
 MANIFEST
 Lib/
+.ruff_cache/
 Include/
 .vscode/*
 !.vscode/settings.json

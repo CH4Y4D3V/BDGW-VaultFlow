@@ -1,3 +1,9 @@
+# ARCHITECTURE NOTE: Queue is implemented on MongoDB via find_one_and_update atomic claiming.
+# Redis is available in the environment but not used for queuing.
+# The MongoDB approach provides: atomic job claiming, dead-letter promotion, stale lock recovery.
+# Trade-off vs Redis Streams: 2s polling interval instead of pub/sub instant pickup.
+# This is acceptable for current volume. Redis Streams can be added later for sub-second latency.
+
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from motor.motor_asyncio import AsyncIOMotorDatabase
