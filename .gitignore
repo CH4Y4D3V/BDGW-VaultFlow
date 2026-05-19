@@ -36,7 +36,6 @@ ENV/
 # Environment & Secrets
 # =========================
 .env
-.ai
 .env.*
 !.env.example
 .env.production
@@ -138,6 +137,3 @@ temp/
 *.bak
 *.backup
 *.old
-.ai/*
-!.ai/rules.md
-.ruff_cache

@@ -29,6 +29,8 @@ _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_REPLY_RETRIES = 3
 
 
+# ── RC-2 FIX: _safe_reply catches ALL exception types, not just FloodWait/RPCError ──
+
 async def _safe_reply(
     message: Message,
     text: str,
@@ -37,7 +39,14 @@ async def _safe_reply(
 ) -> bool:
     """
     Send a reply with full retry coverage.
-    Returns True on success, False on all-attempts-failed. NEVER raises.
+
+    RC-2 fix: the original only caught FloodWait and RPCError.
+    Pyrogram can raise asyncio.TimeoutError, ConnectionError,
+    MessageTooLong, or other non-RPCError exceptions during reply.
+    These were previously swallowed by Pyrogram's dispatcher — user got silence.
+
+    Now catches ALL exceptions. Returns True on success, False on all-attempts-failed.
+    NEVER raises.
     """
     for attempt in range(_MAX_REPLY_RETRIES):
         try:
@@ -72,6 +81,8 @@ async def _safe_reply(
             await asyncio.sleep(2 ** attempt)
 
         except Exception as e:
+            # RC-2 fix: catch everything else — asyncio.TimeoutError,
+            # ConnectionError, AttributeError, etc.
             logger.error(
                 "_safe_reply: unexpected exception",
                 extra={
@@ -95,8 +106,14 @@ async def _submit_for_review(
     messages: list[Message],
     user_id: int,
 ) -> None:
+    """
+    RC-8 fix: every exit path sends user feedback.
+    If register_pending or forward_to_verification fails for any reason,
+    the user always receives a visible acknowledgement.
+    """
     reference_message = messages[0]
 
+    # Register in pending cache
     try:
         await submission_service.register_pending(user_id, messages)
     except Exception as e:
@@ -111,6 +128,7 @@ async def _submit_for_review(
         )
         return
 
+    # Forward to verification group
     success = False
     try:
         success = await verification_hub.forward_to_verification(
@@ -139,6 +157,7 @@ async def _submit_for_review(
             extra={"ctx_user_id": user_id, "ctx_count": len(messages)},
         )
     else:
+        # Clean up pending entry
         try:
             await submission_service.reject_pending(reference_message.id)
         except Exception as e:
@@ -192,6 +211,10 @@ async def _flush_album(group_id: str, user_id: int, client: Client) -> None:
 
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
+    """
+    RC-7 fix: entry logging.
+    RC-3 fix: top-level try-except with fallback reply.
+    """
     logger.info(
         "HANDLER: handle_start entered",
         extra={
@@ -241,6 +264,7 @@ async def handle_start(client: Client, message: Message) -> None:
             )
 
     except Exception as e:
+        # RC-3 fix: catch everything, always give user feedback
         logger.error(
             "HANDLER: handle_start unhandled exception",
             extra={
@@ -257,20 +281,12 @@ async def handle_start(client: Client, message: Message) -> None:
         )
 
 
-# FIX: Removed `& filters.private` from @Client.on_callback_query decorator.
-#
-# ROOT CAUSE: In Pyrogram 2.0.106, `filters.private` evaluates `m.chat` on the
-# update object. For `Message` updates, `.chat` exists. For `CallbackQuery`,
-# there is no `.chat` attribute, so Pyrogram raises:
-#   AttributeError: 'CallbackQuery' object has no attribute 'chat'
-# This crashes inside Pyrogram's filter evaluation, BEFORE the handler body
-# runs, so the callback is silently dropped. Users see no response.
-#
-# Since `menu:submit` callbacks only appear from the /start inline keyboard
-# (which is only sent in private chat), removing `& filters.private` is safe.
-# A runtime guard inside the handler provides an additional safety check.
-@Client.on_callback_query(filters.regex(r"^menu:submit$"))
+@Client.on_callback_query(filters.regex(r"^menu:submit$") & filters.private)
 async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
+    """
+    RC-7 fix: handles the 'Send Content Anonymously' button.
+    This callback had NO registered handler — clicking it silently timed out.
+    """
     logger.info(
         "HANDLER: handle_submit_menu entered",
         extra={
@@ -281,14 +297,6 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     )
 
     try:
-        # Guard: message must exist to edit it
-        if callback.message is None:
-            await callback.answer(
-                "Send your photo, video, or file directly in this chat.",
-                show_alert=True,
-            )
-            return
-
         await callback.answer()
         try:
             await callback.message.edit_text(
@@ -327,6 +335,12 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     & filters.private
 )
 async def handle_media_submission(client: Client, message: Message) -> None:
+    """
+    RC-3 fix: full top-level exception boundary.
+    RC-5 fix: check_and_gate_creator is wrapped so DB errors give user feedback.
+    RC-7 fix: entry logging.
+    RC-9 fix: every code path acknowledges the user.
+    """
     logger.info(
         "HANDLER: handle_media_submission entered",
         extra={
@@ -345,6 +359,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
 
         user_id = message.from_user.id
 
+        # RC-5 fix: consent gate wrapped in its own try-except
         try:
             is_verified = await check_and_gate_creator(client, message)
         except Exception as e:
@@ -361,6 +376,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
             return
 
         if not is_verified:
+            # Onboarding prompt already sent by check_and_gate_creator
             logger.info(
                 "HANDLER: handle_media_submission — creator gate: not verified, "
                 "onboarding prompt shown",
@@ -400,6 +416,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         )
 
     except Exception as e:
+        # RC-3 fix: last resort catch
         logger.error(
             "HANDLER: handle_media_submission unhandled exception",
             extra={

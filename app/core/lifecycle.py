@@ -52,8 +52,7 @@ class AppLifecycle:
         # 2. Database
         try:
             await DatabaseManager.connect()
-            
-            # Seed distribution channels
+
             channel_service = ChannelService()
             await channel_service.seed_channels()
         except Exception:
@@ -65,21 +64,18 @@ class AppLifecycle:
             logger.info("Starting Pyrogram client...")
             await self._bot.start()
             me = await self._bot.get_me()
-            logger.info("Telegram client connected", extra={"ctx_bot_username": me.username})
+            logger.info(
+                "Telegram client connected",
+                extra={"ctx_bot_username": me.username, "ctx_bot_id": me.id},
+            )
 
-            handlers_count = 0
-            if hasattr(self._bot, "dispatcher") and hasattr(self._bot.dispatcher, "groups"):
-                for group_id, handlers in self._bot.dispatcher.groups.items():
-                    logger.info(
-                        "Handler group registered",
-                        extra={"ctx_group_id": group_id, "ctx_handlers_count": len(handlers)},
-                    )
-                    handlers_count += len(handlers)
-
-            if handlers_count == 0:
-                logger.warning("No Pyrogram handlers registered — update routing may fail.")
-            else:
-                logger.info("Telegram update routing active", extra={"ctx_total_handlers": handlers_count})
+            # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
+            # Pyrogram 2.x stores handlers in dispatcher.groups (dict[int, list]).
+            # We count them here and emit a detailed breakdown so you always know
+            # exactly which groups and how many handlers were registered.
+            # If zero handlers are found, this is a CRITICAL startup failure —
+            # the bot will be alive but completely deaf to all updates.
+            self._audit_handler_registration()
 
         except Exception:
             logger.error("Failed to start Pyrogram client", exc_info=True)
@@ -108,23 +104,117 @@ class AppLifecycle:
             await self._subscription_worker.start(bot=self._bot)
         except Exception:
             logger.error("Failed to start Subscription Worker", exc_info=True)
-            # Non-fatal — bot can run without subscription sweeper
             self._subscription_worker = None
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")
 
+    def _audit_handler_registration(self) -> None:
+        """
+        Emit a detailed breakdown of all registered Pyrogram handlers.
+
+        RC-7 / RC-1 fix: without this, zero-handler situations are only a
+        logged warning. With this audit we see exactly what is and isn't
+        registered, which group it's in, and the handler function name.
+
+        A zero-handler count is escalated to CRITICAL and causes the process
+        to exit — a bot with no handlers is completely non-functional and
+        should not silently run.
+        """
+        total_handlers = 0
+        breakdown: dict[int, list[str]] = {}
+
+        try:
+            dispatcher = getattr(self._bot, "dispatcher", None)
+            if dispatcher is None:
+                logger.error(
+                    "STARTUP AUDIT: bot.dispatcher is None — "
+                    "Pyrogram plugin system may not have initialised"
+                )
+                return
+
+            groups = getattr(dispatcher, "groups", None)
+            if groups is None:
+                logger.error(
+                    "STARTUP AUDIT: bot.dispatcher.groups is None — "
+                    "cannot verify handler registration"
+                )
+                return
+
+            for group_id, handlers in groups.items():
+                handler_names = []
+                for h in handlers:
+                    # Pyrogram handler objects have a `callback` attribute
+                    cb = getattr(h, "callback", None)
+                    if cb is not None:
+                        name = getattr(cb, "__name__", repr(cb))
+                        module = getattr(cb, "__module__", "?")
+                        handler_names.append(f"{module}.{name}")
+                    else:
+                        handler_names.append(repr(h))
+                breakdown[group_id] = handler_names
+                total_handlers += len(handler_names)
+
+        except Exception as e:
+            logger.error(
+                "STARTUP AUDIT: handler inspection failed",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )
+            return
+
+        if total_handlers == 0:
+            logger.critical(
+                "STARTUP AUDIT CRITICAL: ZERO handlers registered. "
+                "The bot is connected but will not respond to ANY update. "
+                "Check that app/handlers/ contains valid plugin files and that "
+                "Pyrogram loaded them successfully (no import errors at startup). "
+                "Aborting — a silent deaf bot is worse than not starting.",
+                extra={"ctx_groups": dict(breakdown)},
+            )
+            # Exit hard — a bot with zero handlers should not run silently
+            sys.exit(1)
+
+        # Emit per-group breakdown at INFO so the log always shows
+        # which handlers are active after boot
+        for group_id in sorted(breakdown.keys()):
+            names = breakdown[group_id]
+            logger.info(
+                "STARTUP AUDIT: handler group registered",
+                extra={
+                    "ctx_group_id": group_id,
+                    "ctx_handler_count": len(names),
+                    "ctx_handlers": names,
+                },
+            )
+
+        logger.info(
+            "STARTUP AUDIT: handler registration complete",
+            extra={
+                "ctx_total_handlers": total_handlers,
+                "ctx_group_count": len(breakdown),
+            },
+        )
+
+        # Warn on suspiciously low counts — update_logger alone registers 3
+        if total_handlers < 5:
+            logger.warning(
+                "STARTUP AUDIT WARNING: very few handlers registered (%d). "
+                "Plugin loading may have partially failed. "
+                "Check for import errors in app/handlers/ files.",
+                total_handlers,
+                extra={"ctx_total": total_handlers},
+            )
+
     async def stop(self) -> None:
         logger.info("Initiating graceful shutdown...")
 
-        # 1. Subscription Worker
         if self._subscription_worker:
             try:
                 await self._subscription_worker.stop()
             except Exception:
                 logger.error("Error stopping subscription worker", exc_info=True)
 
-        # 2. Distribution Engine
         if self._engine and self._engine.is_running:
             try:
                 await asyncio.wait_for(self._engine.stop(), timeout=45.0)
@@ -133,20 +223,17 @@ class AppLifecycle:
             except Exception:
                 logger.error("Error during engine shutdown", exc_info=True)
 
-        # 3. Telegram Client
         if self._bot and getattr(self._bot, "is_connected", False):
             try:
                 await self._bot.stop()
             except Exception:
                 logger.error("Error stopping Pyrogram client", exc_info=True)
 
-        # 4. MongoDB
         try:
             await DatabaseManager.disconnect()
         except Exception:
             logger.error("Error disconnecting MongoDB", exc_info=True)
 
-        # 5. Health Server
         if self._health_runner:
             try:
                 await self._health_runner.cleanup()
