@@ -4,10 +4,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.mongodb import MongoDBJobStore
+from apscheduler.jobstores.memory import MemoryJobStore          # <-- CHANGED
 from apscheduler.triggers.interval import IntervalTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import MongoClient
 
 from app.config import settings
 from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority
@@ -32,27 +31,6 @@ def _get_daily_cap(dest: str) -> int:
     return _DEFAULT_DAILY_CAPS.get(dest, 100)
 
 
-def _build_jobstore() -> MongoDBJobStore:
-    """
-    Build a persistent MongoDB job store for APScheduler.
-
-    APScheduler's MongoDBJobStore requires a synchronous PyMongo client —
-    it does not support Motor (async). We create a dedicated sync client
-    here solely for the job store. This client is separate from the Motor
-    client used everywhere else and does not interfere with it.
-
-    Jobs persisted here survive process restarts, so the scheduler recovers
-    its schedule automatically on boot without any re-registration dance.
-    """
-    # APScheduler needs a sync PyMongo client — Motor is async-only
-    sync_client = MongoClient(settings.MONGO_URI)
-    return MongoDBJobStore(
-        database=settings.MONGO_DB_NAME,
-        collection=settings.SCHEDULER_JOBS_COLLECTION,
-        client=sync_client,
-    )
-
-
 class DistributionScheduler:
     def __init__(
         self,
@@ -64,8 +42,11 @@ class DistributionScheduler:
         self._fairness = FairnessSelector(db)
         self._content_provider = content_provider_callback
 
-        # Persistent MongoDB job store — scheduler state survives restarts
-        jobstores = {"default": _build_jobstore()}
+        # MemoryJobStore: jobs are re-registered on every boot (replace_existing=True).
+        # MongoDBJobStore (APScheduler 3.x) is incompatible with pymongo 4.x —
+        # it calls ensure_index() which was removed in pymongo 4.0.
+        # Restart recovery is handled by the queue's stale lock sweep, not APScheduler.
+        jobstores = {"default": MemoryJobStore()}
         self._scheduler = AsyncIOScheduler(
             jobstores=jobstores,
             timezone="UTC",
@@ -122,11 +103,11 @@ class DistributionScheduler:
         self._scheduler.start()
         self._started = True
         logger.info(
-            "Distribution scheduler started (persistent MongoDB job store)",
+            "Distribution scheduler started",
             extra={
                 "ctx_interval": settings.SCHEDULER_INTERVAL_SECONDS,
                 "ctx_daily_caps": _DEFAULT_DAILY_CAPS,
-                "ctx_jobstore_collection": settings.SCHEDULER_JOBS_COLLECTION,
+                "ctx_jobstore": "memory",
             },
         )
 
