@@ -125,38 +125,21 @@ async def forward_to_verification(
     return False
 
 
-async def _forward_single(
-    client: Client,
-    msg: Message,
-    group_id: int,
-    submitter_user_id: int,
-) -> Optional[Message]:
+async def _forward_single(client, msg, group_id, submitter_user_id):
     for attempt in range(_MAX_RETRIES):
         try:
-            result = await client.forward_messages(
+            result = await client.copy_message(
                 chat_id=group_id,
                 from_chat_id=msg.chat.id,
-                message_ids=msg.id,
+                message_id=msg.id,
             )
-            return result[0] if isinstance(result, list) else result
-
+            return result
         except FloodWait as e:
-            wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-            logger.warning(
-                "FloodWait forwarding message",
-                extra={"ctx_msg_id": msg.id, "ctx_wait": wait, "ctx_attempt": attempt + 1},
-            )
-            await asyncio.sleep(wait)
-
+            await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
         except RPCError as e:
-            logger.error(
-                "RPC error forwarding message",
-                extra={"ctx_msg_id": msg.id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
-            )
             if attempt == _MAX_RETRIES - 1:
                 return None
             await asyncio.sleep(2 ** attempt)
-
     return None
 
 
