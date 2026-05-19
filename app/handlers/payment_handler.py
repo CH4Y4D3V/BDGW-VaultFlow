@@ -177,7 +177,7 @@ async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None
 # ── Private message: capture payment proof ────────────────────────────────────
 
 @Client.on_message(
-    (filters.photo | filters.document | filters.text)
+    (filters.photo | filters.document)
     & filters.private
 )
 async def handle_payment_proof_capture(client: Client, message: Message) -> None:
@@ -188,6 +188,7 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
     state = await _get_payment_state(user_id)
     if not state:
         return
+    
 
     plan = state.get("plan", "premium")
     duration = state.get("duration", "?")
