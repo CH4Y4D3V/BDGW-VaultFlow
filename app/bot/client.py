@@ -7,6 +7,7 @@ from pyrogram.client import Client
 from app.config import settings
 
 _bot_instance: Optional[Client] = None
+_bot_id: Optional[int] = None
 
 
 def get_bot() -> Client:
@@ -18,7 +19,7 @@ def get_bot() -> Client:
                 "CRITICAL: Pyrogram client missing mandatory Telegram credentials "
                 "(BOT_TOKEN, API_ID, API_HASH). Cannot start client."
             )
-            
+
         _bot_instance = Client(
             name=settings.SESSION_NAME,
             bot_token=settings.BOT_TOKEN,
@@ -29,3 +30,21 @@ def get_bot() -> Client:
             max_concurrent_transmissions=getattr(settings, "MAX_CONCURRENT_TRANSMISSIONS", 10),
         )
     return _bot_instance
+
+
+def get_bot_id() -> Optional[int]:
+    """
+    FIX 8: Return the cached bot user_id, or None if not yet set.
+    Call set_bot_id() once after client.start() + client.get_me() at boot.
+    """
+    return _bot_id
+
+
+def set_bot_id(user_id: int) -> None:
+    """
+    FIX 8: Store the bot's own user_id so handlers can check it without
+    calling client.get_me() on every incoming message.
+    Called once from AppLifecycle.start() after successful bot.start().
+    """
+    global _bot_id
+    _bot_id = user_id

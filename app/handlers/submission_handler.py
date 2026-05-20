@@ -29,15 +29,15 @@ _album_lock = asyncio.Lock()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_REPLY_RETRIES = 3
 
-# FIX 17: per-user submission rate limiter (in-memory, single-process).
-# Tracks submission timestamps per user_id for a 60-second rolling window.
+# FIX 17: Simple in-memory per-user rate limit.
 # Max 10 submissions per user per 60 seconds.
+# Intentionally single-process / in-memory to match the existing architecture.
 _submission_rate: dict[int, list[float]] = {}
 _RATE_LIMIT_MAX = 10
 _RATE_LIMIT_WINDOW = 60.0
 
 
-# ── RC-2 FIX: _safe_reply catches ALL exception types, not just FloodWait/RPCError ──
+# ── RC-2 FIX: _safe_reply catches ALL exception types ────────────────────────
 
 async def _safe_reply(
     message: Message,
@@ -111,30 +111,13 @@ async def _safe_reply(
 
 async def _has_active_payment_session(user_id: int) -> bool:
     """
-    FIX 18: Check whether the user is mid-payment before routing media to
-    the submission pipeline.
+    Middleware conflict fix: check whether the user is mid-payment before
+    routing media to the submission pipeline.
 
-    Redis-first: checks the pay_session:{user_id} key written by payment_handler
-    when a session is opened. Falls back to MongoDB if Redis is unavailable.
-    Never raises — returns False on any error (fail-open is safer here).
+    Replicates the same DB lookup used by payment_handler._get_payment_state()
+    so no circular import is needed. Returns True if a payment session is active.
+    Never raises — returns False on any DB error (fail-open is safer here).
     """
-    # FIX 18: fast Redis path
-    try:
-        from app.core.redis_client import get_redis
-        redis = get_redis()
-        result = await redis.exists(f"pay_session:{user_id}")
-        if result:
-            return True
-        # Key absent in Redis — definitive "no active session" only if Redis
-        # is healthy. If we got here without exception, Redis is up, so trust it.
-        return False
-    except Exception as e:
-        logger.warning(
-            "_has_active_payment_session: Redis error, falling back to MongoDB",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-        )
-
-    # Fallback: MongoDB (original behaviour)
     try:
         from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
@@ -142,7 +125,7 @@ async def _has_active_payment_session(user_id: int) -> bool:
         return doc is not None
     except Exception as e:
         logger.warning(
-            "_has_active_payment_session: MongoDB fallback also failed, defaulting to False",
+            "_has_active_payment_session: DB error, defaulting to False",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
         return False
@@ -390,8 +373,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
     RC-7 fix: entry logging.
     RC-9 fix: every code path acknowledges the user.
     Middleware conflict fix: skip if user is in an active payment flow.
-    FIX 17: per-user rate limiting (max 10 per 60s) before consent gate.
-    FIX 18: payment state check uses Redis-first path.
+    FIX 17: per-user rate limiting (max 10 submissions per 60 seconds).
     """
     logger.info(
         "HANDLER: handle_media_submission entered",
@@ -412,8 +394,10 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         user_id = message.from_user.id
 
         # ── Middleware conflict fix: skip if user is in active payment flow ──
-        # FIX 18: payment_handler.handle_payment_proof_capture() owns media messages
-        # while the user is mid-payment. Redis-first check (see _has_active_payment_session).
+        # payment_handler.handle_payment_proof_capture() owns media messages
+        # while the user is mid-payment. Without this guard, both handlers fire
+        # and the photo is incorrectly routed to both the submission pipeline and
+        # the payment proof capture path.
         try:
             payment_active = await _has_active_payment_session(user_id)
         except Exception as e:
@@ -430,9 +414,11 @@ async def handle_media_submission(client: Client, message: Message) -> None:
             )
             return
 
-        # ── FIX 17: per-user rate limit ───────────────────────────────────────
-        # Simple in-memory rolling window: max 10 submissions per 60 seconds.
-        # Single-process, intentionally simple to match the existing architecture.
+        # ── FIX 17: Per-user rate limiting ────────────────────────────────────
+        # Simple in-memory sliding window: max 10 submissions per user per 60s.
+        # Applied after the payment check (payment messages are already excluded)
+        # and before the consent gate so rate-limited users get a fast reply
+        # without hitting MongoDB.
         now = time.monotonic()
         timestamps = _submission_rate.get(user_id, [])
         timestamps = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
@@ -441,10 +427,8 @@ async def handle_media_submission(client: Client, message: Message) -> None:
                 "HANDLER: handle_media_submission — rate limit hit",
                 extra={"ctx_user_id": user_id, "ctx_count": len(timestamps)},
             )
-            await _safe_reply(
-                message,
-                "⏳ You're submitting too quickly. "
-                "Please wait a moment before sending more content.",
+            await message.reply(
+                "You're submitting too quickly. Please wait before sending more content."
             )
             return
         timestamps.append(now)

@@ -33,16 +33,11 @@ class InviteService:
         Create a single-use invite link to the premium chat.
 
         B-02 Step 2: Before creating a new invite, revoke all previously issued
-        unexpired ACTIVE invites for this (user_id, chat_id) combination. For each
-        revoked invite, also call client.revoke_chat_invite_link() on Telegram so
-        the old links cannot be used by anyone who may have received them.
+        unexpired ACTIVE invites for this (user_id, chat_id) combination.
 
-        Security hardening: expire_date is INVITE_EXPIRY_MINUTES (default 30) from
-        now. member_limit=1 ensures single-use enforcement at the Telegram layer.
-
-        Notes format: "user_{user_id} plan:{plan} granted_by:{granted_by}"
-        The "user_{user_id}" marker is required by invite_repository for identity
-        verification queries.
+        FIX 10: Sets intended_user_id field on the invite document so that
+        invite_repository can query by indexed field instead of notes regex.
+        Notes field is still written for human-readable audit purposes.
         """
         # ── B-02 Step 2: Revoke any previously active invites for this user+chat ──
         try:
@@ -100,8 +95,6 @@ class InviteService:
 
         token = secrets.token_urlsafe(16)
 
-        # Notes format includes "user_{user_id}" so invite_repository can filter
-        # by intended recipient for identity verification (B-02).
         invite = Invite(
             token=token,
             created_by=granted_by,
@@ -113,10 +106,15 @@ class InviteService:
             expires_at=expires_at,
             status=InviteStatus.ACTIVE,
             telegram_link=tg_result.invite_link,
+            # FIX 10: notes kept for human-readable audit; queries now use intended_user_id
             notes=f"user_{user_id} plan:{plan} granted_by:{granted_by}",
         )
 
-        await self._repo.create(invite)
+        # FIX 10: write intended_user_id as a proper indexed field
+        invite_doc = invite.to_dict()
+        invite_doc["intended_user_id"] = user_id
+
+        await self._repo.collection.insert_one(invite_doc)
 
         await get_audit().log(
             action=AuditAction.INVITE_GENERATE,
