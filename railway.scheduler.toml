@@ -3,6 +3,10 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python -m app.scheduler.scheduler"
+# FIX 15: was "python -m app.scheduler.scheduler" which has no __main__ block.
+# Pointing to the existing standalone dispatcher entrypoint which starts the
+# DispatcherWorkerPool (job dispatch + rate limiting + flood-wait handling).
+# The DistributionScheduler runs embedded in the main bot process (main_bot.py).
+startCommand = "python -m app.workers.dispatcher_entrypoint"
 restartPolicyType = "always"
 numReplicas = 1

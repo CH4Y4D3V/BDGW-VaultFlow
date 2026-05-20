@@ -3,6 +3,9 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python -m app.watermark.dispatcher_worker"
+# FIX 15: was "python -m app.watermark.dispatcher_worker" which has no __main__ block.
+# Pointing to the existing standalone watermark entrypoint which starts the
+# WatermarkWorkerPool (FFmpeg processing + job state management).
+startCommand = "python -m app.workers.watermark_entrypoint"
 restartPolicyType = "always"
 numReplicas = 1

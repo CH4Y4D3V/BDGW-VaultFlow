@@ -43,8 +43,18 @@ _PLANS = [
 
 _PLAN_MAP = {p["callback"]: p for p in _PLANS}
 
+# FIX 18: TTL for the Redis payment session key (seconds).
+# Slightly longer than any realistic payment proof window.
+_PAY_SESSION_TTL = 3600
+
 
 async def _set_payment_state(user_id: int, plan: str, duration: str) -> None:
+    """
+    Persist payment session state to MongoDB (authoritative) and Redis (fast gate).
+
+    FIX 18: writing to Redis with a 1-hour TTL means submission_handler can
+    check Redis in O(1) instead of hitting MongoDB on every private media message.
+    """
     try:
         db = DatabaseManager.get_db()
         key = f"payment_state:{user_id}"
@@ -62,11 +72,28 @@ async def _set_payment_state(user_id: int, plan: str, duration: str) -> None:
         )
     except Exception as e:
         logger.error(
-            "_set_payment_state: failed",
+            "_set_payment_state: MongoDB write failed",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             exc_info=True,
         )
         raise
+
+    # FIX 18: mirror to Redis for fast gate checks
+    try:
+        from app.core.redis_client import get_redis
+        redis = get_redis()
+        await redis.setex(f"pay_session:{user_id}", _PAY_SESSION_TTL, "1")
+        logger.debug(
+            "_set_payment_state: Redis key set",
+            extra={"ctx_user_id": user_id, "ctx_ttl": _PAY_SESSION_TTL},
+        )
+    except Exception as e:
+        # Non-fatal — MongoDB is the source of truth; Redis is a cache.
+        # submission_handler falls back to MongoDB if Redis misses.
+        logger.warning(
+            "_set_payment_state: Redis setex failed (non-fatal)",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
 
 
 async def _get_payment_state(user_id: int) -> Optional[dict]:
@@ -85,6 +112,12 @@ async def _get_payment_state(user_id: int) -> Optional[dict]:
 
 
 async def _clear_payment_state(user_id: int) -> None:
+    """
+    Remove payment session state from MongoDB and Redis.
+
+    FIX 18: deleting the Redis key immediately so submission_handler stops
+    routing media to the payment handler as soon as the proof is submitted.
+    """
     try:
         db = DatabaseManager.get_db()
         await db["bot_config"].delete_one(
@@ -92,7 +125,22 @@ async def _clear_payment_state(user_id: int) -> None:
         )
     except Exception as e:
         logger.warning(
-            "_clear_payment_state: failed (non-fatal)",
+            "_clear_payment_state: MongoDB delete failed (non-fatal)",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+
+    # FIX 18: clear Redis key
+    try:
+        from app.core.redis_client import get_redis
+        redis = get_redis()
+        await redis.delete(f"pay_session:{user_id}")
+        logger.debug(
+            "_clear_payment_state: Redis key deleted",
+            extra={"ctx_user_id": user_id},
+        )
+    except Exception as e:
+        logger.warning(
+            "_clear_payment_state: Redis delete failed (non-fatal)",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
 
