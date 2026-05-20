@@ -9,6 +9,7 @@ from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import Message
 
 from app.config import settings
+from app.bot.client import get_bot_id
 from app.moderation import verification_hub
 from app.services import submission_service
 from app.utils.logger import get_logger
@@ -116,13 +117,11 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
     if submitter_id is None:
         return
 
-    # Never process the bot's own messages
-    try:
-        me = await client.get_me()
-        if message.from_user and message.from_user.id == me.id:
-            return
-    except Exception:
-        pass
+    # FIX 8: Never process the bot's own messages.
+    # Use cached bot_id instead of calling client.get_me() on every message.
+    bot_id = get_bot_id()
+    if bot_id is not None and message.from_user and message.from_user.id == bot_id:
+        return
 
     media_group_id = message.media_group_id
 

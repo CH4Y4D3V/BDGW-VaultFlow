@@ -1,3 +1,7 @@
+# DEPRECATED: This pipeline is no longer called in the main moderation flow.
+# execute_approve() and execute_queue() in moderation_actions.py handle ingestion directly.
+# Retained for reference. Do not add new callers.
+
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -40,10 +44,10 @@ class MediaIngestionPipeline:
         # Media group buffering to handle partial album arrival
         async with self._lock:
             self._buffer[group_id].append(message)
-            
+
             if group_id in self._tasks:
                 self._tasks[group_id].cancel()
-                
+
             self._tasks[group_id] = asyncio.create_task(
                 self._wait_and_flush(group_id, source_channel_id)
             )
@@ -76,7 +80,7 @@ class MediaIngestionPipeline:
             media = getattr(msg, str(msg.media.value)) if msg.media else None
             file_unique_id = getattr(media, "file_unique_id", None) if media else None
             file_id = getattr(media, "file_id", None) if media else None
-            
+
             # Protected content handling: download to local disk
             local_path = None
             if msg.has_protected_content and media:
@@ -86,11 +90,11 @@ class MediaIngestionPipeline:
                 except Exception as e:
                     logger.error("Failed to download protected content", exc_info=e)
                     continue
-            
+
             # Media normalization
             media_type_str = str(msg.media.value) if msg.media else MediaType.TEXT.value
             content_id = f"{source_channel_id}_{msg.id}"
-            
+
             doc = {
                 "$setOnInsert": {
                     "content_id": content_id,
@@ -111,7 +115,7 @@ class MediaIngestionPipeline:
                     }
                 }
             }
-            
+
             # Duplicate media prevention + vault archival consistency via atomic upsert
             operations.append(UpdateOne(
                 {"content_id": content_id},
@@ -139,7 +143,7 @@ class MediaIngestionPipeline:
                 if gid in self._tasks:
                     self._tasks[gid].cancel()
                     self._tasks.pop(gid, None)
-                    
+
         # Flush remaining buffers directly via graceful teardown
         for gid in group_ids:
             messages = self._buffer.pop(gid, [])

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Callable, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.memory import MemoryJobStore          # <-- CHANGED
+from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.triggers.interval import IntervalTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -17,18 +17,17 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_DEFAULT_DAILY_CAPS: dict[str, int] = {
-    "nsfw": 75,
-    "premium": 140,
+# FIX 14: Daily caps are now driven by settings (env vars) instead of a
+# hardcoded dict. DAILY_CAP_NSFW and DAILY_CAP_PREMIUM are defined in
+# settings.py with safe defaults (75 and 140 respectively).
+_DAILY_CAPS = {
+    "nsfw": settings.DAILY_CAP_NSFW,
+    "premium": settings.DAILY_CAP_PREMIUM,
 }
 
 
 def _get_daily_cap(dest: str) -> int:
-    env_key = f"DAILY_CAP_{dest.upper()}"
-    cap = getattr(settings, env_key, None)
-    if cap and isinstance(cap, int) and cap > 0:
-        return cap
-    return _DEFAULT_DAILY_CAPS.get(dest, 100)
+    return _DAILY_CAPS.get(dest, 100)
 
 
 class DistributionScheduler:
@@ -106,7 +105,7 @@ class DistributionScheduler:
             "Distribution scheduler started",
             extra={
                 "ctx_interval": settings.SCHEDULER_INTERVAL_SECONDS,
-                "ctx_daily_caps": _DEFAULT_DAILY_CAPS,
+                "ctx_daily_caps": _DAILY_CAPS,
                 "ctx_jobstore": "memory",
             },
         )

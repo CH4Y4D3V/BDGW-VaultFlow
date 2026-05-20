@@ -162,6 +162,12 @@ class DatabaseManager:
                 name="pending_expiry_ttl",
                 expireAfterSeconds=0,
             ),
+            # FIX 11: index on submitter_user_id for admin queries
+            IndexModel(
+                [("submitter_user_id", ASCENDING)],
+                name="pending_by_submitter",
+                background=True,
+            ),
         ])
 
         # ── Subscriptions ─────────────────────────────────────────────────────
@@ -232,6 +238,12 @@ class DatabaseManager:
                 background=True,
                 sparse=True,
             ),
+            # FIX 10: index on intended_user_id for efficient identity verification queries
+            IndexModel(
+                [("intended_user_id", ASCENDING), ("chat_id", ASCENDING), ("status", ASCENDING)],
+                name="invite_intended_user",
+                background=True,
+            ),
         ])
 
         # ── Activity ──────────────────────────────────────────────────────────
@@ -292,6 +304,19 @@ class DatabaseManager:
                 name="support_msg_user",
                 background=True,
             ),
+            # FIX 11: compound index for user+direction queries
+            IndexModel(
+                [("user_id", ASCENDING), ("direction", ASCENDING), ("created_at", DESCENDING)],
+                name="support_user_direction",
+                background=True,
+            ),
+            # FIX 11: unique sparse index on hub_message_id + direction
+            IndexModel(
+                [("hub_message_id", ASCENDING), ("direction", ASCENDING)],
+                name="support_hub_msg_unique",
+                unique=True,
+                sparse=True,
+            ),
         ])
 
         # ── Moderation audit ──────────────────────────────────────────────────
@@ -330,6 +355,12 @@ class DatabaseManager:
                 [("user_id", ASCENDING)],
                 name="creator_profile_user_unique",
                 unique=True,
+            ),
+            # FIX 11: index on status for admin queries (active/suspended/banned creators)
+            IndexModel(
+                [("status", ASCENDING)],
+                name="creator_by_status",
+                background=True,
             ),
         ])
 

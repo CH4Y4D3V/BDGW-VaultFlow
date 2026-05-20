@@ -8,7 +8,7 @@ from app.core.database import DatabaseManager
 from app.core.logger import get_logger
 from app.distribution.engine import DistributionEngine
 from app.services.channel_service import ChannelService
-from app.bot.client import get_bot
+from app.bot.client import get_bot, set_bot_id
 from app.workers.subscription_worker import SubscriptionWorker
 from app.health import start_health_server
 
@@ -69,12 +69,11 @@ class AppLifecycle:
                 extra={"ctx_bot_username": me.username, "ctx_bot_id": me.id},
             )
 
+            # FIX 8: Cache the bot's own user_id so group_handler can check
+            # message.from_user.id == get_bot_id() without calling get_me() per message.
+            set_bot_id(me.id)
+
             # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
-            # Pyrogram 2.x stores handlers in dispatcher.groups (dict[int, list]).
-            # We count them here and emit a detailed breakdown so you always know
-            # exactly which groups and how many handlers were registered.
-            # If zero handlers are found, this is a CRITICAL startup failure —
-            # the bot will be alive but completely deaf to all updates.
             self._audit_handler_registration()
 
         except Exception:
@@ -112,14 +111,6 @@ class AppLifecycle:
     def _audit_handler_registration(self) -> None:
         """
         Emit a detailed breakdown of all registered Pyrogram handlers.
-
-        RC-7 / RC-1 fix: without this, zero-handler situations are only a
-        logged warning. With this audit we see exactly what is and isn't
-        registered, which group it's in, and the handler function name.
-
-        A zero-handler count is escalated to CRITICAL and causes the process
-        to exit — a bot with no handlers is completely non-functional and
-        should not silently run.
         """
         total_handlers = 0
         breakdown: dict[int, list[str]] = {}
@@ -144,7 +135,6 @@ class AppLifecycle:
             for group_id, handlers in groups.items():
                 handler_names = []
                 for h in handlers:
-                    # Pyrogram handler objects have a `callback` attribute
                     cb = getattr(h, "callback", None)
                     if cb is not None:
                         name = getattr(cb, "__name__", repr(cb))
@@ -172,11 +162,8 @@ class AppLifecycle:
                 "Aborting — a silent deaf bot is worse than not starting.",
                 extra={"ctx_groups": dict(breakdown)},
             )
-            # Exit hard — a bot with zero handlers should not run silently
             sys.exit(1)
 
-        # Emit per-group breakdown at INFO so the log always shows
-        # which handlers are active after boot
         for group_id in sorted(breakdown.keys()):
             names = breakdown[group_id]
             logger.info(
@@ -196,7 +183,6 @@ class AppLifecycle:
             },
         )
 
-        # Warn on suspiciously low counts — update_logger alone registers 3
         if total_handlers < 5:
             logger.warning(
                 "STARTUP AUDIT WARNING: very few handlers registered (%d). "

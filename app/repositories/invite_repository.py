@@ -92,26 +92,16 @@ class InviteRepository(BaseRepository):
         B-02 Step 3: Cancel all previously issued, unexpired ACTIVE invites
         for a given (user_id, chat_id) combination.
 
-        Finds all invite documents where:
-          - notes contains f"user_{user_id}" (the intended recipient marker)
-          - chat_id matches
-          - status is ACTIVE
-          - expires_at > utcnow()
-
-        Updates them all to status=REVOKED, revoked_at=utcnow().
-
-        Returns the list of telegram_link strings that were revoked so the
-        caller can also revoke them on the Telegram side via the API.
+        FIX 10: Uses intended_user_id field instead of notes regex.
         """
         now = datetime.now(timezone.utc)
-        user_marker = f"user_{user_id}"
 
         # Find all qualifying documents first to collect their invite links
         cursor = self.collection.find(
             {
                 "chat_id": chat_id,
                 "status": InviteStatus.ACTIVE.value,
-                "notes": {"$regex": user_marker},
+                "intended_user_id": user_id,
                 "$or": [
                     {"expires_at": None},
                     {"expires_at": {"$gt": now}},
@@ -150,18 +140,15 @@ class InviteRepository(BaseRepository):
         B-02 Step 1 helper: find an ACTIVE invite intended for this specific
         user in this specific chat.
 
-        Invites intended for a user are identified by notes containing
-        f"user_{user_id}" (set by invite_service.generate_premium_invite).
-
+        FIX 10: Queries intended_user_id field (indexed) instead of notes regex.
         Returns the most recently created matching invite, or None.
         """
         now = datetime.now(timezone.utc)
-        user_marker = f"user_{user_id}"
         docs = await self.find_many(
             {
                 "chat_id": chat_id,
                 "status": InviteStatus.ACTIVE.value,
-                "notes": {"$regex": user_marker},
+                "intended_user_id": user_id,
                 "$or": [
                     {"expires_at": None},
                     {"expires_at": {"$gt": now}},

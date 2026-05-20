@@ -52,7 +52,10 @@ class Settings(BaseSettings):
     PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
     # ── Access Control ────────────────────────────────────────────────────────
-    OWNER_ID: int = 0
+    # FIX 7: OWNER_ID is now required (ellipsis = no default). If the env var
+    # is missing, pydantic-settings will raise a ValidationError at startup
+    # with a clear message instead of silently defaulting to 0.
+    OWNER_ID: int = Field(..., description="Telegram user_id of the bot owner. Required.")
     ADMIN_IDS: List[int] = Field(default_factory=list)
     SUDO_IDS: List[int] = Field(default_factory=list)
 
@@ -128,6 +131,10 @@ class Settings(BaseSettings):
 
     # ── Invite security ───────────────────────────────────────────────────────
     INVITE_EXPIRY_MINUTES: int = 30
+
+    # ── Daily distribution caps (FIX 14) ─────────────────────────────────────
+    DAILY_CAP_NSFW: int = 75
+    DAILY_CAP_PREMIUM: int = 140
 
     # ── Runtime ───────────────────────────────────────────────────────────────
     DEBUG: bool = False

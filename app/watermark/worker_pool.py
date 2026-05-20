@@ -205,8 +205,6 @@ class WatermarkWorker:
             watermark_path = watermark_config.get("watermark_image_path")
 
             # Bug 6 fix: resolve local media path, downloading from Telegram if needed.
-            # The original code only read job_doc.get("media_path") which is None for
-            # all moderation-queued jobs (they only have media_file_id).
             media_path = await self._resolve_media_path(job_doc, job_id)
 
             # Track whether we downloaded this file (i.e., it's a temp file we own)
@@ -272,12 +270,6 @@ class WatermarkWorker:
                 else:
                     # Non-visual media (document, text, etc.) — skip watermark, push to dispatch
                     await self._queue.mark_watermark_applied(job_id, media_path)
-                    # For non-visual, media_path IS the final path — don't delete it here;
-                    # the dispatcher will upload it. Only clean up downloads.
-                    if is_downloaded:
-                        # media_path == processed output for non-visual, keep it for dispatcher.
-                        # But track it so we can delete after delivery in delivery.py instead.
-                        pass
                     return
 
                 # Mark job ready for dispatcher — processed_output_path is the watermarked file
@@ -314,6 +306,11 @@ class WatermarkWorker:
                 )
                 retry_count = job_doc.get("retry_count", 0)
                 max_retries = job_doc.get("max_retries", settings.MAX_RETRY_ATTEMPTS)
+
+                # FIX 5: Clean up the partial output file on failure so it doesn't
+                # accumulate on disk. The finally block handles the input; this
+                # covers the FFmpeg output path.
+                _safe_unlink(processed_output_path, context=f"wm_output_failure:{job_id}")
 
                 if retry_count >= max_retries:
                     logger.error(
