@@ -108,6 +108,59 @@ async def handle_ping(client: Client, message: Message) -> None:
         )
 
 
+@Client.on_message(filters.command("handlers"))
+@permission_required(Role.MODERATOR)
+async def handle_list_handlers(client: Client, message: Message) -> None:
+    """
+    Runtime handler inventory check.
+    Returns the full breakdown of registered Pyrogram handlers by group.
+    Use this to confirm handler loading without a restart.
+    """
+    logger.info(
+        "HANDLER: handle_list_handlers entered",
+        extra={"ctx_from_user": message.from_user.id if message.from_user else None},
+    )
+
+    try:
+        dispatcher = getattr(client, "dispatcher", None)
+        if dispatcher is None:
+            await message.reply_text("⚠️ <code>client.dispatcher</code> is None — plugin system may not have initialised.", parse_mode="html")
+            return
+
+        groups = getattr(dispatcher, "groups", None)
+        if groups is None:
+            await message.reply_text("⚠️ <code>dispatcher.groups</code> is None.", parse_mode="html")
+            return
+
+        lines = ["📋 <b>Registered Handler Groups</b>\n"]
+        total = 0
+
+        for group_id in sorted(groups.keys()):
+            handlers = groups[group_id]
+            group_total = len(handlers)
+            total += group_total
+            lines.append(f"\n<b>Group {group_id}</b> — {group_total} handler(s):")
+            for h in handlers:
+                cb = getattr(h, "callback", None)
+                if cb:
+                    name = getattr(cb, "__name__", "?")
+                    mod = getattr(cb, "__module__", "?")
+                    lines.append(f"  • <code>{mod}.{name}</code>")
+
+        lines.append(f"\n<b>Total: {total} handlers across {len(groups)} group(s)</b>")
+
+        text = "\n".join(lines)
+        # Telegram message limit guard
+        if len(text) > 4000:
+            text = text[:3990] + "\n<i>…truncated</i>"
+
+        await message.reply_text(text, parse_mode="html")
+
+    except Exception as e:
+        logger.error("handle_list_handlers: error", exc_info=True)
+        await message.reply_text(f"⚠️ Error: <code>{e}</code>", parse_mode="html")
+
+
 @Client.on_message(filters.command("status"))
 @permission_required(Role.MODERATOR)
 async def handle_status(client: Client, message: Message) -> None:

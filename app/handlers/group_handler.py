@@ -109,16 +109,35 @@ async def _flush_album(buffer_key: str, submitter_id: int, client: Client) -> No
     & (filters.group | filters.channel)
 )
 async def handle_group_media_submission(client: Client, message: Message) -> None:
-    # Block managed internal chats
+    logger.info(
+        "HANDLER: handle_group_media_submission entered",
+        extra={
+            "ctx_chat_id": message.chat.id if message.chat else None,
+            "ctx_chat_type": str(message.chat.type) if message.chat else None,
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_media_type": str(message.media) if message.media else None,
+            "ctx_media_group_id": message.media_group_id,
+            "ctx_is_managed": _is_managed_chat(message.chat.id),
+        },
+    )
+
+    # Block managed internal chats — loop prevention
     if _is_managed_chat(message.chat.id):
+        logger.debug(
+            "group_handler: ignoring message from managed chat",
+            extra={"ctx_chat_id": message.chat.id},
+        )
         return
 
     submitter_id = _resolve_submitter_id(message)
     if submitter_id is None:
+        logger.warning(
+            "group_handler: could not resolve submitter_id — no from_user or sender_chat",
+            extra={"ctx_msg_id": message.id},
+        )
         return
 
     # FIX 8: Never process the bot's own messages.
-    # Use cached bot_id instead of calling client.get_me() on every message.
     bot_id = get_bot_id()
     if bot_id is not None and message.from_user and message.from_user.id == bot_id:
         return
@@ -127,7 +146,7 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
 
     if not media_group_id:
         logger.info(
-            "Single group media submitted",
+            "group_handler: single media — routing for review",
             extra={
                 "ctx_submitter": submitter_id,
                 "ctx_chat": message.chat.id,
@@ -137,7 +156,6 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
         await _submit_for_review(client, [message], submitter_id)
         return
 
-    # Album buffering — keyed by chat+group to prevent cross-chat collisions
     buffer_key = f"grp_{message.chat.id}_{media_group_id}"
 
     async with _album_lock:
@@ -154,7 +172,7 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
         _album_tasks[buffer_key] = task
 
     logger.debug(
-        "Group album buffered",
+        "group_handler: album message buffered",
         extra={
             "ctx_submitter": submitter_id,
             "ctx_chat": message.chat.id,
