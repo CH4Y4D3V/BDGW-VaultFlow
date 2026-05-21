@@ -1,7 +1,11 @@
 FROM python:3.12-slim
 
-# System dependencies — ffmpeg required for watermark processing
+# System dependencies
+# gcc + python3-dev are required to build TgCrypto (C extension)
+# ffmpeg is required for watermark processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
