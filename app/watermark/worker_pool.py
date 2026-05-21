@@ -116,81 +116,190 @@ class WatermarkWorker:
                 await asyncio.sleep(5)
 
     async def _resolve_media_path(self, job_doc: dict, job_id: str) -> Optional[str]:
-        """
-        Bug 6 fix: Resolve local media path for a watermark job.
+    """
+    Resolve local media path for a watermark job.
 
-        Moderation-queued jobs only have media_file_id — they have no local file
-        because the content was never downloaded at submission time.
-        If media_path is absent or the file no longer exists on disk, download
-        the media from Telegram using the bot client.
+    Priority order:
+      1. media_path already on disk → use it directly.
+      2. Re-fetch the vault copy via get_messages() → download from fresh reference.
+         This avoids FILE_REFERENCE_EXPIRED which occurs when using a raw file_id
+         that has expired server-side.
 
-        Returns the local file path string, or None if resolution failed.
-        """
-        media_path = job_doc.get("media_path")
+    The vault message is the canonical fresh source because it was copy_message-d
+    there at approve/queue time and Telegram always has it available.
+    """
+    media_path = job_doc.get("media_path")
 
-        # Fast path: path already set and file exists on disk
-        if media_path and Path(media_path).exists():
-            return media_path
+    # Fast path: local file already present
+    if media_path and Path(media_path).exists():
+        return media_path
 
-        if media_path and not Path(media_path).exists():
-            logger.warning(
-                "Watermark job has media_path but file missing on disk — will re-download",
-                extra={"ctx_job_id": job_id, "ctx_path": media_path},
-            )
+    if media_path and not Path(media_path).exists():
+        logger.warning(
+            "Watermark job has media_path but file missing on disk — will re-fetch from vault",
+            extra={"ctx_job_id": job_id, "ctx_path": media_path},
+        )
 
-        # Fallback: download from Telegram using file_id
-        media_file_id = job_doc.get("media_file_id")
-        if not media_file_id:
-            logger.error(
-                "Watermark job has neither valid media_path nor media_file_id",
+    media_file_id = job_doc.get("media_file_id")
+    if not media_file_id:
+        logger.error(
+            "Watermark job has neither valid media_path nor media_file_id",
+            extra={"ctx_job_id": job_id},
+        )
+        return None
+
+    try:
+        bot = get_bot()
+        unique_suffix = uuid.uuid4().hex[:12]
+        output_dir = Path(settings.PROCESSED_MEDIA_DIR)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        dest_path = str(output_dir / f"wm_dl_{job_id}_{unique_suffix}")
+
+        logger.info(
+            "Downloading media for watermark job",
+            extra={
+                "ctx_job_id": job_id,
+                "ctx_file_id_prefix": media_file_id[:20],
+                "ctx_worker": self._worker_id,
+            },
+        )
+
+        # ── Step 1: Refresh file reference via vault message ──────────────────
+        # Raw file_id strings contain an embedded file_reference that expires.
+        # Calling download_media(message=file_id_string) directly fails with
+        # FILE_REFERENCE_EXPIRED once that reference is stale.
+        # Fix: fetch the vault message first — Telegram returns a live, valid
+        # file_reference in the message object which download_media then uses.
+        fresh_message = await self._fetch_vault_message(job_doc, job_id, bot)
+
+        if fresh_message is not None:
+            logger.info(
+                "Media downloaded successfully for watermark",
                 extra={"ctx_job_id": job_id},
             )
-            return None
-
-        try:
-            bot = get_bot()
-            # Build a deterministic filename so we don't collide across workers
-            unique_suffix = uuid.uuid4().hex[:12]
-            output_dir = Path(settings.PROCESSED_MEDIA_DIR)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = str(output_dir / f"wm_dl_{job_id}_{unique_suffix}")
-
-            logger.info(
-                "Downloading media for watermark job",
-                extra={
-                    "ctx_job_id": job_id,
-                    "ctx_file_id": media_file_id[:20] + "...",
-                    "ctx_worker": self._worker_id,
-                },
+            downloaded_path = await bot.download_media(
+                message=fresh_message,
+                file_name=dest_path,
             )
-
+        else:
+            # Vault message unavailable — fall back to direct file_id download.
+            # This may still hit FILE_REFERENCE_EXPIRED on old jobs, but it's
+            # the best we can do without a vault reference.
+            logger.warning(
+                "Vault message not found — falling back to direct file_id download",
+                extra={"ctx_job_id": job_id},
+            )
             downloaded_path = await bot.download_media(
                 message=media_file_id,
                 file_name=dest_path,
             )
 
-            if not downloaded_path or not Path(downloaded_path).exists():
-                logger.error(
-                    "Media download returned empty path or file not found",
-                    extra={"ctx_job_id": job_id, "ctx_downloaded": downloaded_path},
-                )
-                return None
-
-            logger.info(
-                "Media downloaded successfully for watermark",
-                extra={"ctx_job_id": job_id, "ctx_path": downloaded_path},
-            )
-            return str(downloaded_path)
-
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
+        if not downloaded_path or not Path(downloaded_path).exists():
             logger.error(
-                "Failed to download media for watermark job",
-                extra={"ctx_job_id": job_id, "ctx_error": str(e)},
-                exc_info=True,
+                "Media download returned empty path or file not found",
+                extra={"ctx_job_id": job_id, "ctx_downloaded": downloaded_path},
             )
             return None
+
+        logger.info(
+            "Media downloaded successfully for watermark",
+            extra={"ctx_job_id": job_id, "ctx_path": downloaded_path},
+        )
+        return str(downloaded_path)
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(
+            "Failed to download media for watermark job",
+            extra={"ctx_job_id": job_id, "ctx_error": str(e)},
+            exc_info=True,
+        )
+        return None
+
+
+    async def _fetch_vault_message(self, job_doc: dict, job_id: str, bot):
+    """
+    Fetch the vault channel copy of this job's media to get a live file reference.
+
+    The vault collection stores vault_message_id + vault_channel_id for every
+    approved/queued item. get_messages() returns a Message object with a fresh
+    file_reference, which download_media() can use without hitting
+    FILE_REFERENCE_EXPIRED.
+
+    Returns the Pyrogram Message object on success, None on any failure.
+    """
+    from app.core.database import DatabaseManager
+
+    content_id = job_doc.get("content_id")
+    if not content_id:
+        return None
+
+    try:
+        db = DatabaseManager.get_db()
+        vault_doc = await db[settings.VAULT_COLLECTION].find_one(
+            {"content_id": content_id},
+            {"vault_message_id": 1, "vault_channel_id": 1},
+        )
+    except Exception as e:
+        logger.warning(
+            "_fetch_vault_message: DB lookup failed",
+            extra={"ctx_job_id": job_id, "ctx_error": str(e)},
+        )
+        return None
+
+    if not vault_doc:
+        logger.debug(
+            "_fetch_vault_message: no vault doc for content_id",
+            extra={"ctx_job_id": job_id, "ctx_content_id": content_id},
+        )
+        return None
+
+    vault_message_id = vault_doc.get("vault_message_id")
+    vault_channel_id = vault_doc.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
+
+    if not vault_message_id:
+        logger.debug(
+            "_fetch_vault_message: vault_message_id is None",
+            extra={"ctx_job_id": job_id, "ctx_content_id": content_id},
+        )
+        return None
+
+    try:
+        # get_messages returns the message with a fresh, valid file_reference
+        messages = await bot.get_messages(
+            chat_id=int(vault_channel_id),
+            message_ids=int(vault_message_id),
+        )
+        # get_messages with a single id returns a single Message
+        if not isinstance(messages, list):
+            messages = [messages]
+
+        msg = next((m for m in messages if m and m.id and m.media), None)
+        if msg is None:
+            logger.warning(
+                "_fetch_vault_message: vault message has no media or was deleted",
+                extra={
+                    "ctx_job_id": job_id,
+                    "ctx_vault_msg_id": vault_message_id,
+                    "ctx_vault_chat_id": vault_channel_id,
+                },
+            )
+            return None
+
+        return msg
+
+    except Exception as e:
+        logger.warning(
+            "_fetch_vault_message: get_messages failed",
+            extra={
+                "ctx_job_id": job_id,
+                "ctx_vault_msg_id": vault_message_id,
+                "ctx_vault_chat_id": vault_channel_id,
+                "ctx_error": str(e),
+            },
+        )
+        return None
 
     async def _process_job(self, job_doc: dict) -> None:
         job_id = str(job_doc["_id"])
