@@ -339,46 +339,44 @@ async def handle_payment_submit(client: Client, callback: CallbackQuery) -> None
             pass
 
 
-@Client.on_message(filters.private & ~filters.regex(r"^/"))
-async def handle_private_message_support(client: Client, message: Message) -> None:
+@Client.on_message(
+    (filters.photo | filters.document | filters.text)
+    & filters.private
+)
+async def handle_payment_proof_capture(client: Client, message: Message) -> None:
     if not message.from_user:
         return
 
-    if message.photo or message.video or message.document or message.animation:
-        return  # handled by submission_handler — do not log, expected path
-
     user_id = message.from_user.id
 
+    # Always log entry so we can confirm this handler ran, even on early exits.
     logger.debug(
-        "HANDLER: handle_private_message_support entered",
+        "HANDLER: handle_payment_proof_capture entered",
         extra={"ctx_user_id": user_id},
     )
 
     try:
-        topic_service = get_topic_service()
-        topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)
-
-        if topic_id is None:
-            logger.debug(
-                "handle_private_message_support: no active support topic — ignoring",
-                extra={"ctx_user_id": user_id},
-            )
-            return
-
-        logger.info(
-            "handle_private_message_support: routing to support topic",
-            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id},
-        )
-
-        support_service = get_support_service()
-        await support_service.handle_user_message(client, message)
-
+        state = await _get_payment_state(user_id)
     except Exception as e:
         logger.error(
-            "HANDLER: handle_private_message_support unhandled exception",
+            "handle_payment_proof_capture: _get_payment_state raised",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             exc_info=True,
         )
+        return
+
+    if not state:
+        # User is not in a payment flow — silent exit, this is the normal path.
+        return
+
+    logger.info(
+        "HANDLER: handle_payment_proof_capture — payment proof received",
+        extra={
+            "ctx_user_id": user_id,
+            "ctx_plan": state.get("plan"),
+            "ctx_duration": state.get("duration"),
+        },
+    )
 
     try:
         plan = state.get("plan", "premium")
