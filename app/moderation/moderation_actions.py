@@ -275,10 +275,10 @@ async def archive_to_vault(
     db = DatabaseManager.get_db()
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
-    operations = []
-
-    for i, msg in enumerate(messages):
+    
+    for msg in messages:
         media = None
+        copied_msg = None
         if msg.media:
             try:
                 media = getattr(msg, msg.media.value, None)
@@ -289,12 +289,36 @@ async def archive_to_vault(
         file_id = getattr(media, "file_id", None) if media else None
         file_size = getattr(media, "file_size", 0) if media else 0
         media_type_str = msg.media.value if msg.media else "text"
+        
         content_id = f"{msg.chat.id}_{msg.id}"
-        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
 
         checksum = _compute_checksum(file_unique_id, file_size or 0)
 
-        operations.append(UpdateOne(
+        # Step 1: Copy to Telegram Vault Channel
+        if settings.VAULT_CHANNEL_ID:
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    copied_msg = await client.copy_message(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        from_chat_id=msg.chat.id,
+                        message_id=msg.id,
+                    )
+                    break
+                except FloodWait as e:
+                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                except RPCError as e:
+                    logger.error(
+                        "Failed to copy message to vault channel",
+                        extra={"ctx_msg_id": msg.id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                    )
+                    if attempt == _MAX_RETRIES - 1:
+                        break
+                    await asyncio.sleep(2 ** attempt)
+        
+        vault_msg_id = copied_msg.id if copied_msg else 0
+        vault_message_ids.append(vault_msg_id)
+
+        update_op = {
             {"content_id": content_id},
             {
                 "$setOnInsert": {
@@ -315,8 +339,8 @@ async def archive_to_vault(
                 "$set": {
                     "source_chat_id": str(msg.chat.id),
                     "source_message_id": msg.id,
-                    "vault_message_id": vault_msg_id or None,
-                    "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
+                    "vault_message_id": vault_msg_id if vault_msg_id else None,
+                    "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
                     "moderation_destination": dest,
                     "status": initial_status,
                     "distribution_state": ModerationState.PENDING.value,
@@ -330,29 +354,31 @@ async def archive_to_vault(
                     },
                 },
             },
-            upsert=True,
-        ))
+        }
 
-    if operations:
         try:
-            await vault_col.bulk_write(operations, ordered=False)
+            await vault_col.update_one(
+                {"content_id": content_id},
+                update_op[1],
+                upsert=True
+            )
+        except Exception:
+            logger.error("Vault MongoDB write failed for content_id %s", content_id, exc_info=True)
+
+    if messages:
+        try:
             logger.info(
                 "Vault archival complete",
                 extra={
-                    "ctx_count": len(operations),
+                    "ctx_count": len(messages),
                     "ctx_dest": dest,
                     "ctx_initial_status": initial_status,
                     "ctx_vault_copied": len([v for v in vault_message_ids if v]),
                     "ctx_submitter": submitter_user_id,
                 },
             )
-        except BulkWriteError as e:
-            logger.warning(
-                "Partial vault write (duplicates silently ignored)",
-                extra={"ctx_details": str(e.details)},
-            )
-        except Exception:
-            logger.error("Vault MongoDB write failed", exc_info=True)
+        except Exception as e:
+            logger.error("Error during vault archival logging", exc_info=True)
 
     try:
         await get_audit().log(
