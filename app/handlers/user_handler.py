@@ -5,8 +5,8 @@ from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait, RPCError, UserIsBlocked, PeerIdInvalid, InputUserDeactivated
-from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.errors import FloodWait, RPCError, UserIsBlocked, PeerIdInvalid, InputUserDeactivated, MessageNotModified
+from pyrogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.services.subscription_service import SubscriptionService
@@ -178,6 +178,110 @@ def _format_status(sub, user_id: int) -> str:
         )
 
     return "\n".join(lines)
+
+
+# ── /start and Menu Callbacks ─────────────────────────────────────────────────
+
+def _get_main_menu():
+    """Returns the main menu keyboard and text."""
+    text = (
+        "👋 <b>Welcome to VaultFlow!</b>\n\n"
+        "I am your friendly assistant for content submission and community interaction.\n\n"
+        "Use the buttons below to navigate."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📋 My Status", callback_data="menu:mystatus"),
+            InlineKeyboardButton("📜 Rules", callback_data="menu:rules")
+        ],
+        [
+            InlineKeyboardButton("🆘 Support", callback_data="menu:support")
+        ]
+    ])
+    return text, keyboard
+
+
+@Client.on_message(filters.command("start") & filters.private)
+async def handle_start(client: Client, message: Message) -> None:
+    """
+    Handles the /start command in private chat, showing a welcome message and main menu.
+    Also handles deep-linking for resubscribe flow.
+    """
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    logger.info("/start command received", extra={"ctx_user_id": user_id})
+
+    # Deep-linking for resubscribe flow from /mystatus
+    if len(message.command) > 1 and message.command[1] == "resubscribe":
+        # The /mystatus command is designed to work in groups or DMs.
+        # We can call it directly here.
+        await handle_mystatus(client, message)
+        return
+
+    text, keyboard = _get_main_menu()
+    await message.reply_text(
+        text=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home)$"))
+async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
+    """Handles main menu callbacks, editing the message in-place."""
+    action = callback_query.data.split(":")[1]
+    user_id = callback_query.from_user.id
+    
+    text = ""
+    keyboard = None
+
+    try:
+        if action == "home":
+            text, keyboard = _get_main_menu()
+        
+        elif action == "rules":
+            text = await _get_rules_text()
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
+
+        elif action == "mystatus":
+            # This logic is adapted from the handle_mystatus command for an inline menu context
+            if user_id == settings.OWNER_ID: role = "Owner"
+            elif user_id in settings.SUDO_IDS: role = "Sudo Admin"
+            elif user_id in settings.ADMIN_IDS: role = "Admin"
+            else: role = None
+
+            if role:
+                text = (
+                    "📋 <b>Subscription Status</b>\n\n"
+                    f"✅ <b>Status:</b> Permanent Access\n"
+                    f"🔑 <b>Role:</b> {role}"
+                )
+            else:
+                sub = await _sub_service.get_subscription(user_id)
+                text = _format_status(sub, user_id)
+            
+            back_button = [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]
+            buttons = [back_button]
+            
+            sub = await _sub_service.get_subscription(user_id)
+            if sub and (sub.is_expired or sub.is_in_grace):
+                bot_username = await _get_bot_username(client)
+                url = f"https://t.me/{bot_username}?start=resubscribe"
+                # Use insert to put the resubscribe button at the top
+                buttons.insert(0, [InlineKeyboardButton("🔄 Resubscribe", url=url)])
+
+            keyboard = InlineKeyboardMarkup(buttons)
+
+        await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        await callback_query.answer()
+
+    except MessageNotModified:
+        await callback_query.answer() # User clicked the same button twice
+    except Exception as e:
+        logger.error("Error in menu callback", extra={"ctx_user_id": user_id, "ctx_action": action, "ctx_error": str(e)}, exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)
 
 
 # ── /rules ────────────────────────────────────────────────────────────────────

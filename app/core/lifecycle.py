@@ -115,7 +115,8 @@ class AppLifecycle:
     async def _verify_channel_access(self) -> None:
         """
         Verify the bot can access critical channels at startup.
-        This forces Pyrogram to cache the peer and fails fast if misconfigured.
+        This forces Pyrogram to cache the peer. Only the VAULT_CHANNEL_ID is
+        considered a critical failure that aborts startup.
         """
         logger.info("Verifying access to critical channels...")
         channels_to_check = {
@@ -125,26 +126,37 @@ class AppLifecycle:
             "NSFW_GROUP_ID": getattr(settings, "NSFW_GROUP_ID", None),
             "PREMIUM_GROUP_ID": getattr(settings, "PREMIUM_GROUP_ID", None),
         }
-        all_ok = True
+        critical_failure = False
         for name, raw_id in channels_to_check.items():
+            is_critical = name == "VAULT_CHANNEL_ID"
+
             if not raw_id:
-                # This is already checked in _validate_config for required ones
+                # This is already checked in _validate_config for required ones,
+                # but as a safeguard:
+                if is_critical:
+                    logger.critical(f"CRITICAL: {name} is not configured in environment. Aborting.")
+                    critical_failure = True
                 continue
+
             try:
                 channel_id = int(raw_id)
                 chat = await self._bot.get_chat(channel_id)
                 logger.info(f"✅ Access confirmed for {name}: '{chat.title}' ({chat.id})")
             except Exception as e:
-                logger.error(
-                    f"❌ FAILED to access channel {name} ({raw_id}). "
+                log_msg = (
+                    f"Failed to access channel {name} ({raw_id}). "
                     f"Ensure the bot is a member with appropriate permissions. Error: {e}"
                 )
-                all_ok = False
+                if is_critical:
+                    logger.critical(f"CRITICAL FAILURE: {log_msg}")
+                    critical_failure = True
+                else:
+                    logger.warning(f"WARNING: {log_msg}")
 
-        if not all_ok:
+        if critical_failure:
             logger.critical(
-                "Aborting startup due to channel access failure. "
-                "Please check bot membership and permissions in all listed channels."
+                "Aborting startup due to critical channel access failure. "
+                "Please check bot membership and permissions in the VAULT_CHANNEL_ID."
             )
             sys.exit(1)
 
