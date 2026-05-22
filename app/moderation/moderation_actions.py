@@ -299,8 +299,8 @@ async def archive_to_vault(
             {
                 "$setOnInsert": {
                     "content_id": content_id,
-                    "source_chat_id": str(msg.chat.id),
-                    "message_id": msg.id,
+                    "origin_chat_id": str(msg.chat.id),
+                    "origin_message_id": msg.id,
                     "media_group_id": msg.media_group_id,
                     "media_type": media_type_str,
                     "file_id": file_id,
@@ -313,6 +313,8 @@ async def archive_to_vault(
                     "cooldown_until": None,
                 },
                 "$set": {
+                    "origin_chat_id": str(msg.chat.id),
+                    "origin_message_id": msg.id,
                     "vault_message_id": vault_msg_id or None,
                     "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
                     "moderation_destination": dest,

@@ -180,34 +180,7 @@ async def resolve_fresh_message(
 
     Returns None if both sources are unavailable.
     """
-    # ── Priority 1: vault channel ─────────────────────────────────────────────
-    if vault_channel_id and vault_message_id:
-        msg = await fetch_message_safe(
-            client,
-            chat_id=vault_channel_id,
-            message_id=vault_message_id,
-            context=f"vault_refresh:job={job_id}",
-        )
-        if msg is not None:
-            logger.debug(
-                "resolve_fresh_message: vault reference resolved",
-                extra={
-                    "ctx_job_id": job_id,
-                    "ctx_vault_chat": vault_channel_id,
-                    "ctx_vault_msg": vault_message_id,
-                },
-            )
-            return msg
-        logger.warning(
-            "resolve_fresh_message: vault copy unavailable, trying origin",
-            extra={
-                "ctx_job_id": job_id,
-                "ctx_vault_chat": vault_channel_id,
-                "ctx_vault_msg": vault_message_id,
-            },
-        )
-
-    # ── Priority 2: origin chat ───────────────────────────────────────────────
+    # ── Priority 1: origin chat (user DM or backfill source) ────────────────
     if origin_chat_id and origin_message_id:
         msg = await fetch_message_safe(
             client,
@@ -217,7 +190,7 @@ async def resolve_fresh_message(
         )
         if msg is not None:
             logger.info(
-                "resolve_fresh_message: resolved from origin (vault copy missing)",
+                "resolve_fresh_message: resolved from origin",
                 extra={
                     "ctx_job_id": job_id,
                     "ctx_origin_chat": origin_chat_id,
@@ -226,11 +199,38 @@ async def resolve_fresh_message(
             )
             return msg
         logger.warning(
-            "resolve_fresh_message: origin copy also unavailable",
+            "resolve_fresh_message: origin copy unavailable, trying vault",
             extra={
                 "ctx_job_id": job_id,
                 "ctx_origin_chat": origin_chat_id,
                 "ctx_origin_msg": origin_message_id,
+            },
+        )
+
+    # ── Priority 2: vault channel (canonical copy) ──────────────────────────
+    if vault_channel_id and vault_message_id:
+        msg = await fetch_message_safe(
+            client,
+            chat_id=vault_channel_id,
+            message_id=vault_message_id,
+            context=f"vault_refresh:job={job_id}",
+        )
+        if msg is not None:
+            logger.debug(
+                "resolve_fresh_message: vault reference resolved (origin failed)",
+                extra={
+                    "ctx_job_id": job_id,
+                    "ctx_vault_chat": vault_channel_id,
+                    "ctx_vault_msg": vault_message_id,
+                },
+            )
+            return msg
+        logger.warning(
+            "resolve_fresh_message: vault copy also unavailable",
+            extra={
+                "ctx_job_id": job_id,
+                "ctx_vault_chat": vault_channel_id,
+                "ctx_vault_msg": vault_message_id,
             },
         )
 
