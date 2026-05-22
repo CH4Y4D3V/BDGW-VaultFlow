@@ -39,6 +39,7 @@ from pyrogram.errors import (
 )
 from pyrogram.types import Message
 
+from app.core.database import DatabaseManager
 from app.config import settings
 from app.utils.logger import get_logger
 
@@ -166,28 +167,57 @@ def extract_media_object(message: Message):
 
 async def resolve_fresh_message(
     client: Client,
-    vault_channel_id: Optional[int],
-    vault_message_id: Optional[int],
+    job_doc: dict,
     job_id: str = "",
 ) -> Optional[Message]:
     """
     Resolve a live Telegram Message object using the canonical vault reference.
-    This is the ONLY reliable way to get a fresh file reference, as the
-    original submission from a user may be deleted and `source_chat_id` is a
-    user ID, not a channel.
+    This is the ONLY reliable way to get a fresh file reference. It looks up
+    the vault document using the content_id from the job to get the true
+    vault_message_id.
     """
+    # Step 1: Get content_id from the queue job's metadata
+    metadata = job_doc.get("metadata", {})
+    source_chat_id = metadata.get("source_chat_id")
+    source_message_id = metadata.get("source_message_id")
+
+    if not source_chat_id or not source_message_id:
+        logger.error(
+            "resolve_fresh_message: cannot link to vault, job metadata is missing source_chat_id or source_message_id.",
+            extra={"ctx_job_id": job_id},
+        )
+        return None
+
+    # The content_id in the vault collection is based on the original submission.
+    vault_content_id = f"{source_chat_id}_{source_message_id}"
+
+    # Step 2: Look up the vault document
+    db = DatabaseManager.get_db()
+    vault_doc = await db[settings.VAULT_COLLECTION].find_one({"content_id": vault_content_id})
+
+    if not vault_doc:
+        logger.error(
+            "resolve_fresh_message: No vault document found for content_id.",
+            extra={"ctx_job_id": job_id, "ctx_content_id": vault_content_id},
+        )
+        return None
+
+    # Step 3: Read the vault reference FROM the vault doc
+    vault_message_id = _int_or_none(vault_doc.get("vault_message_id"))
+    raw_vault_channel_id = vault_doc.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
+    vault_channel_id = _int_or_none(raw_vault_channel_id)
+
     if not vault_channel_id or not vault_message_id:
         logger.error(
-            "resolve_fresh_message: cannot refresh, vault reference is missing from document.",
+            "resolve_fresh_message: cannot refresh, vault reference is missing from the vault document.",
             extra={
                 "ctx_job_id": job_id,
-                "ctx_has_vault_channel_id": bool(vault_channel_id),
-                "ctx_has_vault_message_id": bool(vault_message_id),
+                "ctx_content_id": vault_content_id,
             },
         )
         return None
 
-    # Only try the canonical vault copy.
+    # Step 4: Fetch fresh message
     msg = await fetch_message_safe(
         client,
         chat_id=vault_channel_id,
@@ -195,16 +225,7 @@ async def resolve_fresh_message(
         context=f"vault_refresh:job={job_id}",
     )
 
-    if msg is None:
-        logger.error(
-            "resolve_fresh_message: failed to fetch message from vault channel",
-            extra={
-                "ctx_job_id": job_id,
-                "ctx_vault_chat": vault_channel_id,
-                "ctx_vault_msg": vault_message_id,
-            },
-        )
-
+    # Step 5: Return the fresh message object (or None if fetch failed)
     return msg
 
 
@@ -245,23 +266,10 @@ async def download_with_refresh(
             extra={"ctx_job_id": job_id, "ctx_path": media_path},
         )
 
-    # ── Parse coordinates ─────────────────────────────────────────────────────
-    metadata = job_doc.get("metadata", {})
-    raw_vault_channel = job_doc.get("vault_channel_id") or metadata.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
-    try:
-        vault_channel_id: Optional[int] = int(raw_vault_channel) if raw_vault_channel else None
-    except (ValueError, TypeError):
-        vault_channel_id = None
-
-    vault_message_id: Optional[int] = _int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id"))
-    source_chat_id: Optional[int] = _int_or_none(metadata.get("submitter_user_id"))
-    source_message_id: Optional[int] = _int_or_none(metadata.get("message_id"))
-
     # ── Resolve fresh message ─────────────────────────────────────────────────
     msg = await resolve_fresh_message(
         client=client,
-        vault_channel_id=vault_channel_id,
-        vault_message_id=vault_message_id,
+        job_doc=job_doc,
         job_id=job_id,
     )
 
@@ -385,17 +393,9 @@ async def resolve_send_media(
 
     Returns fresh Message on success, None if all sources exhausted.
     """
-    metadata = job_doc.get("metadata", {})
-    raw_vault_channel = job_doc.get("vault_channel_id") or metadata.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
-    try:
-        vault_channel_id: Optional[int] = int(raw_vault_channel) if raw_vault_channel else None
-    except (ValueError, TypeError):
-        vault_channel_id = None
-
     return await resolve_fresh_message(
         client=client,
-        vault_channel_id=vault_channel_id,
-        vault_message_id=_int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id")),
+        job_doc=job_doc,
         job_id=job_id,
     )
 
