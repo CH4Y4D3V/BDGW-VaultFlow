@@ -27,7 +27,6 @@ def get_bot() -> Client:
             api_hash=settings.API_HASH,
             workers=min(32, (getattr(settings, "DISPATCHER_WORKER_COUNT", 4) * 4)),
             max_concurrent_transmissions=getattr(settings, "MAX_CONCURRENT_TRANSMISSIONS", 10),
-            plugins=dict(root="app.handlers"),  # ← THIS IS THE FIX
         )
     return _bot_instance
 

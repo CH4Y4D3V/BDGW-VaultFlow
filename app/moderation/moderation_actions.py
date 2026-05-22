@@ -238,39 +238,6 @@ async def archive_to_vault(
 
     vault_message_ids: list[int] = []
 
-    # ── Step 1: Telegram Vault Channel ────────────────────────────────────────
-    # Bug 1 fix: copy_message() — no "Forwarded from" header on vault copies.
-    if settings.VAULT_CHANNEL_ID:
-        for msg in messages:
-            copied_id = 0
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    result = await client.copy_message(
-                        chat_id=settings.VAULT_CHANNEL_ID,
-                        from_chat_id=msg.chat.id,
-                        message_id=msg.id,
-                    )
-                    copied_id = result.id
-                    break
-                except FloodWait as e:
-                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
-                except RPCError as e:
-                    logger.error(
-                        "Failed to copy message to vault channel",
-                        extra={
-                            "ctx_msg_id": msg.id,
-                            "ctx_error": str(e),
-                            "ctx_attempt": attempt + 1,
-                        },
-                    )
-                    if attempt == _MAX_RETRIES - 1:
-                        break
-                    await asyncio.sleep(2 ** attempt)
-            vault_message_ids.append(copied_id)
-    else:
-        logger.warning("VAULT_CHANNEL_ID not configured — skipping Telegram vault archival")
-        vault_message_ids = [0] * len(messages)
-
     # ── Step 2: MongoDB vault metadata ────────────────────────────────────────
     db = DatabaseManager.get_db()
     vault_col = db[settings.VAULT_COLLECTION]
