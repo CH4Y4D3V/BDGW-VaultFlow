@@ -363,3 +363,8 @@ async def handle_mystatus(client: Client, message: Message) -> None:
         )
 
     logger.info("/mystatus", extra={"ctx_user_id": user_id})
+
+
+@Client.on_message(filters.command("ping") & filters.private)
+async def handle_ping_test(client: Client, message: Message) -> None:
+    await message.reply_text("pong")
