@@ -8,7 +8,10 @@ PROBLEM:
   `FILE_REFERENCE_EXPIRED` errors for any downstream processing.
 
 SOLUTION:
-  This script iterates through the entire message history of the VAULT_CHANNEL_ID.
+  This script iterates through the entire message history of the VAULT_CHANNEL_ID
+  using manual chunked pagination (100 messages per request) with explicit
+  FloodWait handling so it never crashes mid-run.
+
   For each message containing media, it extracts the `file_unique_id`. It then
   finds a document in the `vault` collection that has the same `file_unique_id`
   but where `vault_message_id` is `null`. It then updates that document with the
@@ -22,23 +25,29 @@ REQUIREMENT:
 FIRST RUN:
   Pyrogram will prompt for your phone number, password (if any), and OTP.
   A session file `backfill_user.session` will be created.
+  On subsequent runs it reuses the saved session — no prompt needed.
 
 USAGE:
-  $env:PYTHONPATH = "."; py scripts/backfill_vault_message_ids.py
+  $env:PYTHONPATH = "."; python scripts/backfill_vault_message_ids.py
 """
 
 import asyncio
 import os
 import sys
 
-from pymongo import UpdateOne
+from pymongo import UpdateOne, operations
 from pymongo.errors import BulkWriteError
 from pyrogram import Client
+from pyrogram.errors import FloodWait
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings
 from app.core.database import DatabaseManager
+
+CHUNK_SIZE = 100        # messages per GetHistory request
+BULK_BATCH = 200        # MongoDB bulk_write threshold
+FLOOD_PAD  = 2          # extra seconds added to FloodWait sleep
 
 
 async def main() -> None:
@@ -74,7 +83,7 @@ async def main() -> None:
     try:
         vault_chat_id = int(settings.VAULT_CHANNEL_ID)
         chat = await client.get_chat(vault_chat_id)
-        print(f"Successfully accessed vault channel: '{chat.title}'")
+        print(f"Successfully accessed vault channel: '{chat.title}'\n")
     except Exception as e:
         print(f"\n❌ Could not access VAULT_CHANNEL_ID ({settings.VAULT_CHANNEL_ID}).")
         print(f"   Error: {e}")
@@ -83,54 +92,91 @@ async def main() -> None:
         await DatabaseManager.disconnect()
         return
 
-    print("\nStarting backfill process. This may take a while for large channels...")
-    operations = []
-    processed_count = 0
-    updated_count = 0
+    print("Starting backfill process. This may take a while for large channels...")
+    print("FloodWait errors will be handled automatically — do not interrupt.\n")
 
-    async for message in client.get_chat_history(vault_chat_id, limit=0):
-        processed_count += 1
-        if processed_count % 500 == 0:
-            print(f"  ...scanned {processed_count} messages, found {updated_count} matches to update...")
+    operations    = []
+    processed     = 0
+    updated       = 0
+    offset_id     = 0   # walk backwards from newest; 0 = start from top
 
-        media = None
-        if message.media:
+    while True:
+        chunk = []
+        retrying = True
+
+        while retrying:
+            retrying = False
             try:
-                media = getattr(message, message.media.value, None)
-            except Exception:
+                async for msg in client.get_chat_history(
+                    vault_chat_id,
+                    limit=CHUNK_SIZE,
+                    offset_id=offset_id
+                ):
+                    chunk.append(msg)
+            except FloodWait as e:
+                wait = e.value + FLOOD_PAD
+                print(f"  [FloodWait] Sleeping {wait}s — will resume from same offset...")
+                await asyncio.sleep(wait)
+                chunk = []
+                retrying = True
+
+        # If after retries the chunk is still empty, we are done.
+        if not chunk:
+            break
+
+        for message in chunk:
+            processed += 1
+            if processed % 500 == 0:
+                print(f"  ...scanned {processed} messages, found {updated} matches...")
+
+            media = None
+            if message.media:
+                try:
+                    media = getattr(message, message.media.value, None)
+                except Exception:
+                    continue
+
+            if not media or not hasattr(media, "file_unique_id"):
                 continue
 
-        if not media or not hasattr(media, "file_unique_id"):
-            continue
+            operations.append(UpdateOne(
+                {"file_unique_id": media.file_unique_id, "vault_message_id": None},
+                {"$set": {
+                    "vault_message_id": message.id,
+                    "vault_channel_id": str(vault_chat_id)
+                }}
+            ))
 
-        operations.append(UpdateOne(
-            {"file_unique_id": media.file_unique_id, "vault_message_id": None},
-            {"$set": {"vault_message_id": message.id, "vault_channel_id": str(vault_chat_id)}}
-        ))
+            if len(operations) >= BULK_BATCH:
+                try:
+                    result = await vault_collection.bulk_write(operations, ordered=False)
+                    updated += result.modified_count
+                except BulkWriteError as bwe:
+                    updated += bwe.details.get("nModified", 0)
+                operations.clear()
 
-        if len(operations) >= 200:
-            try:
-                result = await vault_collection.bulk_write(operations)
-                updated_count += result.modified_count
-            except BulkWriteError as bwe:
-                updated_count += bwe.details.get("nModified", 0)
-            operations.clear()
+        offset_id = chunk[-1].id
 
+        if len(chunk) < CHUNK_SIZE:
+            break
+
+    # ── Final flush for any remaining operations ──────────────────────────
     if operations:
         try:
-            result = await vault_collection.bulk_write(operations)
-            updated_count += result.modified_count
+            result = await vault_collection.bulk_write(operations, ordered=False)
+            updated += result.modified_count
         except BulkWriteError as bwe:
-            updated_count += bwe.details.get("nModified", 0)
+            updated += bwe.details.get("nModified", 0)
 
     print("\n" + "=" * 60)
     print("✅ Backfill Complete.")
-    print(f"  Total messages scanned: {processed_count}")
-    print(f"  Documents updated: {updated_count}")
+    print(f"  Total messages scanned : {processed}")
+    print(f"  Documents updated      : {updated}")
     print("=" * 60)
 
     await client.stop()
     await DatabaseManager.disconnect()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

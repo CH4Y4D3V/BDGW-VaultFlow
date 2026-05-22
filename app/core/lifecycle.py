@@ -1,6 +1,8 @@
 import asyncio
 import os
 import sys
+import pkgutil
+import importlib
 from typing import Optional, Any
 
 from app.config import settings
@@ -19,7 +21,29 @@ from app.health import start_health_server
 # from the `app.handlers` package. This is more robust than relying on the
 # `plugins` dictionary in the Client constructor, which can fail silently.
 
+def _load_all_handlers():
+    """Dynamically discover and import all modules in the handlers package."""
+    from app import handlers as handlers_package
+    
+    path = handlers_package.__path__
+    name = handlers_package.__name__
+    logger = get_logger("handler_loader")
+    logger.info("Dynamically loading handler modules...", extra={"ctx_package": name})
+    
+    count = 0
+    for _, module_name, _ in pkgutil.walk_packages(path, prefix=f"{name}."):
+        try:
+            importlib.import_module(module_name)
+            logger.debug(f"Successfully imported handler module: {module_name}")
+            count += 1
+        except Exception:
+            logger.error(f"Failed to import handler module: {module_name}", exc_info=True)
+            # Depending on strictness, you might want to sys.exit(1) here
+    
+    logger.info(f"Successfully loaded {count} handler modules.")
 
+# Run the loader at import time so handlers are registered before the client starts.
+_load_all_handlers()
 
 logger = get_logger(__name__)
 
