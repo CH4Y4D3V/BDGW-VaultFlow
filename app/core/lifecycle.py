@@ -1,8 +1,6 @@
 import asyncio
 import os
 import sys
-import pkgutil
-import importlib
 from typing import Optional, Any
 
 from app.config import settings
@@ -14,47 +12,12 @@ from app.bot.client import get_bot, set_bot_id
 from app.workers.subscription_worker import SubscriptionWorker
 from app.health import start_health_server
 
-# -----------------------------------------------------------------------------
-# HANDLER REGISTRATION
-# -----------------------------------------------------------------------------
-# To ensure all handlers are registered, we dynamically import all modules
-# from the `app.handlers` package. This is more robust than relying on the
-# `plugins` dictionary in the Client constructor, which can fail silently.
 
-def _load_all_handlers() -> None:
-    """Dynamically discover and import all modules in the handlers package."""
-    import pkgutil
-    import importlib
-    import traceback
-    from app import handlers as handlers_package
-
-    print(f"[HANDLER LOADER] Scanning: {handlers_package.__path__}")
-    
-    count = 0
-    errors = 0
-
-    for _, module_name, _ in pkgutil.walk_packages(
-        handlers_package.__path__,
-        prefix=f"{handlers_package.__name__}."
-    ):
-        try:
-            importlib.import_module(module_name)
-            print(f"[HANDLER LOADER] OK: {module_name}")
-            count += 1
-        except Exception as exc:
-            print(f"[HANDLER LOADER] FAILED: {module_name}")
-            print(f"[HANDLER LOADER] ERROR: {exc}")
-            traceback.print_exc()
-            errors += 1
-
-    print(f"[HANDLER LOADER] Complete: {count} loaded, {errors} failed")
-    
-    if count == 0:
-        print("[HANDLER LOADER] CRITICAL: Zero handlers loaded — aborting")
-        import sys
-        sys.exit(1)
-
-_load_all_handlers()
+# Handler registration is handled by Pyrogram's plugin system.
+# plugins=dict(root="app.handlers") in client.py loads all handler modules
+# and wires @Client.on_message decorators into the dispatcher automatically.
+# The circular import that previously broke callback_handler is fixed in
+# app/services/channel_service.py (lazy import of _get_watermark_config).
 
 logger = get_logger(__name__)
 
