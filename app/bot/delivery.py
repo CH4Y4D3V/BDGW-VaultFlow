@@ -160,7 +160,7 @@ async def _send_single(bot: Client, job: dict, target_id: str) -> None:
 
         raise DispatcherError(
             f"No media source available for job {job_id} — "
-            f"vault_message_id and origin_message_id must be stored at enqueue time"
+            f"vault_message_id and source_message_id must be stored at enqueue time"
         )
 
     # Text message

@@ -90,8 +90,8 @@ async def backfill_dest(client: Client, dest: str, channel_id: int) -> None:
             {
                 "$setOnInsert": {
                     "content_id":        content_id,
-                    "origin_chat_id":    str(channel_id),
-                    "origin_message_id": msg.id,
+                    "source_chat_id":    str(channel_id),
+                    "source_message_id": msg.id,
                     "media_group_id":    msg.media_group_id,
                     "media_type":        media_type_str,
                     "file_id":           file_id,
@@ -104,8 +104,8 @@ async def backfill_dest(client: Client, dest: str, channel_id: int) -> None:
                     "submitter_user_id": None,
                 },
                 "$set": {
-                    "origin_chat_id":       str(channel_id),
-                    "origin_message_id":    msg.id,
+                    "source_chat_id":       str(channel_id),
+                    "source_message_id":    msg.id,
                     "moderation_destination": dest,
                     "status":                 ModerationState.QUEUED.value,
                     "distribution_state":     "pending",

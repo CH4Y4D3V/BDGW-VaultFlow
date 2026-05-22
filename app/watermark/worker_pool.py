@@ -38,8 +38,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.bot.client import get_bot
 from app.config import settings
-from app.core.logger import set_correlation_id, reset_correlation_id
-from app.core.models import MediaType, WatermarkPosition
+from app.core.logger import reset_correlation_id, set_correlation_id
+from app.core.models import JobStatus, MediaType, WatermarkPosition
 from app.distribution.flood_wait import calculate_retry_delay
 from app.repositories.queue_repository import QueueRepository
 from app.utils.logger import get_logger
@@ -205,8 +205,8 @@ class WatermarkWorker:
                     "ctx_job_id": job_id,
                     "ctx_vault_channel_id": job_doc.get("vault_channel_id") or metadata.get("vault_channel_id"),
                     "ctx_vault_message_id": job_doc.get("vault_message_id") or metadata.get("vault_message_id"),
-                    "ctx_origin_chat_id": job_doc.get("origin_chat_id") or metadata.get("origin_chat_id"),
-                    "ctx_origin_message_id": job_doc.get("origin_message_id") or metadata.get("origin_message_id"),
+                    "ctx_source_chat_id": metadata.get("submitter_user_id"),
+                    "ctx_source_message_id": metadata.get("message_id"),
                 },
             )
 
@@ -222,6 +222,23 @@ class WatermarkWorker:
         # The processed output must NOT be deleted here; delivery.py owns that.
         downloaded_media_path: Optional[str] = None
         processed_output_path: Optional[str] = None
+
+        # FIX: Immediately skip jobs that have already been moved to the dead-letter queue.
+        # This prevents runaway retry_count increments if claim logic accidentally re-fetches them.
+        if job_doc.get("status") == JobStatus.DEAD.value:
+            logger.warning(
+                "Skipping job that is already marked as dead", extra={"ctx_job_id": job_id}
+            )
+            return
+
+        # FIX: Skip jobs with runaway retry counts from previous errors.
+        retry_count = job_doc.get("retry_count", 0)
+        if retry_count >= 999:
+            logger.warning(
+                "Skipping job with excessively high retry_count",
+                extra={"ctx_job_id": job_id, "ctx_retry_count": retry_count},
+            )
+            return
 
         try:
             media_type = job_doc.get("media_type")
@@ -255,7 +272,7 @@ class WatermarkWorker:
                 )
                 await self._queue.move_to_dead_letter(
                     job_id,
-                    "FILE_REFERENCE_EXPIRED: could not resolve media from vault or origin.",
+                    "FILE_REFERENCE_EXPIRED: could not resolve media from vault or source.",
                 )
                 return
 
@@ -357,12 +374,17 @@ class WatermarkWorker:
                 max_retries = job_doc.get("max_retries", settings.MAX_RETRY_ATTEMPTS)
 
                 if retry_count >= max_retries:
-                    logger.error(
-                        "Max retries exceeded for watermark job",
-                        extra={"ctx_job_id": job_id},
+                    logger.critical(
+                        "Max retries exceeded for watermark job, moving to dead-letter queue",
+                        extra={
+                            "ctx_job_id": job_id,
+                            "ctx_retry_count": retry_count,
+                            "ctx_max_retries": max_retries,
+                        },
                     )
                     await self._queue.move_to_dead_letter(job_id, str(e))
-                else:
+                    return
+                else:  # noqa
                     delay = calculate_retry_delay(retry_count)
                     await self._queue.mark_failed(
                         job_id, str(e), next_retry_delay_seconds=delay

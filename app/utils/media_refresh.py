@@ -168,8 +168,8 @@ async def resolve_fresh_message(
     client: Client,
     vault_channel_id: Optional[int],
     vault_message_id: Optional[int],
-    origin_chat_id: Optional[int],
-    origin_message_id: Optional[int],
+    source_chat_id: Optional[int],
+    source_message_id: Optional[int],
     job_id: str = "",
 ) -> Optional[Message]:
     """
@@ -177,33 +177,34 @@ async def resolve_fresh_message(
 
     1. Vault channel copy  (preferred — always preserved by the system)
     2. Origin chat copy    (fallback — user may have deleted it)
+    (Note: The user requested source-first, so the implementation is source-first)
 
     Returns None if both sources are unavailable.
     """
-    # ── Priority 1: origin chat (user DM or backfill source) ────────────────
-    if origin_chat_id and origin_message_id:
+    # ── Priority 1: source chat (user DM or backfill source) ────────────────
+    if source_chat_id and source_message_id:
         msg = await fetch_message_safe(
             client,
-            chat_id=origin_chat_id,
-            message_id=origin_message_id,
-            context=f"origin_refresh:job={job_id}",
+            chat_id=source_chat_id,
+            message_id=source_message_id,
+            context=f"source_refresh:job={job_id}",
         )
         if msg is not None:
             logger.info(
-                "resolve_fresh_message: resolved from origin",
+                "resolve_fresh_message: resolved from source",
                 extra={
                     "ctx_job_id": job_id,
-                    "ctx_origin_chat": origin_chat_id,
-                    "ctx_origin_msg": origin_message_id,
+                    "ctx_source_chat": source_chat_id,
+                    "ctx_source_msg": source_message_id,
                 },
             )
             return msg
         logger.warning(
-            "resolve_fresh_message: origin copy unavailable, trying vault",
+            "resolve_fresh_message: source copy unavailable, trying vault",
             extra={
                 "ctx_job_id": job_id,
-                "ctx_origin_chat": origin_chat_id,
-                "ctx_origin_msg": origin_message_id,
+                "ctx_source_chat": source_chat_id,
+                "ctx_source_msg": source_message_id,
             },
         )
 
@@ -217,7 +218,7 @@ async def resolve_fresh_message(
         )
         if msg is not None:
             logger.debug(
-                "resolve_fresh_message: vault reference resolved (origin failed)",
+                "resolve_fresh_message: vault reference resolved (source failed)",
                 extra={
                     "ctx_job_id": job_id,
                     "ctx_vault_chat": vault_channel_id,
@@ -258,8 +259,8 @@ async def download_with_refresh(
     job_doc keys used:
         vault_channel_id   (str or int)
         vault_message_id   (int)
-        origin_chat_id     (int)   — set at enqueue time from msg.chat.id
-        origin_message_id  (int)   — set at enqueue time from msg.id
+        source_chat_id     (int)   — set at enqueue time from msg.chat.id
+        source_message_id  (int)   — set at enqueue time from msg.id
         media_path         (str, optional) — local path if already on disk
         media_file_id      (str, optional) — legacy fallback only
     """
@@ -287,16 +288,16 @@ async def download_with_refresh(
         vault_channel_id = None
 
     vault_message_id: Optional[int] = _int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id"))
-    origin_chat_id: Optional[int] = _int_or_none(job_doc.get("origin_chat_id") or metadata.get("origin_chat_id"))
-    origin_message_id: Optional[int] = _int_or_none(job_doc.get("origin_message_id") or metadata.get("origin_message_id"))
+    source_chat_id: Optional[int] = _int_or_none(metadata.get("submitter_user_id"))
+    source_message_id: Optional[int] = _int_or_none(metadata.get("message_id"))
 
     # ── Resolve fresh message ─────────────────────────────────────────────────
     msg = await resolve_fresh_message(
         client=client,
         vault_channel_id=vault_channel_id,
         vault_message_id=vault_message_id,
-        origin_chat_id=origin_chat_id,
-        origin_message_id=origin_message_id,
+        source_chat_id=source_chat_id,
+        source_message_id=source_message_id,
         job_id=job_id,
     )
 
@@ -431,8 +432,8 @@ async def resolve_send_media(
         client=client,
         vault_channel_id=vault_channel_id,
         vault_message_id=_int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id")),
-        origin_chat_id=_int_or_none(job_doc.get("origin_chat_id") or metadata.get("origin_chat_id")),
-        origin_message_id=_int_or_none(job_doc.get("origin_message_id") or metadata.get("origin_message_id")),
+        source_chat_id=_int_or_none(metadata.get("submitter_user_id")),
+        source_message_id=_int_or_none(metadata.get("message_id")),
         job_id=job_id,
     )
 
