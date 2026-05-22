@@ -1,25 +1,56 @@
+"""
+app/watermark/worker_pool.py
+
+Watermark worker pool — pulls WATERMARKING jobs from the queue, applies
+FFmpeg watermarks, and marks them PENDING for the dispatcher.
+
+FILE_REFERENCE_EXPIRED fix
+──────────────────────────
+The previous implementation stored raw file_id strings at enqueue time and
+called download_media(file_id_string) in the worker.  Telegram file references
+expire within hours to days, so any job that waited in the queue would fail
+with 400 FILE_REFERENCE_EXPIRED.
+
+Fix: all downloads now go through app.utils.media_refresh.download_with_refresh()
+which resolves a live Message object via get_messages() before downloading.
+Priority order:
+  1. Vault channel copy  (canonical — written by archive_to_vault at approve time)
+  2. Origin chat copy    (fallback — may be deleted by user)
+  3. Raw file_id         (last resort — will still fail on genuinely old references)
+
+The worker NEVER calls download_media() with a bare string.
+
+Indentation fix
+───────────────
+Previous version had _fetch_vault_message() and part of _resolve_media_path()
+accidentally nested, which caused AttributeError at runtime.  All methods are
+now correctly defined as proper class methods.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import uuid
 from pathlib import Path
 from typing import Optional
+
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
 from app.bot.client import get_bot
 from app.config import settings
 from app.core.logger import set_correlation_id, reset_correlation_id
 from app.core.models import MediaType, WatermarkPosition
-from app.repositories.queue_repository import QueueRepository
-from app.watermark.ffmpeg_processor import FFmpegProcessor
 from app.distribution.flood_wait import calculate_retry_delay
+from app.repositories.queue_repository import QueueRepository
 from app.utils.logger import get_logger
+from app.utils.media_refresh import download_with_refresh
+from app.watermark.ffmpeg_processor import FFmpegProcessor
 
 logger = get_logger(__name__)
 
 
 def _safe_unlink(path: Optional[str], context: str) -> None:
-    """
-    Delete a file from disk. Best-effort — never raises.
-    Handles the case where the file is already gone (missing_ok equivalent).
-    """
+    """Delete a file from disk. Best-effort — never raises."""
     if not path:
         return
     try:
@@ -29,7 +60,6 @@ def _safe_unlink(path: Optional[str], context: str) -> None:
             extra={"ctx_path": path, "ctx_context": context},
         )
     except OSError as e:
-        # File already gone or permission issue — non-fatal
         logger.debug(
             "Could not delete temp file (already gone or permission denied)",
             extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
@@ -44,8 +74,12 @@ def _safe_unlink(path: Optional[str], context: str) -> None:
 class WatermarkWorker:
     """
     Pulls jobs in WATERMARKING status and processes them with FFmpeg.
+
     On completion, marks the job back to PENDING so the dispatcher picks it up.
     Runs as an independent async task — never shares state with dispatcher workers.
+
+    Media download uses the vault-first refresh strategy from media_refresh.py
+    to guarantee we never use an expired file reference.
     """
 
     def __init__(
@@ -53,24 +87,32 @@ class WatermarkWorker:
         worker_id: str,
         queue_repo: QueueRepository,
         ffmpeg: FFmpegProcessor,
-    ):
+    ) -> None:
         self._worker_id = worker_id
         self._queue = queue_repo
         self._ffmpeg = ffmpeg
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._run_loop(), name=f"watermark-{self._worker_id}")
+        self._task = asyncio.create_task(
+            self._run_loop(),
+            name=f"watermark-{self._worker_id}",
+        )
         logger.info("Watermark worker started", extra={"ctx_worker": self._worker_id})
 
     async def stop(self) -> None:
         self._running = False
         if self._task and not self._task.done():
-            logger.info("Draining watermark worker...", extra={"ctx_worker": self._worker_id})
+            logger.info(
+                "Draining watermark worker...",
+                extra={"ctx_worker": self._worker_id},
+            )
             try:
                 await asyncio.wait_for(self._task, timeout=30.0)
             except asyncio.TimeoutError:
@@ -84,6 +126,8 @@ class WatermarkWorker:
                 except asyncio.CancelledError:
                     pass
         logger.info("Watermark worker stopped", extra={"ctx_worker": self._worker_id})
+
+    # ── Main loop ─────────────────────────────────────────────────────────────
 
     async def _run_loop(self) -> None:
         while self._running:
@@ -99,11 +143,15 @@ class WatermarkWorker:
 
                 tasks = [self._process_job(job) for job in jobs]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+
                 for res in results:
                     if isinstance(res, asyncio.CancelledError):
                         raise res
                     elif isinstance(res, Exception):
-                        logger.error("Unhandled exception in watermark handler", exc_info=res)
+                        logger.error(
+                            "Unhandled exception in watermark handler",
+                            exc_info=res,
+                        )
 
             except asyncio.CancelledError:
                 break
@@ -115,196 +163,62 @@ class WatermarkWorker:
                 )
                 await asyncio.sleep(5)
 
+    # ── Media path resolution (vault-first, FILE_REFERENCE_EXPIRED safe) ──────
+
     async def _resolve_media_path(self, job_doc: dict, job_id: str) -> Optional[str]:
-    """
-    Resolve local media path for a watermark job.
+        """
+        Resolve a local file path for the job's media, downloading if necessary.
 
-    Priority order:
-      1. media_path already on disk → use it directly.
-      2. Re-fetch the vault copy via get_messages() → download from fresh reference.
-         This avoids FILE_REFERENCE_EXPIRED which occurs when using a raw file_id
-         that has expired server-side.
+        Uses download_with_refresh() which:
+          1. Returns an existing local file immediately if present.
+          2. Fetches a live Message from the vault channel via get_messages().
+          3. Falls back to the origin chat message.
+          4. Last-resort: raw file_id (may fail on stale references).
 
-    The vault message is the canonical fresh source because it was copy_message-d
-    there at approve/queue time and Telegram always has it available.
-    """
-    media_path = job_doc.get("media_path")
-
-    # Fast path: local file already present
-    if media_path and Path(media_path).exists():
-        return media_path
-
-    if media_path and not Path(media_path).exists():
-        logger.warning(
-            "Watermark job has media_path but file missing on disk — will re-fetch from vault",
-            extra={"ctx_job_id": job_id, "ctx_path": media_path},
-        )
-
-    media_file_id = job_doc.get("media_file_id")
-    if not media_file_id:
-        logger.error(
-            "Watermark job has neither valid media_path nor media_file_id",
-            extra={"ctx_job_id": job_id},
-        )
-        return None
-
-    try:
+        Never raises.  Returns None if all sources fail.
+        """
         bot = get_bot()
-        unique_suffix = uuid.uuid4().hex[:12]
-        output_dir = Path(settings.PROCESSED_MEDIA_DIR)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = str(output_dir / f"wm_dl_{job_id}_{unique_suffix}")
+        dest_dir = settings.PROCESSED_MEDIA_DIR
 
-        logger.info(
-            "Downloading media for watermark job",
-            extra={
-                "ctx_job_id": job_id,
-                "ctx_file_id_prefix": media_file_id[:20],
-                "ctx_worker": self._worker_id,
-            },
-        )
-
-        # ── Step 1: Refresh file reference via vault message ──────────────────
-        # Raw file_id strings contain an embedded file_reference that expires.
-        # Calling download_media(message=file_id_string) directly fails with
-        # FILE_REFERENCE_EXPIRED once that reference is stale.
-        # Fix: fetch the vault message first — Telegram returns a live, valid
-        # file_reference in the message object which download_media then uses.
-        fresh_message = await self._fetch_vault_message(job_doc, job_id, bot)
-
-        if fresh_message is not None:
-            logger.info(
-                "Media downloaded successfully for watermark",
-                extra={"ctx_job_id": job_id},
+        try:
+            path = await download_with_refresh(
+                client=bot,
+                job_doc=job_doc,
+                dest_dir=dest_dir,
+                job_id=job_id,
             )
-            downloaded_path = await bot.download_media(
-                message=fresh_message,
-                file_name=dest_path,
-            )
-        else:
-            # Vault message unavailable — fall back to direct file_id download.
-            # This may still hit FILE_REFERENCE_EXPIRED on old jobs, but it's
-            # the best we can do without a vault reference.
-            logger.warning(
-                "Vault message not found — falling back to direct file_id download",
-                extra={"ctx_job_id": job_id},
-            )
-            downloaded_path = await bot.download_media(
-                message=media_file_id,
-                file_name=dest_path,
-            )
-
-        if not downloaded_path or not Path(downloaded_path).exists():
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
             logger.error(
-                "Media download returned empty path or file not found",
-                extra={"ctx_job_id": job_id, "ctx_downloaded": downloaded_path},
+                "_resolve_media_path: download_with_refresh raised unexpectedly",
+                extra={"ctx_job_id": job_id, "ctx_error": str(e)},
+                exc_info=True,
             )
             return None
 
-        logger.info(
-            "Media downloaded successfully for watermark",
-            extra={"ctx_job_id": job_id, "ctx_path": downloaded_path},
-        )
-        return str(downloaded_path)
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.error(
-            "Failed to download media for watermark job",
-            extra={"ctx_job_id": job_id, "ctx_error": str(e)},
-            exc_info=True,
-        )
-        return None
-
-
-    async def _fetch_vault_message(self, job_doc: dict, job_id: str, bot):
-    """
-    Fetch the vault channel copy of this job's media to get a live file reference.
-
-    The vault collection stores vault_message_id + vault_channel_id for every
-    approved/queued item. get_messages() returns a Message object with a fresh
-    file_reference, which download_media() can use without hitting
-    FILE_REFERENCE_EXPIRED.
-
-    Returns the Pyrogram Message object on success, None on any failure.
-    """
-    from app.core.database import DatabaseManager
-
-    content_id = job_doc.get("content_id")
-    if not content_id:
-        return None
-
-    try:
-        db = DatabaseManager.get_db()
-        vault_doc = await db[settings.VAULT_COLLECTION].find_one(
-            {"content_id": content_id},
-            {"vault_message_id": 1, "vault_channel_id": 1},
-        )
-    except Exception as e:
-        logger.warning(
-            "_fetch_vault_message: DB lookup failed",
-            extra={"ctx_job_id": job_id, "ctx_error": str(e)},
-        )
-        return None
-
-    if not vault_doc:
-        logger.debug(
-            "_fetch_vault_message: no vault doc for content_id",
-            extra={"ctx_job_id": job_id, "ctx_content_id": content_id},
-        )
-        return None
-
-    vault_message_id = vault_doc.get("vault_message_id")
-    vault_channel_id = vault_doc.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
-
-    if not vault_message_id:
-        logger.debug(
-            "_fetch_vault_message: vault_message_id is None",
-            extra={"ctx_job_id": job_id, "ctx_content_id": content_id},
-        )
-        return None
-
-    try:
-        # get_messages returns the message with a fresh, valid file_reference
-        messages = await bot.get_messages(
-            chat_id=int(vault_channel_id),
-            message_ids=int(vault_message_id),
-        )
-        # get_messages with a single id returns a single Message
-        if not isinstance(messages, list):
-            messages = [messages]
-
-        msg = next((m for m in messages if m and m.id and m.media), None)
-        if msg is None:
-            logger.warning(
-                "_fetch_vault_message: vault message has no media or was deleted",
+        if path is None:
+            logger.error(
+                "_resolve_media_path: all download sources exhausted",
                 extra={
                     "ctx_job_id": job_id,
-                    "ctx_vault_msg_id": vault_message_id,
-                    "ctx_vault_chat_id": vault_channel_id,
+                    "ctx_vault_channel_id": job_doc.get("vault_channel_id"),
+                    "ctx_vault_message_id": job_doc.get("vault_message_id"),
+                    "ctx_origin_chat_id": job_doc.get("origin_chat_id"),
+                    "ctx_origin_message_id": job_doc.get("origin_message_id"),
                 },
             )
-            return None
 
-        return msg
+        return path
 
-    except Exception as e:
-        logger.warning(
-            "_fetch_vault_message: get_messages failed",
-            extra={
-                "ctx_job_id": job_id,
-                "ctx_vault_msg_id": vault_message_id,
-                "ctx_vault_chat_id": vault_channel_id,
-                "ctx_error": str(e),
-            },
-        )
-        return None
+    # ── Job processing ────────────────────────────────────────────────────────
 
     async def _process_job(self, job_doc: dict) -> None:
         job_id = str(job_doc["_id"])
         corr_token = set_correlation_id(f"wm_{job_id}")
-        # Track paths for cleanup after successful processing
+
+        # Track paths for cleanup — input file downloaded for this job only.
+        # The processed output must NOT be deleted here; delivery.py owns that.
         downloaded_media_path: Optional[str] = None
         processed_output_path: Optional[str] = None
 
@@ -313,16 +227,20 @@ class WatermarkWorker:
             watermark_config = job_doc.get("watermark_config") or {}
             watermark_path = watermark_config.get("watermark_image_path")
 
-            # Bug 6 fix: resolve local media path, downloading from Telegram if needed.
+            # FILE_REFERENCE_EXPIRED fix: use vault-first refresh strategy
             media_path = await self._resolve_media_path(job_doc, job_id)
 
-            # Track whether we downloaded this file (i.e., it's a temp file we own)
+            # Determine whether we downloaded a new temp file for this job.
+            # original_media_path is the path recorded at enqueue time (may be None).
             original_media_path = job_doc.get("media_path")
-            is_downloaded = (
+            is_downloaded_temp = (
                 media_path is not None
-                and media_path != original_media_path
+                and (original_media_path is None or media_path != original_media_path)
+                and not Path(media_path).samefile(original_media_path)
+                if (original_media_path and Path(original_media_path).exists() and media_path)
+                else (media_path is not None and media_path != original_media_path)
             )
-            if is_downloaded:
+            if is_downloaded_temp:
                 downloaded_media_path = media_path
 
             if not media_path:
@@ -330,7 +248,10 @@ class WatermarkWorker:
                     "Watermark job: could not resolve media path — marking failed",
                     extra={"ctx_job_id": job_id},
                 )
-                await self._queue.mark_failed(job_id, "Could not resolve media path for watermarking")
+                await self._queue.mark_failed(
+                    job_id,
+                    "FILE_REFERENCE_EXPIRED: could not resolve media from vault or origin",
+                )
                 return
 
             if not watermark_path:
@@ -357,10 +278,11 @@ class WatermarkWorker:
                         "ctx_job_id": job_id,
                         "ctx_media_type": media_type,
                         "ctx_worker": self._worker_id,
+                        "ctx_vault_msg": job_doc.get("vault_message_id"),
                     },
                 )
 
-                if media_type == MediaType.VIDEO:
+                if media_type == MediaType.VIDEO.value:
                     processed_output_path = await self._ffmpeg.apply_video_watermark(
                         input_path=media_path,
                         watermark_path=watermark_path,
@@ -368,7 +290,7 @@ class WatermarkWorker:
                         opacity=opacity,
                         scale=scale,
                     )
-                elif media_type == MediaType.PHOTO:
+                elif media_type == MediaType.PHOTO.value:
                     processed_output_path = await self._ffmpeg.apply_image_watermark(
                         input_path=media_path,
                         watermark_path=watermark_path,
@@ -377,19 +299,25 @@ class WatermarkWorker:
                         scale=scale,
                     )
                 else:
-                    # Non-visual media (document, text, etc.) — skip watermark, push to dispatch
+                    # Non-visual media (document, animation, etc.) — skip watermark,
+                    # push directly to dispatcher with the resolved media_path.
                     await self._queue.mark_watermark_applied(job_id, media_path)
+                    # Input file is now the "processed" path — do NOT delete it here.
+                    # delivery.py will clean it up after upload.
+                    downloaded_media_path = None
                     return
 
-                # Mark job ready for dispatcher — processed_output_path is the watermarked file
+                # Mark job ready for dispatcher
                 await self._queue.mark_watermark_applied(job_id, processed_output_path)
 
-                # WARNING fix: delete the downloaded input file now that watermarking
-                # succeeded. The output (processed_output_path) must stay on disk until
-                # the dispatcher uploads it via execute_telegram_delivery.
-                if is_downloaded and downloaded_media_path:
-                    _safe_unlink(downloaded_media_path, context=f"wm_input_cleanup:{job_id}")
-                    downloaded_media_path = None  # prevent double-delete in finally
+                # Delete the downloaded input temp file — watermarking succeeded
+                # and the output (processed_output_path) is what the dispatcher needs.
+                if is_downloaded_temp and downloaded_media_path:
+                    _safe_unlink(
+                        downloaded_media_path,
+                        context=f"wm_input_cleanup:{job_id}",
+                    )
+                    downloaded_media_path = None  # Prevent double-delete in finally
 
                 logger.info(
                     "Watermark applied successfully",
@@ -409,17 +337,19 @@ class WatermarkWorker:
 
             except Exception as e:
                 logger.error(
-                    "Watermark processing failed or unexpected error",
+                    "Watermark processing failed",
                     extra={"ctx_job_id": job_id, "ctx_error": str(e)},
                     exc_info=True,
                 )
+
+                # Clean up the partial FFmpeg output on failure
+                _safe_unlink(
+                    processed_output_path,
+                    context=f"wm_output_failure:{job_id}",
+                )
+
                 retry_count = job_doc.get("retry_count", 0)
                 max_retries = job_doc.get("max_retries", settings.MAX_RETRY_ATTEMPTS)
-
-                # FIX 5: Clean up the partial output file on failure so it doesn't
-                # accumulate on disk. The finally block handles the input; this
-                # covers the FFmpeg output path.
-                _safe_unlink(processed_output_path, context=f"wm_output_failure:{job_id}")
 
                 if retry_count >= max_retries:
                     logger.error(
@@ -429,22 +359,32 @@ class WatermarkWorker:
                     await self._queue.move_to_dead_letter(job_id, str(e))
                 else:
                     delay = calculate_retry_delay(retry_count)
-                    await self._queue.mark_failed(job_id, str(e), next_retry_delay_seconds=delay)
+                    await self._queue.mark_failed(
+                        job_id, str(e), next_retry_delay_seconds=delay
+                    )
 
         finally:
-            # Cleanup any downloaded temp input that wasn't cleaned up above
-            # (e.g. on error paths). processed_output_path is NOT cleaned here —
-            # the dispatcher must upload it first; delivery.py handles that cleanup.
+            # Always clean up any downloaded temp input that wasn't cleaned above
+            # (error paths).  processed_output_path is intentionally NOT cleaned
+            # here — delivery.py handles that after successful upload.
             if downloaded_media_path:
-                _safe_unlink(downloaded_media_path, context=f"wm_input_finally:{job_id}")
-
+                _safe_unlink(
+                    downloaded_media_path,
+                    context=f"wm_input_finally:{job_id}",
+                )
             reset_correlation_id(corr_token)
 
+
+# ── Worker pool ───────────────────────────────────────────────────────────────
 
 class WatermarkWorkerPool:
     """Manages N watermark worker tasks."""
 
-    def __init__(self, db: AsyncIOMotorDatabase, worker_count: Optional[int] = None):
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        worker_count: Optional[int] = None,
+    ) -> None:
         self._db = db
         self._worker_count = worker_count or settings.WATERMARK_WORKER_COUNT
         self._workers: list[WatermarkWorker] = []
@@ -463,13 +403,12 @@ class WatermarkWorkerPool:
             await worker.start()
 
         logger.info(
-            f"Watermark pool started with {self._worker_count} workers",
+            "Watermark pool started",
             extra={"ctx_count": self._worker_count},
         )
 
     async def stop(self) -> None:
         if self._workers:
-            # Drain concurrently to avoid blocking timeout delays
             await asyncio.gather(
                 *(worker.stop() for worker in self._workers),
                 return_exceptions=True,

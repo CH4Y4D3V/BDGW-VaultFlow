@@ -1,34 +1,30 @@
 """
-One-time backfill (and re-runnable top-up): reads ALL media from VAULT_CHANNEL_ID
-and inserts them into the vault MongoDB collection so the scheduler can distribute them.
+One-time backfill (and re-runnable top-up): reads ALL media from the appropriate
+source channel and inserts them into the vault MongoDB collection.
+
+CHANNEL ROUTING (from .env):
+  DEST = "nsfw"    → reads from VAULT_CHANNEL_ID
+  DEST = "premium" → reads from PREMIUM_CHANNEL_ID
+  DEST = "both"    → reads VAULT_CHANNEL_ID for nsfw, PREMIUM_CHANNEL_ID for premium
 
 RULES:
-  - Reads EVERYTHING from the vault channel — no hardcoded message limit.
+  - Reads EVERYTHING from each channel — no hardcoded message limit.
   - Upserts are idempotent: re-running never creates duplicates.
-  - If VAULT_CHANNEL_ID changes in .env, re-run — old content keeps distributing,
-    new channel content gets added alongside it.
-  - Daily posting rate is controlled exclusively by DAILY_CAP_NSFW / DAILY_CAP_PREMIUM
-    in your .env — not by anything in this script.
-  - Distribution order: oldest message first (chronological, top-to-bottom).
+  - content_id = {channel_id}_{msg_id}_{dest} — nsfw and premium never collide.
+  - Daily posting rate is controlled by DAILY_CAP_NSFW / DAILY_CAP_PREMIUM in .env.
+  - Distribution order: oldest message first (chronological).
 
 REQUIREMENT:
   Must run as a USER client (your personal Telegram account), NOT the bot.
   Bots cannot call messages.GetHistory — hard Telegram API restriction.
-  Use the same API_ID and API_HASH from your .env — just don't pass bot_token.
+  The user account must be a MEMBER of both channels before running.
 
 FIRST RUN:
-  Pyrogram will prompt for your phone number and the OTP Telegram sends you.
-  A session file 'backfill_user_session.session' is created locally.
-  Delete it after the backfill is complete if you want.
+  Pyrogram prompts for phone number + OTP. Session saved as
+  'backfill_user_session.session'. Delete it after backfill if you want.
 
 USAGE:
   $env:PYTHONPATH = "."; py scripts/backfill_vault.py
-
-CONFIGURE BELOW:
-  Set DEST to "nsfw", "premium", or "both".
-  If your vault channel contains content for only one destination, set that one.
-  If it contains content for both, set "both" — each message will be registered
-  for both destinations (the daily cap still controls how many post per day).
 """
 
 import asyncio
@@ -47,14 +43,18 @@ from app.core.database import DatabaseManager
 from app.core.models import ModerationState
 
 # ── SET THIS ──────────────────────────────────────────────────────────────────
-# "nsfw"    → all vault content goes to NSFW destination
-# "premium" → all vault content goes to PREMIUM destination
-# "both"    → register each item for both destinations
-DEST = "nsfw"
+# "nsfw"    → reads VAULT_CHANNEL_ID   → registers as nsfw
+# "premium" → reads PREMIUM_CHANNEL_ID → registers as premium
+# "both"    → runs both sequentially (nsfw first, then premium)
+DEST = "premium"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def backfill_dest(client: Client, dest: str) -> None:
+async def backfill_dest(client: Client, dest: str, channel_id: int) -> None:
+    """
+    Backfill one destination from its resolved channel_id.
+    channel_id must already be resolved via get_chat() before calling this.
+    """
     db = DatabaseManager.get_db()
     vault = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
@@ -63,11 +63,11 @@ async def backfill_dest(client: Client, dest: str) -> None:
     total_media = 0
     total_skipped = 0
 
-    print(f"\n[{dest.upper()}] Reading ALL messages from vault channel {settings.VAULT_CHANNEL_ID}")
+    print(f"\n[{dest.upper()}] Reading ALL messages from channel {channel_id}")
     print(f"[{dest.upper()}] This may take a while for large channels...")
 
     # limit=0 means no limit — reads entire channel history
-    async for msg in client.get_chat_history(settings.VAULT_CHANNEL_ID, limit=0):
+    async for msg in client.get_chat_history(channel_id, limit=0):
         if not msg.media:
             total_skipped += 1
             continue
@@ -77,40 +77,38 @@ async def backfill_dest(client: Client, dest: str) -> None:
         except Exception:
             media = None
 
-        file_id        = getattr(media, "file_id",        None)  if media else None
-        file_unique_id = getattr(media, "file_unique_id", None)  if media else None
+        file_id        = getattr(media, "file_id",        None) if media else None
+        file_unique_id = getattr(media, "file_unique_id", None) if media else None
         media_type_str = msg.media.value if msg.media else "text"
 
-        # content_id includes vault_channel_id so if the channel changes,
-        # old IDs are untouched and new channel content gets new IDs.
-        content_id = f"{settings.VAULT_CHANNEL_ID}_{msg.id}_{dest}"
+        # content_id is scoped to channel + message + dest
+        # nsfw and premium never collide even if sourced from the same channel
+        content_id = f"{channel_id}_{msg.id}_{dest}"
 
         operations.append(UpdateOne(
             {"content_id": content_id},
             {
                 "$setOnInsert": {
-                    "content_id":       content_id,
-                    "source_chat_id":   str(settings.VAULT_CHANNEL_ID),
-                    "message_id":       msg.id,
-                    "media_group_id":   msg.media_group_id,
-                    "media_type":       media_type_str,
-                    "file_id":          file_id,
-                    "file_unique_id":   file_unique_id,
-                    "caption":          msg.caption or msg.text or "",
-                    # msg.date is already timezone-aware from Pyrogram
-                    "created_at":       msg.date or now,
-                    "usage_count":      0,
-                    "last_posted_at":   None,
-                    "cooldown_until":   None,
+                    "content_id":        content_id,
+                    "source_chat_id":    str(channel_id),
+                    "message_id":        msg.id,
+                    "media_group_id":    msg.media_group_id,
+                    "media_type":        media_type_str,
+                    "file_id":           file_id,
+                    "file_unique_id":    file_unique_id,
+                    "caption":           msg.caption or msg.text or "",
+                    "created_at":        msg.date or now,
+                    "usage_count":       0,
+                    "last_posted_at":    None,
+                    "cooldown_until":    None,
                     "submitter_user_id": None,
                 },
                 "$set": {
                     "moderation_destination": dest,
                     "status":                 ModerationState.QUEUED.value,
-                    # distribution_state drives the scheduler query
                     "distribution_state":     "pending",
                     "vault_message_id":       msg.id,
-                    "vault_channel_id":       str(settings.VAULT_CHANNEL_ID),
+                    "vault_channel_id":       str(channel_id),
                     "updated_at":             now,
                     "metadata": {
                         "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
@@ -132,13 +130,14 @@ async def backfill_dest(client: Client, dest: str) -> None:
     if operations:
         await _flush(vault, operations, dest)
 
+    cap = _daily_cap(dest)
     print(
         f"\n[{dest.upper()}] ✅ Complete.\n"
         f"  Media registered : {total_media}\n"
         f"  Non-media skipped: {total_skipped}\n"
-        f"  Daily cap        : {_daily_cap(dest)} posts/day\n"
+        f"  Daily cap        : {cap} posts/day\n"
         f"  Est. days to post all: "
-        f"{'∞ (cap=0?)' if not _daily_cap(dest) else round(total_media / _daily_cap(dest), 1)}"
+        f"{'∞ (cap=0?)' if not cap else round(total_media / cap, 1)}"
     )
 
 
@@ -161,20 +160,48 @@ async def _flush(vault, operations: list, dest: str) -> None:
         print(f"  [{dest.upper()}] partial write — {inserted} inserted (duplicates silently skipped)")
 
 
+async def _resolve_channel(client: Client, raw_id, label: str) -> int | None:
+    """
+    Cast raw_id to int and force-resolve the peer via get_chat().
+    Returns the resolved int ID, or None on failure.
+    Passing a string "-100xxx" to Pyrogram routes through phone/username
+    resolution and always fails — we must cast to int first.
+    """
+    try:
+        channel_id = int(raw_id)
+    except (TypeError, ValueError):
+        print(f"❌ [{label}] Invalid channel ID in .env: {raw_id!r}")
+        return None
+
+    print(f"  Resolving {label} ({channel_id})...", end=" ", flush=True)
+    try:
+        chat = await client.get_chat(channel_id)
+        print(f"✅  '{chat.title}' (type={chat.type})")
+        return chat.id  # use Pyrogram's confirmed ID (now cached in session)
+    except Exception as e:
+        print(f"\n  ❌ Cannot resolve {label} ({channel_id}): {e}")
+        print(f"     Make sure the logged-in account is a MEMBER of this channel.")
+        return None
+
+
 async def main() -> None:
     print("=" * 60)
     print("  VaultFlow Backfill Tool")
     print("=" * 60)
-    print(f"  Vault channel : {settings.VAULT_CHANNEL_ID}")
-    print(f"  Destination(s): {DEST}")
-    print(f"  MongoDB       : {settings.MONGO_URI.split('@')[-1]}")
+    print(f"  Destination(s)  : {DEST}")
+    print(f"  NSFW channel    : {settings.VAULT_CHANNEL_ID}  (VAULT_CHANNEL_ID)")
+    print(f"  Premium channel : {settings.PREMIUM_CHANNEL_ID}  (PREMIUM_CHANNEL_ID)")
+    print(f"  MongoDB         : {settings.MONGO_URI.split('@')[-1]}")
     print("=" * 60)
+
+    if DEST not in ("nsfw", "premium", "both"):
+        print(f'\n❌ Invalid DEST={DEST!r}. Must be "nsfw", "premium", or "both".')
+        return
 
     print("\nConnecting to MongoDB...")
     await DatabaseManager.connect()
     print("MongoDB connected.\n")
 
-    # User client — no bot_token
     client = Client(
         name="backfill_user_session",
         api_id=settings.API_ID,
@@ -187,11 +214,36 @@ async def main() -> None:
     me = await client.get_me()
     print(f"Logged in as: {me.first_name} (@{me.username}  id={me.id})\n")
 
-    if DEST == "both":
-        await backfill_dest(client, "nsfw")
-        await backfill_dest(client, "premium")
-    else:
-        await backfill_dest(client, DEST)
+    # ✅ FIX: get_dialogs() is async generator — must iterate, not await
+    print("Syncing dialogs (this caches all your channels)...")
+    async for dialog in client.get_dialogs():
+        title = (dialog.chat.title or "").lower()
+        if "premium" in title or "vault" in title or "wild" in title:
+            print(f"  Found: '{dialog.chat.title}' → id={dialog.chat.id}")
+    print("Dialogs synced.\n")
+
+    if DEST in ("nsfw", "both"):
+        nsfw_id = await _resolve_channel(client, settings.VAULT_CHANNEL_ID, "VAULT_CHANNEL_ID")
+        if nsfw_id is None:
+            await client.stop()
+            await DatabaseManager.disconnect()
+            return
+
+    if DEST in ("premium", "both"):
+        premium_id = await _resolve_channel(client, settings.PREMIUM_CHANNEL_ID, "PREMIUM_CHANNEL_ID")
+        if premium_id is None:
+            await client.stop()
+            await DatabaseManager.disconnect()
+            return
+
+    # ── Run backfill(s) ──────────────────────────────────────────────────────
+    if DEST == "nsfw":
+        await backfill_dest(client, "nsfw", nsfw_id)
+    elif DEST == "premium":
+        await backfill_dest(client, "premium", premium_id)
+    elif DEST == "both":
+        await backfill_dest(client, "nsfw",    nsfw_id)
+        await backfill_dest(client, "premium", premium_id)
 
     await client.stop()
     await DatabaseManager.disconnect()

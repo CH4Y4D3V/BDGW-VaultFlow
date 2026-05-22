@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     VAULT_CHANNEL_ID: int
     NSFW_GROUP_ID: int = 0
     PREMIUM_GROUP_ID: int = 0
+    PREMIUM_CHANNEL_ID: int = 0
     LOG_CHANNEL_ID: int = 0
 
     # ── Destination display names ─────────────────────────────────────────────
