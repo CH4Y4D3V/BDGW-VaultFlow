@@ -198,14 +198,15 @@ class WatermarkWorker:
             return None
 
         if path is None:
+            metadata = job_doc.get("metadata", {})
             logger.error(
                 "_resolve_media_path: all download sources exhausted",
                 extra={
                     "ctx_job_id": job_id,
-                    "ctx_vault_channel_id": job_doc.get("vault_channel_id"),
-                    "ctx_vault_message_id": job_doc.get("vault_message_id"),
-                    "ctx_origin_chat_id": job_doc.get("origin_chat_id"),
-                    "ctx_origin_message_id": job_doc.get("origin_message_id"),
+                    "ctx_vault_channel_id": job_doc.get("vault_channel_id") or metadata.get("vault_channel_id"),
+                    "ctx_vault_message_id": job_doc.get("vault_message_id") or metadata.get("vault_message_id"),
+                    "ctx_origin_chat_id": job_doc.get("origin_chat_id") or metadata.get("origin_chat_id"),
+                    "ctx_origin_message_id": job_doc.get("origin_message_id") or metadata.get("origin_message_id"),
                 },
             )
 
