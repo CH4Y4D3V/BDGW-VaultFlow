@@ -1,9 +1,7 @@
 from __future__ import annotations
-
 from app.config import settings
 from app.core.models import ModerationDestination
 from app.repositories.channel_repository import ChannelRepository
-from app.moderation.moderation_actions import _get_watermark_config
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -16,14 +14,17 @@ class ChannelService:
     async def seed_channels(self) -> None:
         """
         Seed distribution channels from env vars into channel_config collection.
-
         CRITICAL: Both NSFW_GROUP_ID and PREMIUM_GROUP_ID default to 0.
         A falsy guard (if settings.NSFW_GROUP_ID) silently skips seeding,
         leaving channel_config empty and killing the entire distribution pipeline.
-
         This method always runs at boot. If neither group is configured it logs
         a hard error so the operator knows immediately why distribution is dead.
         """
+        # Lazy import to break circular dependency:
+        # channel_service → moderation_actions → audit_service →
+        # services/__init__ → channel_service (circular)
+        from app.moderation.moderation_actions import _get_watermark_config
+
         seeded: list[str] = []
 
         if settings.NSFW_GROUP_ID and settings.NSFW_GROUP_ID != 0:
