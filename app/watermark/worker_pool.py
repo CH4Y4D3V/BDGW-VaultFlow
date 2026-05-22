@@ -231,18 +231,22 @@ class WatermarkWorker:
             # FILE_REFERENCE_EXPIRED fix: use vault-first refresh strategy
             media_path = await self._resolve_media_path(job_doc, job_id)
 
-            # Determine whether we downloaded a new temp file for this job.
-            # original_media_path is the path recorded at enqueue time (may be None).
+            # Determine if the worker downloaded a new file that it must clean up.
+            # The `finally` block will delete `downloaded_media_path`.
             original_media_path = job_doc.get("media_path")
-            is_downloaded_temp = (
-                media_path is not None
-                and (original_media_path is None or media_path != original_media_path)
-                and not Path(media_path).samefile(original_media_path)
-                if (original_media_path and Path(original_media_path).exists() and media_path)
-                else (media_path is not None and media_path != original_media_path)
-            )
-            if is_downloaded_temp:
-                downloaded_media_path = media_path
+            if media_path:
+                is_new_download = True
+                if original_media_path and Path(original_media_path).exists():
+                    try:
+                        # If the resolved path points to the same file as the original,
+                        # we don't "own" it for cleanup.
+                        if Path(media_path).samefile(original_media_path):
+                            is_new_download = False
+                    except FileNotFoundError:
+                        # This can happen if media_path is a broken symlink etc.
+                        pass
+                if is_new_download:
+                    downloaded_media_path = media_path
 
             if not media_path:
                 logger.error(
@@ -313,7 +317,7 @@ class WatermarkWorker:
 
                 # Delete the downloaded input temp file — watermarking succeeded
                 # and the output (processed_output_path) is what the dispatcher needs.
-                if is_downloaded_temp and downloaded_media_path:
+                if downloaded_media_path:
                     _safe_unlink(
                         downloaded_media_path,
                         context=f"wm_input_cleanup:{job_id}",
