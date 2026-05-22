@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import sys
 from typing import Optional, Any
 
 from app.config import settings
@@ -73,10 +74,13 @@ class AppLifecycle:
             # message.from_user.id == get_bot_id() without calling get_me() per message.
             set_bot_id(me.id)
 
+            # Verify bot can access critical channels
+            await self._verify_channel_access()
+
             # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
             self._audit_handler_registration()
 
-        except Exception:
+        except (Exception, SystemExit):
             logger.error("Failed to start Pyrogram client", exc_info=True)
             await DatabaseManager.disconnect()
             sys.exit(1)
@@ -107,6 +111,42 @@ class AppLifecycle:
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")
+
+    async def _verify_channel_access(self) -> None:
+        """
+        Verify the bot can access critical channels at startup.
+        This forces Pyrogram to cache the peer and fails fast if misconfigured.
+        """
+        logger.info("Verifying access to critical channels...")
+        channels_to_check = {
+            "VAULT_CHANNEL_ID": getattr(settings, "VAULT_CHANNEL_ID", None),
+            "PREMIUM_CHANNEL_ID": getattr(settings, "PREMIUM_CHANNEL_ID", None),
+            "VERIFICATION_GROUP_ID": getattr(settings, "VERIFICATION_GROUP_ID", None),
+            "NSFW_GROUP_ID": getattr(settings, "NSFW_GROUP_ID", None),
+            "PREMIUM_GROUP_ID": getattr(settings, "PREMIUM_GROUP_ID", None),
+        }
+        all_ok = True
+        for name, raw_id in channels_to_check.items():
+            if not raw_id:
+                # This is already checked in _validate_config for required ones
+                continue
+            try:
+                channel_id = int(raw_id)
+                chat = await self._bot.get_chat(channel_id)
+                logger.info(f"✅ Access confirmed for {name}: '{chat.title}' ({chat.id})")
+            except Exception as e:
+                logger.error(
+                    f"❌ FAILED to access channel {name} ({raw_id}). "
+                    f"Ensure the bot is a member with appropriate permissions. Error: {e}"
+                )
+                all_ok = False
+
+        if not all_ok:
+            logger.critical(
+                "Aborting startup due to channel access failure. "
+                "Please check bot membership and permissions in all listed channels."
+            )
+            sys.exit(1)
 
     def _audit_handler_registration(self) -> None:
         """

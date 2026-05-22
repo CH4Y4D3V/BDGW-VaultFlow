@@ -279,15 +279,16 @@ async def download_with_refresh(
         )
 
     # ── Parse coordinates ─────────────────────────────────────────────────────
-    raw_vault_channel = job_doc.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
+    metadata = job_doc.get("metadata", {})
+    raw_vault_channel = job_doc.get("vault_channel_id") or metadata.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
     try:
         vault_channel_id: Optional[int] = int(raw_vault_channel) if raw_vault_channel else None
     except (ValueError, TypeError):
         vault_channel_id = None
 
-    vault_message_id: Optional[int] = _int_or_none(job_doc.get("vault_message_id"))
-    origin_chat_id: Optional[int] = _int_or_none(job_doc.get("origin_chat_id"))
-    origin_message_id: Optional[int] = _int_or_none(job_doc.get("origin_message_id"))
+    vault_message_id: Optional[int] = _int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id"))
+    origin_chat_id: Optional[int] = _int_or_none(job_doc.get("origin_chat_id") or metadata.get("origin_chat_id"))
+    origin_message_id: Optional[int] = _int_or_none(job_doc.get("origin_message_id") or metadata.get("origin_message_id"))
 
     # ── Resolve fresh message ─────────────────────────────────────────────────
     msg = await resolve_fresh_message(
@@ -419,7 +420,8 @@ async def resolve_send_media(
 
     Returns fresh Message on success, None if all sources exhausted.
     """
-    raw_vault_channel = job_doc.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
+    metadata = job_doc.get("metadata", {})
+    raw_vault_channel = job_doc.get("vault_channel_id") or metadata.get("vault_channel_id") or str(settings.VAULT_CHANNEL_ID)
     try:
         vault_channel_id: Optional[int] = int(raw_vault_channel) if raw_vault_channel else None
     except (ValueError, TypeError):
@@ -428,9 +430,9 @@ async def resolve_send_media(
     return await resolve_fresh_message(
         client=client,
         vault_channel_id=vault_channel_id,
-        vault_message_id=_int_or_none(job_doc.get("vault_message_id")),
-        origin_chat_id=_int_or_none(job_doc.get("origin_chat_id")),
-        origin_message_id=_int_or_none(job_doc.get("origin_message_id")),
+        vault_message_id=_int_or_none(job_doc.get("vault_message_id") or metadata.get("vault_message_id")),
+        origin_chat_id=_int_or_none(job_doc.get("origin_chat_id") or metadata.get("origin_chat_id")),
+        origin_message_id=_int_or_none(job_doc.get("origin_message_id") or metadata.get("origin_message_id")),
         job_id=job_id,
     )
 

@@ -245,12 +245,12 @@ class WatermarkWorker:
 
             if not media_path:
                 logger.error(
-                    "Watermark job: could not resolve media path — marking failed",
+                    "Watermark job: could not resolve media path — moving to dead-letter queue",
                     extra={"ctx_job_id": job_id},
                 )
-                await self._queue.mark_failed(
+                await self._queue.move_to_dead_letter(
                     job_id,
-                    "FILE_REFERENCE_EXPIRED: could not resolve media from vault or origin",
+                    "FILE_REFERENCE_EXPIRED: could not resolve media from vault or origin.",
                 )
                 return
 

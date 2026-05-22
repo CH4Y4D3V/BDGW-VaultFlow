@@ -375,6 +375,7 @@ async def enqueue_for_distribution(
     messages: list,
     dest: str,
     submitter_user_id: int,
+    vault_message_ids: list[int],
 ) -> bool:
     db = DatabaseManager.get_db()
     queue_repo = QueueRepository(db)
@@ -404,6 +405,7 @@ async def enqueue_for_distribution(
 
     for i, msg in enumerate(messages):
         media = None
+        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
         if msg.media:
             try:
                 media = getattr(msg, msg.media.value, None)
@@ -441,6 +443,10 @@ async def enqueue_for_distribution(
                 "submitter_user_id": submitter_user_id,
                 "destination": dest,
                 "moderated_at": now.isoformat(),
+                "vault_message_id": vault_msg_id,
+                "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
+                "origin_chat_id": msg.chat.id,
+                "origin_message_id": msg.id,
             },
         )
 
@@ -610,7 +616,7 @@ async def execute_queue(
         )
         return
 
-    queued = await enqueue_for_distribution(messages, dest, submitter_user_id)
+    queued = await enqueue_for_distribution(messages, dest, submitter_user_id, vault_ids)
     if not queued:
         logger.error(
             "Queue: failed to enqueue distribution job",
