@@ -203,30 +203,29 @@ def _get_main_menu():
 
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
-    """
-    Handles the /start command in private chat, showing a welcome message and main menu.
-    Also handles deep-linking for resubscribe flow.
-    """
-    if not message.from_user:
-        return
+    try:
+        if not message.from_user:
+            return
+        user_id = message.from_user.id
+        logger.info("/start command received", extra={"ctx_user_id": user_id})
 
-    user_id = message.from_user.id
-    logger.info("/start command received", extra={"ctx_user_id": user_id})
+        if len(message.command) > 1 and message.command[1] == "resubscribe":
+            await handle_mystatus(client, message)
+            return
 
-    # Deep-linking for resubscribe flow from /mystatus
-    if len(message.command) > 1 and message.command[1] == "resubscribe":
-        # The /mystatus command is designed to work in groups or DMs.
-        # We can call it directly here.
-        await handle_mystatus(client, message)
-        return
-
-    text, keyboard = _get_main_menu()
-    await message.reply_text(
-        text=text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=keyboard
-    )
-
+        text, keyboard = _get_main_menu()
+        await message.reply_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard
+        )
+    except Exception as e:
+        import traceback
+        logger.error(f"HANDLE_START CRASH: {e}\n{traceback.format_exc()}")
+        try:
+            await message.reply_text(f"Start error: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 @Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home)$"))
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
