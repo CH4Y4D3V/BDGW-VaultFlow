@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     PROCESSED_MEDIA_DIR: str = "./processed"
     WATERMARK_CACHE_DIR: str = "./watermark_cache"
     FFMPEG_TIMEOUT: float = 120.0
+    
+    # ── Watermark toggle ─────────────────────────────────────────────────────
+    WATERMARK_ENABLED: bool = False  # Set True only when logo assets exist
 
     # ── Watermark assets — per-destination logos ──────────────────────────────
     WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"

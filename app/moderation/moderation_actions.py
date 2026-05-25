@@ -53,6 +53,12 @@ def _destination_display_name(dest: str) -> str:
 
 
 def _get_watermark_config(dest: str) -> Optional[dict]:
+    # Guard: if watermarking is globally disabled, return None so no job
+    # ever enters WATERMARKING status. The scheduler and enqueue paths both
+    # treat None watermark_config as watermark_required=False.
+    if not settings.WATERMARK_ENABLED:
+        return None
+
     if dest == ModerationDestination.NSFW:
         logo_path = settings.WATERMARK_LOGO_PATH_NSFW
         text = settings.WATERMARK_TEXT_NSFW
@@ -65,12 +71,13 @@ def _get_watermark_config(dest: str) -> Optional[dict]:
     logo_exists = Path(logo_path).exists()
     if not logo_exists:
         logger.warning(
-            "Watermark logo missing — will use text overlay",
+            "Watermark logo missing and WATERMARK_ENABLED=true — returning None to skip watermarking",
             extra={"ctx_path": logo_path, "ctx_dest": dest},
         )
+        return None  # No asset = no watermark, not a broken watermark job
 
     return {
-        "watermark_image_path": logo_path if logo_exists else None,
+        "watermark_image_path": logo_path,
         "watermark_text": text,
         "position": settings.WATERMARK_POSITION,
         "opacity": settings.WATERMARK_OPACITY,
@@ -284,84 +291,56 @@ async def archive_to_vault(
         
         vault_msg_id = copied_msg.id if copied_msg else 0
         vault_message_ids.append(vault_msg_id)
-
-        update_op = {
-            {"content_id": content_id},
-            {
-                "$setOnInsert": {
-                    "content_id": content_id,
-                    "source_chat_id": str(msg.chat.id),
-                    "source_message_id": msg.id,
-                    "media_group_id": msg.media_group_id,
-                    "media_type": media_type_str,
-                    "file_id": file_id,
-                    "file_unique_id": file_unique_id,
-                    "file_size": file_size,
-                    "caption": msg.caption or msg.text or "",
-                    "created_at": now,
-                    "usage_count": 0,
-                    "last_posted_at": None,
-                    "cooldown_until": None,
-                },
-                "$set": {
-                    "source_chat_id": str(msg.chat.id),
-                    "source_message_id": msg.id,
-                    "vault_message_id": vault_msg_id if vault_msg_id else None,
-                    "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
-                    "moderation_destination": dest,
-                    "status": initial_status,
-                    "distribution_state": ModerationState.PENDING.value,
-                    "submitter_user_id": submitter_user_id,
-                    "consent_record_id": resolved_consent_id,
-                    "checksum": checksum,
-                    "updated_at": now,
-                    "metadata": {
-                        "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
-                        "date": msg.date.isoformat() if msg.date else None,
-                    },
-                },
+        
+            update_doc = {
+            "$setOnInsert": {
+            "content_id": content_id,
+            "source_chat_id": str(msg.chat.id),
+            "source_message_id": msg.id,
+            "media_group_id": msg.media_group_id,
+            "media_type": media_type_str,
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "file_size": file_size,
+            "caption": msg.caption or msg.text or "",
+            "created_at": now,
+            "usage_count": 0,
+            "last_posted_at": None,
+            "cooldown_until": None,
             },
-        }
+            "$set": {
+            "source_chat_id": str(msg.chat.id),
+            "source_message_id": msg.id,
+            "vault_message_id": vault_msg_id if vault_msg_id else None,
+            "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
+            "moderation_destination": dest,
+            "status": initial_status,
+            "distribution_state": ModerationState.PENDING.value,
+            "submitter_user_id": submitter_user_id,
+            "consent_record_id": resolved_consent_id,
+            "checksum": checksum,
+            "updated_at": now,
+            "metadata": {
+            "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
+            "date": msg.date.isoformat() if msg.date else None,
+            },
+        },
+    }
 
         try:
             await vault_col.update_one(
-                {"content_id": content_id},
-                update_op[1],
-                upsert=True
+            {"content_id": content_id},
+            update_doc,
+            upsert=True,
             )
         except Exception:
-            logger.error("Vault MongoDB write failed for content_id %s", content_id, exc_info=True)
-
-    if messages:
-        try:
-            logger.info(
-                "Vault archival complete",
-                extra={
-                    "ctx_count": len(messages),
-                    "ctx_dest": dest,
-                    "ctx_initial_status": initial_status,
-                    "ctx_vault_copied": len([v for v in vault_message_ids if v]),
-                    "ctx_submitter": submitter_user_id,
-                },
-            )
-        except Exception as e:
-            logger.error("Error during vault archival logging", exc_info=True)
-
-    try:
-        await get_audit().log(
-            action=AuditAction.VAULT_ARCHIVE,
-            performed_by=submitter_user_id,
-            details={
-                "destination": dest,
-                "message_count": len(messages),
-                "initial_status": initial_status,
-                "consent_record_id": resolved_consent_id,
-            },
+            logger.error(
+            "Vault MongoDB write failed for content_id %s",
+            content_id,
+            exc_info=True,
         )
-    except Exception as e:
-        logger.warning("Audit log failed for vault archive", extra={"ctx_error": str(e)})
 
-    return vault_message_ids
+           return vault_message_ids
 
 
 # ── Queue enqueue ─────────────────────────────────────────────────────────────
