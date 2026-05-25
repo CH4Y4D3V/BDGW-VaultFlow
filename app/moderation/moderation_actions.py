@@ -263,12 +263,10 @@ async def archive_to_vault(
         file_id = getattr(media, "file_id", None) if media else None
         file_size = getattr(media, "file_size", 0) if media else 0
         media_type_str = msg.media.value if msg.media else "text"
-        
-        content_id = f"{msg.chat.id}_{msg.id}"
 
+        content_id = f"{msg.chat.id}_{msg.id}"
         checksum = _compute_checksum(file_unique_id, file_size or 0)
 
-        # Step 1: Copy to Telegram Vault Channel
         if settings.VAULT_CHANNEL_ID:
             for attempt in range(_MAX_RETRIES):
                 try:
@@ -288,60 +286,59 @@ async def archive_to_vault(
                     if attempt == _MAX_RETRIES - 1:
                         break
                     await asyncio.sleep(2 ** attempt)
-        
+
         vault_msg_id = copied_msg.id if copied_msg else 0
         vault_message_ids.append(vault_msg_id)
-        
-            update_doc = {
+
+        update_doc = {
             "$setOnInsert": {
-            "content_id": content_id,
-            "source_chat_id": str(msg.chat.id),
-            "source_message_id": msg.id,
-            "media_group_id": msg.media_group_id,
-            "media_type": media_type_str,
-            "file_id": file_id,
-            "file_unique_id": file_unique_id,
-            "file_size": file_size,
-            "caption": msg.caption or msg.text or "",
-            "created_at": now,
-            "usage_count": 0,
-            "last_posted_at": None,
-            "cooldown_until": None,
+                "content_id": content_id,
+                "source_chat_id": str(msg.chat.id),
+                "source_message_id": msg.id,
+                "media_group_id": msg.media_group_id,
+                "media_type": media_type_str,
+                "file_id": file_id,
+                "file_unique_id": file_unique_id,
+                "file_size": file_size,
+                "caption": msg.caption or msg.text or "",
+                "created_at": now,
+                "usage_count": 0,
+                "last_posted_at": None,
+                "cooldown_until": None,
             },
             "$set": {
-            "source_chat_id": str(msg.chat.id),
-            "source_message_id": msg.id,
-            "vault_message_id": vault_msg_id if vault_msg_id else None,
-            "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
-            "moderation_destination": dest,
-            "status": initial_status,
-            "distribution_state": ModerationState.PENDING.value,
-            "submitter_user_id": submitter_user_id,
-            "consent_record_id": resolved_consent_id,
-            "checksum": checksum,
-            "updated_at": now,
-            "metadata": {
-            "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
-            "date": msg.date.isoformat() if msg.date else None,
+                "source_chat_id": str(msg.chat.id),
+                "source_message_id": msg.id,
+                "vault_message_id": vault_msg_id if vault_msg_id else None,
+                "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
+                "moderation_destination": dest,
+                "status": initial_status,
+                "distribution_state": ModerationState.PENDING.value,
+                "submitter_user_id": submitter_user_id,
+                "consent_record_id": resolved_consent_id,
+                "checksum": checksum,
+                "updated_at": now,
+                "metadata": {
+                    "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
+                    "date": msg.date.isoformat() if msg.date else None,
+                },
             },
-        },
-    }
+        }
 
         try:
             await vault_col.update_one(
-            {"content_id": content_id},
-            update_doc,
-            upsert=True,
+                {"content_id": content_id},
+                update_doc,
+                upsert=True,
             )
         except Exception:
             logger.error(
-            "Vault MongoDB write failed for content_id %s",
-            content_id,
-            exc_info=True,
-        )
+                "Vault MongoDB write failed for content_id %s",
+                content_id,
+                exc_info=True,
+            )
 
-           return vault_message_ids
-
+    return vault_message_ids
 
 # ── Queue enqueue ─────────────────────────────────────────────────────────────
 

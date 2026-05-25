@@ -59,11 +59,15 @@ class AppLifecycle:
         # 2. Database
         try:
             await DatabaseManager.connect()
+        except Exception:
+            logger.error("Failed to connect to MongoDB", exc_info=True)
+            sys.exit(1)
 
+        try:
             channel_service = ChannelService()
             await channel_service.seed_channels()
         except Exception:
-            logger.error("Failed to connect to MongoDB", exc_info=True)
+            logger.error("Failed to seed channels — check moderation_actions import", exc_info=True)
             sys.exit(1)
 
         # 3. Telegram Client
