@@ -15,12 +15,14 @@ from pyrogram.types import (
 )
 
 from app.config import settings
+from app.core.redis_client import get_redis
 from app.handlers.creator_onboarding import check_and_gate_creator
 from app.moderation import verification_hub
 from app.services import submission_service
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+_redis = get_redis()
 
 _album_buffer: dict[str, list[Message]] = defaultdict(list)
 _album_tasks: dict[str, asyncio.Task] = {}
@@ -245,12 +247,19 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     RC-7 fix: handles the 'Send Content Anonymously' button.
     """
     action = callback.data.split(":")[1]
+    user_id = callback.from_user.id if callback.from_user else 0
+    
+    # ── Anti-Spam / Debounce ──
+    spam_key = f"menu:spam:{user_id}"
+    if await _redis.exists(spam_key):
+        await callback.answer("Slow down! Processing...", show_alert=False)
+        return
+    await _redis.set(spam_key, "1", ex=1)
+    
     logger.info(
         "HANDLER: handle_submit_menu entered",
         extra={
-            "ctx_from_user": (
-                callback.from_user.id if callback.from_user else None
-            ),
+            "ctx_from_user": user_id,
             "ctx_action": action,
         },
     )

@@ -238,6 +238,13 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
     action = callback_query.data.split(":")[1]
     user_id = callback_query.from_user.id
     
+    # ── Anti-Spam / Debounce ──
+    spam_key = f"menu:spam:{user_id}"
+    if await _redis.exists(spam_key):
+        await callback_query.answer("Slow down! Processing...", show_alert=False)
+        return
+    await _redis.set(spam_key, "1", ex=1)  # 1 second debounce
+    
     text = ""
     keyboard = None
 

@@ -63,6 +63,14 @@ class WatermarkPosition(str, Enum):
     CENTER = "CENTER"
 
 
+class QueueMetrics(BaseModel):
+    pending_count: int = 0
+    processing_count: int = 0
+    completed_count: int = 0
+    failed_count: int = 0
+    dead_count: int = 0
+
+
 class QueueJob(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
 

@@ -1,282 +1,156 @@
-You are a senior Telegram UX architect, product designer, conversational UX engineer, and production backend engineer.
+MANDATORY BUSINESS CONSTANTS
 
-You are redesigning the onboarding and /start experience for a premium Telegram automation platform called:
-
-BDGW CONTENT BOT
-
-The current implementation is low-quality and must be rebuilt into a premium, production-grade onboarding system.
+The following business logic is STRICT and MUST NOT be modified.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-CURRENT UX PROBLEMS
+PREMIUM PLANS
 ━━━━━━━━━━━━━━━━━━━━━━
 
-The current /start flow has major issues:
+Subscription plans:
 
-- text wall
-- weak hierarchy
-- poor spacing
-- low perceived quality
-- generic messaging
-- no onboarding flow
-- no conversational UX
-- weak CTA structure
-- no state-awareness
-- spammy repeated /start behavior
-- poor premium conversion
-- weak button grouping
-- no trust-building
-- no progress flow
-- no anti-spam logic
-- poor mobile readability
-- low visual prestige
+• 1 Month — ৳499
+• 3 Months — ৳1299
+• 6 Months — ৳2199
 
-The current bot feels like a basic utility bot instead of a premium platform.
+Future support required:
+• Eid flash sale
+• temporary campaigns
+• limited offers
+• quota-based discounts
 
-We need:
-- luxury UX
-- premium onboarding
-- modern Telegram-native interaction design
-- psychologically optimized CTA hierarchy
-- mobile-first layout
-- high readability
-- clean spacing
-- state-aware onboarding logic
-- premium conversion flow
-- production-grade async architecture
+Pricing architecture must support:
+
+* future campaign engine
+* temporary overrides
+* discount stacking rules
+* expiry windows
+* analytics tracking
 
 ━━━━━━━━━━━━━━━━━━━━━━
-GOAL
+REQUIRED MAIN BUTTONS
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Transform the onboarding into a modern premium Telegram experience comparable to:
-- premium SaaS onboarding
-- modern AI products
-- premium creator platforms
-- high-end automation services
+Main onboarding buttons:
 
-The UX must feel:
-- premium
-- minimal
-- elegant
-- modern
-- psychologically polished
-- high-trust
-- mobile optimized
+💎 Join Premium
+📩 Send Content Anonymously
+🆘 Need Help
+
+Additional onboarding/navigation buttons may be added,
+but these core actions MUST remain preserved.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED UX IMPROVEMENTS
+PAYMENT WORKFLOW RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-1. COMPLETELY REDESIGN /START MESSAGE
+CRITICAL:
 
-Current message is bad.
+Payment timeout MUST NOT start until:
 
-Create:
-- premium greeting
-- short readable sections
-- emotional trust
-- premium tone
-- elegant formatting
-- whitespace optimization
-- visual hierarchy
+1. admin sends payment instructions
+2. Telegram delivery succeeds
+3. payment intent is persisted
 
-DO NOT:
-- dump large paragraphs
-- overexplain
-- use robotic wording
+ONLY THEN:
 
-The message must:
-- immediately communicate value
-- reduce cognitive load
-- guide action clearly
+* pending_payment state begins
+* timeout begins
+
+This lifecycle is mandatory.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-2. BUTTON ARCHITECTURE REDESIGN
+WORKFLOW ISOLATION RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Current buttons are weak.
+The following systems MUST remain isolated:
 
-Create premium inline keyboard structure.
+A) Payment System
+B) Support System
+C) Moderation System
+D) Distribution System
 
-Requirements:
-- visual grouping
-- CTA hierarchy
-- spacing optimization
-- premium emoji usage
-- conversion-first ordering
+NEVER ALLOW:
 
-Required sections:
-- Submit Content
-- Premium Access
-- Anonymous Upload
-- Help & Support
-- Creator Rules
-- Status / Queue Tracking
-
-Buttons must feel intentional and premium.
+* payment proofs into support
+* moderation callbacks into payment
+* support interception of payment flows
+* subscription logic inside moderation queue
 
 ━━━━━━━━━━━━━━━━━━━━━━
-3. ADD STATE-AWARE /START LOGIC
+FSM SAFETY RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-The bot must behave differently depending on user state.
+FSM uses:
 
-Implement:
-- first-time onboarding
-- returning users
-- premium users
-- banned users
-- pending review users
-- active creators
+* aiogram FSM
+* MemoryStorage
 
-Different /start responses for each state.
+MemoryStorage is NOT trusted persistence.
 
-NO generic static message.
+Database is source of truth.
 
-━━━━━━━━━━━━━━━━━━━━━━
-4. ANTI-SPAM /START LOGIC
-━━━━━━━━━━━━━━━━━━━━━━
+FSM may ONLY control:
 
-Current repeated /start spam looks terrible.
+* temporary interaction state
+* current conversation step
 
-Implement:
-- cooldown logic
-- duplicate suppression
-- cached onboarding response
-- silent refresh behavior
-
-If user repeatedly sends /start:
-- avoid resending giant onboarding
-- provide lightweight refresh UX
+Critical workflow state MUST persist in database.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-5. PREMIUM CONVERSION UX
+VAULT DELIVERY RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Current premium CTA is weak.
+ALL distribution MUST use:
 
-Create:
-- premium positioning
-- scarcity psychology
-- exclusivity
-- creator benefits
-- trust language
-- conversion optimization
+* copy_message()
+* copy_media_group()
 
-Premium must feel valuable.
+ONLY from immutable vault references.
 
-━━━━━━━━━━━━━━━━━━━━━━
-6. MODERN TELEGRAM UX
-━━━━━━━━━━━━━━━━━━━━━━
+Forbidden:
 
-Use:
-- elegant markdown formatting
-- clean spacing
-- compact sections
-- emoji hierarchy
-- concise copywriting
-- conversational UX
-
-Avoid:
-- clutter
-- spammy emojis
-- oversized paragraphs
-- ugly separators
+* stale file_id fallback
+* InputMedia reconstruction
+* source-channel delivery
+* direct watermark upload delivery
 
 ━━━━━━━━━━━━━━━━━━━━━━
-7. PRODUCTION BACKEND REQUIREMENTS
+MODERATION FLOW RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Implement production-safe async architecture.
+Current moderation architecture is already correct.
 
-Requirements:
-- modular handlers
-- centralized onboarding renderer
-- reusable keyboard builder
-- localization-ready structure
-- caching support
-- anti-flood logic
-- restart-safe state handling
-- Redis caching if available
+Must preserve:
 
-━━━━━━━━━━━━━━━━━━━━━━
-8. REQUIRED FILE REFACTORING
-━━━━━━━━━━━━━━━━━━━━━━
+* verification hub
+* moderation callbacks
+* queue system
+* vault archival
+* scheduler
+* fairness rotation
+* duplicate prevention
+* watermarking
+* cooldown logic
 
-Refactor into clean architecture:
-
-- onboarding service
-- keyboard builder
-- user state manager
-- onboarding templates
-- CTA renderer
-
-Avoid monolithic handler logic.
+DO NOT redesign these systems incorrectly.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-9. TELEGRAM EDGE CASES
+SUPPORT SYSTEM RULES
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Handle:
-- blocked bot
-- deleted messages
-- callback query expiration
-- message edit failures
-- race conditions
-- restart recovery
-- Telegram FloodWait
+Support system uses Telegram forum topics.
 
-━━━━━━━━━━━━━━━━━━━━━━
-10. MOBILE-FIRST DESIGN
-━━━━━━━━━━━━━━━━━━━━━━
+Each user:
 
-Optimize specifically for:
-- Android Telegram
-- dark mode
-- one-hand readability
-- narrow screens
+* receives isolated topic
+* persistent support history
+* dedicated admin thread
 
-The onboarding should feel:
-- lightweight
-- premium
-- readable
-- elegant
+Before admin accepts:
 
-━━━━━━━━━━━━━━━━━━━━━━
-11. OUTPUT REQUIREMENTS
-━━━━━━━━━━━━━━━━━━━━━━
+* user → admin forwarding allowed
+* admin → user blocked
 
-Generate COMPLETE production-ready code.
+After acceptance:
 
-Do NOT:
-- generate pseudo-code
-- leave TODOs
-- generate partial snippets
-
-Generate:
-- full async Pyrogram handlers
-- onboarding renderer
-- keyboard builders
-- anti-spam logic
-- user state flow
-- production-safe architecture
-
-━━━━━━━━━━━━━━━━━━━━━━
-12. FINAL REQUIREMENT
-━━━━━━━━━━━━━━━━━━━━━━
-
-Before finalizing:
-- audit UX quality
-- audit mobile readability
-- audit Telegram UX
-- audit async safety
-- audit callback safety
-- audit restart safety
-- audit spam prevention
-- audit conversion quality
-
-Then explain:
-- why the old UX was weak
-- why the new UX is superior
-- remaining Telegram UX limitations
-- future scalability improvements
+* bidirectional forwarding enabled

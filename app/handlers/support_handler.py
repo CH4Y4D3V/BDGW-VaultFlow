@@ -24,6 +24,7 @@ from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import CallbackQuery, Message
 
 from app.config import settings
+from app.core.redis_client import get_redis
 from app.core.permissions import is_support_admin
 from app.repositories.support_repository import SupportRepository
 from app.services.support_service import get_support_service
@@ -31,6 +32,7 @@ from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+_redis = get_redis()
 
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
@@ -76,12 +78,19 @@ async def _safe_reply(
 
 @Client.on_callback_query(filters.regex(r"^menu:support$"))
 async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id if callback.from_user else 0
+    
+    # ── Anti-Spam / Debounce ──
+    spam_key = f"menu:spam:{user_id}"
+    if await _redis.exists(spam_key):
+        await callback.answer("Slow down! Processing...", show_alert=False)
+        return
+    await _redis.set(spam_key, "1", ex=1)
+    
     logger.info(
         "HANDLER: handle_support_menu entered",
         extra={
-            "ctx_from_user": (
-                callback.from_user.id if callback.from_user else None
-            ),
+            "ctx_from_user": user_id,
         },
     )
 

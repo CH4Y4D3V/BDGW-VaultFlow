@@ -129,6 +129,11 @@ class DatabaseManager:
                 name="stale_lock_sweep",
                 background=True,
             ),
+            IndexModel(
+                [("metadata.submitter_user_id", ASCENDING), ("created_at", DESCENDING)],
+                name="user_queue_lookup",
+                background=True,
+            ),
         ])
 
         # ── Vault ─────────────────────────────────────────────────────────────
