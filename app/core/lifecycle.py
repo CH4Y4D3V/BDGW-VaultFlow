@@ -11,6 +11,7 @@ from app.services.channel_service import ChannelService
 from app.bot.client import get_bot, set_bot_id
 from app.workers.subscription_worker import SubscriptionWorker
 from app.health import start_health_server
+from app.referral.scheduler import ReferralScheduler
 
 
 # Handler registration is handled by Pyrogram's plugin system.
@@ -36,6 +37,7 @@ class AppLifecycle:
     def __init__(self):
         self._engine: Optional[DistributionEngine] = None
         self._subscription_worker: Optional[SubscriptionWorker] = None
+        self._referral_scheduler: Optional[ReferralScheduler] = None
         self._bot = get_bot()
         self._health_runner: Optional[Any] = None
         self._running = False
@@ -111,19 +113,29 @@ class AppLifecycle:
         )
 
         try:
-            await self._engine.start()
-        except Exception:
-            logger.error("Failed to start Distribution Engine", exc_info=True)
-            await self.stop()
-            sys.exit(1)
+           await self._engine.start()
+        except Exception as e:
+            logger.exception(
+            "Failed to start Distribution Engine",
+            error_type=type(e).__name__,
+            error_message=str(e)
+            )
+            raise
 
-        # 5. Subscription Worker
-        self._subscription_worker = SubscriptionWorker()
+            try:
+                await self._subscription_worker.start(bot=self._bot)
+                
+            except Exception:
+                logger.error("Failed to start Subscription Worker", exc_info=True)
+                self._subscription_worker = None
+
+        # 6. Referral Scheduler
+        self._referral_scheduler = ReferralScheduler(self._bot)
         try:
-            await self._subscription_worker.start(bot=self._bot)
+            await self._referral_scheduler.start()
         except Exception:
-            logger.error("Failed to start Subscription Worker", exc_info=True)
-            self._subscription_worker = None
+            logger.error("Failed to start Referral Scheduler", exc_info=True)
+            self._referral_scheduler = None
 
         self._running = True
         logger.info("VaultFlow fully started â€” all systems operational.")
@@ -264,6 +276,12 @@ class AppLifecycle:
 
     async def stop(self) -> None:
         logger.info("Initiating graceful shutdown...")
+
+        if self._referral_scheduler:
+            try:
+                await self._referral_scheduler.stop()
+            except Exception:
+                logger.error("Error stopping Referral Scheduler", exc_info=True)
 
         if self._subscription_worker:
             try:
