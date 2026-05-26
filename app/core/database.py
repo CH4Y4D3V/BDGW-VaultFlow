@@ -41,8 +41,8 @@ class DataMigrationManager:
         invalid_count = await queue.count_documents(invalid_ref_query)
         if invalid_count > 0:
             logger.warning(
-                f"MIGRATION: Detected {invalid_count} active jobs with null/invalid vault references. Quarantining...",
-                extra={"ctx_count": invalid_count}
+                "MIGRATION: Detected active jobs with null/invalid vault references. Quarantining...",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_count": invalid_count}
             )
             
             # Move to quarantine before deletion to preserve history
@@ -50,11 +50,15 @@ class DataMigrationManager:
             async for doc in cursor:
                 doc["quarantine_reason"] = "migration_null_vault_reference"
                 doc["quarantined_at"] = datetime.now(timezone.utc)
+                doc["original_collection"] = settings.QUEUE_COLLECTION
                 await quarantine.insert_one(doc)
             
             # Purge from active queue so index creation can proceed
             result = await queue.delete_many(invalid_ref_query)
-            logger.info(f"MIGRATION: Removed {result.deleted_count} invalid jobs from active queue.")
+            logger.info(
+                "MIGRATION: Removed invalid jobs from active queue.",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_deleted": result.deleted_count}
+            )
 
         # 2. Resolve Content ID Duplicates in Active Queue
         # Enforces uniqueness for content_id across all active states.
@@ -66,7 +70,10 @@ class DataMigrationManager:
         
         content_dups = await queue.aggregate(pipeline).to_list(length=None)
         if content_dups:
-            logger.warning(f"MIGRATION: Detected {len(content_dups)} duplicate active content groups. Resolving...")
+            logger.warning(
+                "MIGRATION: Detected duplicate active content groups. Resolving...",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_dups": len(content_dups)}
+            )
             for dup in content_dups:
                 # Keep the first one, quarantine others
                 ids_to_quarantine = dup["ids"][1:]
@@ -75,11 +82,56 @@ class DataMigrationManager:
                     if doc:
                         doc["quarantine_reason"] = "migration_duplicate_content_id"
                         doc["quarantined_at"] = datetime.now(timezone.utc)
+                        doc["original_collection"] = settings.QUEUE_COLLECTION
                         await quarantine.insert_one(doc)
                         await queue.delete_one({"_id": doc_id})
-            logger.info(f"MIGRATION: Resolved {len(content_dups)} content_id conflicts.")
+            logger.info(
+                "MIGRATION: Resolved content_id conflicts.",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_resolved": len(content_dups)}
+            )
 
         logger.info("MIGRATION: Queue stabilization complete.")
+
+    @classmethod
+    async def stabilize_vault(cls, db: AsyncIOMotorDatabase) -> None:
+        """
+        Audit and stabilize the vault collection before index creation.
+        """
+        logger.info("MIGRATION: Starting vault stabilization audit...")
+        
+        vault = db[settings.VAULT_COLLECTION]
+        quarantine = db[settings.QUARANTINE_COLLECTION]
+        
+        # Detect and Quarantine NULL Vault References in Vault items
+        # E11000 duplicate key error { vault_chat_id: null, vault_message_id: null }
+        invalid_vault_query = {
+            "$or": [
+                {"vault_chat_id": None},
+                {"vault_message_id": None}
+            ]
+        }
+        
+        invalid_count = await vault.count_documents(invalid_vault_query)
+        if invalid_count > 0:
+            logger.warning(
+                "MIGRATION: Detected vault items with null references. Quarantining...",
+                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_count": invalid_count}
+            )
+            
+            cursor = vault.find(invalid_vault_query)
+            async for doc in cursor:
+                doc["quarantine_reason"] = "migration_null_vault_reference"
+                doc["quarantined_at"] = datetime.now(timezone.utc)
+                doc["original_collection"] = settings.VAULT_COLLECTION
+                await quarantine.insert_one(doc)
+            
+            result = await vault.delete_many(invalid_vault_query)
+            logger.info(
+                "MIGRATION: Removed invalid vault items.",
+                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_deleted": result.deleted_count}
+            )
+
+        logger.info("MIGRATION: Vault stabilization complete.")
 
 
 class DatabaseManager:
@@ -105,7 +157,7 @@ class DatabaseManager:
             cls._client = client
             cls._db = client[settings.MONGO_DB_NAME]
 
-            # ── Connection Test ───────────────────────────────────────────────
+            # ── Connection Test (FATAL if fails) ───────────────────────────────
             logger.debug("Pinging MongoDB admin database...")
             await client.admin.command("ping")
             logger.info("MongoDB socket connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
@@ -120,20 +172,34 @@ class DatabaseManager:
                 logger.warning("MongoDB replica set NOT detected — transactions will be disabled/unavailable")
                 cls._transactions_supported = False
 
-            # ── MIGRATION STABILIZATION ──────────────────────────────────────
-            # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
-            await DataMigrationManager.stabilize_queue(cls._db)
-
-            # ── Schema Verification ──────────────────────────────────────────
-            logger.debug("Initiating index verification/creation phase...")
-            await cls._ensure_indexes()
-            
-            cls._initialized = True
-            logger.info("MongoDB initialization complete (Connection + Indices)")
-
         except Exception as e:
-            logger.exception("FATAL: MongoDB initialization failed during connect sequence")
+            logger.exception("FATAL: MongoDB connection or authentication failed")
             raise e
+
+        # ── MIGRATION STABILIZATION (Non-FATAL) ──────────────────────────────
+        # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
+        try:
+            await DataMigrationManager.stabilize_queue(cls._db)
+            await DataMigrationManager.stabilize_vault(cls._db)
+        except Exception as e:
+            logger.error(
+                "MIGRATION: Data stabilization audit failed — attempting to proceed to index creation",
+                extra={"ctx_error": str(e)}
+            )
+
+        # ── Schema Verification (Non-FATAL) ──────────────────────────────────
+        logger.debug("Initiating index verification/creation phase...")
+        try:
+            await cls._ensure_indexes()
+            logger.info("MongoDB initialization complete (Connection + Indices)")
+        except Exception as e:
+            logger.error(
+                "DEGRADED: Index verification failed. Application will boot with missing/stale indexes.",
+                extra={"ctx_error": str(e)}
+            )
+            # We do NOT raise here (FIX 4)
+            
+        cls._initialized = True
 
     @classmethod
     def transactions_supported(cls) -> bool:
@@ -164,28 +230,40 @@ class DatabaseManager:
             logger.debug(f"Verifying indexes for collection: {collection_name}")
             
             # ── RC-11: Surgical Index Reconciliation ──────────────────────────
-            # Specifically for the 'unique_active_content' index which often changes partial expressions
-            if collection_name == settings.QUEUE_COLLECTION:
-                try:
-                    existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
-                    # We check both unique_active_content and vault_ref_unique
-                    for target_name in ["unique_active_content", "vault_ref_unique"]:
-                        found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
-                        if found_index:
-                            expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
-                            if expected:
-                                expected_partial = expected.document.get("partialFilterExpression")
-                                actual_partial = found_index.get("partialFilterExpression")
-                                
-                                if actual_partial != expected_partial:
-                                    logger.warning(
-                                        f"Index definition mismatch for {target_name}. "
-                                        f"Actual: {actual_partial} vs Expected: {expected_partial}. "
-                                        "Surgically recreating..."
-                                    )
-                                    await db[collection_name].drop_index(target_name)
-                except Exception as e:
-                    logger.warning(f"Surgical index audit failed (non-fatal): {e}")
+            # Specifically for unique indexes which often change definitions
+            target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique"]
+            
+            try:
+                existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
+                for target_name in target_indexes:
+                    found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
+                    if found_index:
+                        expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
+                        if expected:
+                            expected_doc = expected.document
+                            
+                            # Compare critical options: unique, sparse, partialFilterExpression
+                            mismatch = False
+                            if found_index.get("unique") != expected_doc.get("unique"): mismatch = True
+                            if found_index.get("sparse") != expected_doc.get("sparse"): mismatch = True
+                            if found_index.get("partialFilterExpression") != expected_doc.get("partialFilterExpression"): mismatch = True
+                            
+                            if mismatch:
+                                logger.warning(
+                                    f"Index definition mismatch for {target_name}. Surgically recreating...",
+                                    extra={
+                                        "ctx_collection": collection_name,
+                                        "ctx_index": target_name,
+                                        "ctx_actual": found_index,
+                                        "ctx_expected": expected_doc
+                                    }
+                                )
+                                await db[collection_name].drop_index(target_name)
+            except Exception as e:
+                logger.warning(
+                    f"Surgical index audit failed for {collection_name} (non-fatal)",
+                    extra={"ctx_error": str(e)}
+                )
 
             try:
                 await db[collection_name].create_indexes(indexes)
@@ -195,7 +273,7 @@ class DatabaseManager:
                 error_str = str(e)
                 if "already exists with different options" in error_str or "IndexOptionsConflict" in error_str:
                     logger.warning(
-                        f"Index conflict detected in {collection_name}. Attempting recovery...",
+                        f"Index conflict detected in {collection_name}. Attempting full collection recovery...",
                         extra={"ctx_collection": collection_name, "ctx_error": error_str}
                     )
                     try:
@@ -204,11 +282,16 @@ class DatabaseManager:
                         logger.info(f"Successfully recovered and recreated indexes for {collection_name}")
                         return
                     except Exception as secondary_e:
-                        logger.exception(f"Index recovery failed for {collection_name}")
+                        logger.error(
+                            f"Index recovery failed for {collection_name}",
+                            extra={"ctx_collection": collection_name, "ctx_error": str(secondary_e)}
+                        )
                         raise secondary_e
                 
-                logger.error(f"Index creation failed for collection: {collection_name}")
-                logger.exception(f"Underlying error for {collection_name}: {e}")
+                logger.error(
+                    f"Index creation failed for collection: {collection_name}",
+                    extra={"ctx_collection": collection_name, "ctx_error": str(e)}
+                )
                 raise e
 
         # ── Queue ─────────────────────────────────────────────────────────────
@@ -303,7 +386,26 @@ class DatabaseManager:
                 name="vault_message_unique",
                 unique=True,
                 background=True,
+                sparse=True,
             ),
+            IndexModel(
+                [("media_group_id", ASCENDING)],
+                name="vault_media_group",
+                background=True,
+                sparse=True,
+            ),
+            IndexModel(
+                [("status", ASCENDING), ("moderation_destination", ASCENDING), ("created_at", ASCENDING)],
+                name="vault_dist_query",
+                background=True,
+            ),
+            IndexModel(
+                [("file_unique_id", ASCENDING)],
+                name="vault_file_unique",
+                background=True,
+                sparse=True,
+            ),
+        ])
             IndexModel(
                 [("media_group_id", ASCENDING)],
                 name="vault_media_group",
