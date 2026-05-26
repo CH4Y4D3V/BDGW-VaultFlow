@@ -91,6 +91,15 @@ class AppLifecycle:
 
             # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
             total_handlers = self._audit_handler_registration()
+            
+            me = await self._bot.get_me()
+            groups = self._bot.dispatcher.groups
+            total = sum(len(h) for h in groups.values())
+            logger.info("boot_stage",
+                stage="pyrogram_connected",
+                bot_username=me.username,
+                total_handlers=total
+            )
             logger.info("boot_stage", stage="handlers_registered", count=total_handlers)
 
         except (Exception, SystemExit):
