@@ -75,12 +75,18 @@ class AppLifecycle:
             logger.info("Starting Pyrogram client...")
             await self._bot.start()
             me = await self._bot.get_me()
-            logger.info(
-                "boot_stage", 
-                stage="pyrogram_connected", 
-                bot_username=me.username,
-                bot_id=me.id
-            )
+            logger.info("boot_stage", 
+            stage="pyrogram_connected",
+            bot_username=me.username,
+            bot_id=me.id
+        )
+        except Exception as e:
+            logger.exception(
+            "Failed to start Pyrogram client",
+            error_type=type(e).__name__,
+            error_message=str(e)
+        )
+        raise
 
             # FIX 8: Cache the bot's own user_id so group_handler can check
             # message.from_user.id == get_bot_id() without calling get_me() per message.
