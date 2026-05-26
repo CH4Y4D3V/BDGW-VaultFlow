@@ -223,12 +223,14 @@ async def handle_start(client: Client, message: Message) -> None:
             if payload.startswith("ref_"):
                 try:
                     referrer_id = int(payload.split("_")[1])
+                    from app.referral.repository import ReferralRepository
                     from app.referral.service import ReferralService
-                    ref_service = ReferralService()
-                    success, ref_text = await ref_service.handle_referral_start(client, referrer_id, user_id)
-                    # We continue to show onboarding after processing referral
-                    if success:
-                        await message.reply_text(f"✨ <b>Referral System</b>\n\n{ref_text}")
+                    from app.referral.handlers import process_referral_start
+                    
+                    ref_repo = ReferralRepository(DatabaseManager.get_db())
+                    ref_service = ReferralService(ref_repo, client)
+                    
+                    await process_referral_start(client, message, referrer_id, ref_service)
                 except (IndexError, ValueError):
                     pass
             elif payload == "resubscribe":
@@ -295,26 +297,16 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             keyboard = KeyboardBuilder.build_premium_conversion()
 
         elif action == "referrals":
+            from app.referral.repository import ReferralRepository
             from app.referral.service import ReferralService
-            ref_service = ReferralService()
-            wallet = await ref_service.repo.get_wallet(user_id)
-            if not wallet:
-                await ref_service.repo.upsert_wallet(user_id)
-                wallet = await ref_service.repo.get_wallet(user_id)
-
-            bot_username = await _get_bot_username(client)
-            ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+            from app.referral.handlers import show_referral_status
             
-            text = (
-                "📊 <b>Your Referral Status</b>\n\n"
-                f"💰 <b>Points Balance:</b> <code>{wallet['points_balance']}</code>\n"
-                f"📈 <b>Total Earned:</b> <code>{wallet['total_earned']}</code>\n"
-                f"👥 <b>Active Referrals:</b> <code>{wallet['active_referrals']}</code>\n\n"
-                "🔗 <b>Your Referral Link:</b>\n"
-                f"<code>{ref_link}</code>\n\n"
-                "<i>Share this link. Each qualified referral earns you 1 point toward Premium discounts!</i>"
-            )
-            keyboard = KeyboardBuilder.build_back_button()
+            ref_repo = ReferralRepository(DatabaseManager.get_db())
+            ref_service = ReferralService(ref_repo, client)
+            
+            await show_referral_status(client, callback_query.message, ref_service)
+            await callback_query.answer()
+            return # show_referral_status sends its own message, we don't edit the menu here
 
         elif action == "queue":
             queue_repo = _get_queue_repo()

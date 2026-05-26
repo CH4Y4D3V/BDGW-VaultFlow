@@ -128,13 +128,39 @@ class AppLifecycle:
                 logger.error("Failed to start Subscription Worker", exc_info=True)
                 self._subscription_worker = None
 
-        # 6. Referral Scheduler
-        self._referral_scheduler = ReferralScheduler(self._bot)
+        # 6. Referral System Integration
         try:
-            await self._referral_scheduler.start()
+            from app.referral.repository import ReferralRepository
+            from app.referral.service import ReferralService
+            from app.referral.scheduler import ReferralScheduler
+            from app.handlers.membership_handler import init_membership_handler
+
+            # 1. Repository & Indexes
+            ref_repo = ReferralRepository(DatabaseManager.get_db())
+            await ref_repo.create_indexes()
+
+            # 2. Service
+            ref_service = ReferralService(ref_repo, self._bot)
+            
+            # 3. Scheduler & Jobs
+            # We use the internal scheduler from DistributionEngine if available
+            if self._engine and self._engine.scheduler:
+                raw_scheduler = self._engine.scheduler._scheduler
+                self._referral_scheduler = ReferralScheduler(
+                    service=ref_service,
+                    scheduler=raw_scheduler,
+                    channel_id=int(settings.VAULT_CHANNEL_ID)
+                )
+                self._referral_scheduler.register_jobs()
+                logger.info("Referral background jobs registered")
+            else:
+                logger.warning("Referral Scheduler skipped: DistributionEngine scheduler not found")
+
+            # 4. Membership Handler bridge
+            init_membership_handler(ref_service)
+            
         except Exception:
-            logger.error("Failed to start Referral Scheduler", exc_info=True)
-            self._referral_scheduler = None
+            logger.error("Failed to initialize Referral System", exc_info=True)
 
         self._running = True
         logger.info("VaultFlow fully started â€” all systems operational.")

@@ -1,127 +1,288 @@
 gemini -p "
-You are a senior backend architect fixing a production Python Telegram bot (BDGW VaultFlow).
+You are implementing a production referral system for BDGW VaultFlow.
+This is a NEW feature, NOT a bug fix. The existing runtime is stable.
+Do NOT touch any existing files unless explicitly listed below.
 
 ## STACK
-- Python 3.12
-- Pyrogram v2
-- Motor (async MongoDB)
-- APScheduler
-- Structlog (NOT stdlib logging)
-- AsyncIO
+- Python 3.12, Pyrogram v2, Motor (async MongoDB), APScheduler, Structlog
+- NO Redis. NO new infrastructure dependencies.
 
-## YOUR TASK
-Fix exactly 4 bugs identified from production crash logs. Do NOT rewrite unrelated code. Do NOT change architecture. Surgical fixes only.
+## WHAT YOU ARE BUILDING
+A referral system with these components:
+1. MongoDB collections (referrals + referral_wallets)
+2. Repository layer
+3. Service layer
+4. APScheduler background jobs
+5. Handler integration points (only /start and a referral status command)
 
----
+━━━━━━━━━━━━━━━━━━━━━━
+FILE STRUCTURE TO CREATE
+━━━━━━━━━━━━━━━━━━━━━━
 
-## BUG 1 — Missing import: DuplicateKeyError
-FILE: app/scheduler/scheduler.py
+app/referral/
+    __init__.py           (empty)
+    models.py             (dataclasses/enums only, no DB logic)
+    repository.py         (all MongoDB operations, Motor async)
+    service.py            (business logic only, calls repository)
+    scheduler.py          (APScheduler jobs only, delegates to service)
+    handlers.py           (Pyrogram handlers, thin — calls service only)
 
-SYMPTOM:
-  NameError: name 'DuplicateKeyError' is not defined. Did you mean: 'DuplicateJobError'?
-  at: except DuplicateKeyError:
+━━━━━━━━━━━━━━━━━━━━━━
+MODELS (app/referral/models.py)
+━━━━━━━━━━━━━━━━━━━━━━
 
-FIX:
-  Add at top of file:
-    from pymongo.errors import DuplicateKeyError
+Create these dataclasses using Python dataclasses (not Pydantic):
 
----
+ReferralStatus enum:
+    PENDING = 'pending'
+    QUALIFIED = 'qualified'
+    INVALIDATED = 'invalidated'
 
-## BUG 2 — Missing import: WatermarkState
-FILE: app/scheduler/scheduler.py
+ReferralDocument dataclass:
+    referrer_user_id: int
+    referred_user_id: int
+    status: ReferralStatus
+    qualified: bool
+    channel_member: bool
+    bot_active: bool
+    created_at: datetime
+    qualified_at: Optional[datetime]
+    invalidated_at: Optional[datetime]
 
-SYMPTOM:
-  NameError: name 'WatermarkState' is not defined
-  at: _run_startup_integrity_scan
+ReferralWallet dataclass:
+    user_id: int
+    points_balance: int
+    total_earned: int
+    total_spent: int
+    active_referrals: int
 
-FIX:
-  Read the file first. Find where WatermarkState is defined in the project (likely app/watermark/models.py or app/distribution/models.py).
-  Add the correct import at the top of scheduler.py.
-  Do NOT guess the import path — use Read tool to locate the class definition first.
+━━━━━━━━━━━━━━━━━━━━━━
+REPOSITORY (app/referral/repository.py)
+━━━━━━━━━━━━━━━━━━━━━━
 
----
+Class: ReferralRepository
 
-## BUG 3 — Stale MongoDB lock on restart
-FILE: app/scheduler/scheduler.py
+Constructor: __init__(self, db: AsyncIOMotorDatabase)
 
-SYMPTOM:
-  pymongo.errors.DuplicateKeyError: E11000 duplicate key error
-  collection: bdgw_vaultflow.locks
-  index: lock_key_unique
-  dup key: { lock_key: 'scheduler_active_singleton' }
+Collections used:
+    self._referrals = db['referrals']
+    self._wallets = db['referral_wallets']
 
-ROOT CAUSE:
-  On crash or hard restart, the lock document is never deleted from MongoDB.
-  Every new startup attempts insert_one() which fails with DuplicateKeyError.
-  The except clause fails because DuplicateKeyError is not imported (Bug 1).
-  Even after Bug 1 is fixed, the logic is wrong: catching DuplicateKeyError and returning False means the scheduler NEVER starts after any crash.
+Methods to implement (ALL async):
 
-FIX STRATEGY — Implement proper restart-safe lock acquisition:
+    async def create_indexes(self) -> None
+        Index 1: unique index on referred_user_id (prevents double referral at DB level)
+        Index 2: compound index on (referrer_user_id, status) for wallet sync queries
+        Index 3: TTL index on created_at with expireAfterSeconds=172800 (48hrs) WHERE status=PENDING only
+            NOTE: MongoDB TTL only supports single-field. Use a partial filter expression.
+        Index 4: index on (status, created_at) for the qualification background job
 
-  STEP 1: On startup, before attempting to acquire the lock, DELETE any existing stale lock document.
-  Use delete_many({'lock_key': 'scheduler_active_singleton'}) as the first operation in _acquire_lock() or a new _release_stale_lock() method called in start().
+    async def create_pending(self, referrer_id: int, referred_id: int) -> bool
+        Insert pending referral document.
+        Return True on success, False if referred_user_id already exists (DuplicateKeyError).
+        Import: from pymongo.errors import DuplicateKeyError
+        Use insert_one with the full ReferralDocument fields.
 
-  STEP 2: Then attempt insert_one() as normal.
+    async def get_referral_by_referred(self, referred_id: int) -> Optional[dict]
+        Return the referral document for a referred user or None.
 
-  STEP 3: The lock document should include a 'created_at' field with datetime.utcnow() and an 'instance_id' field (uuid4 string) for auditability.
+    async def get_pending_older_than(self, hours: int) -> List[dict]
+        Return all pending referrals older than N hours.
+        Query: status=PENDING, created_at <= (now - timedelta(hours=hours))
 
-  STEP 4: Add a _release_lock() method that deletes the lock by instance_id on graceful shutdown.
+    async def qualify_referral(self, referred_id: int) -> bool
+        Atomically:
+        - Set status=QUALIFIED, qualified=True, qualified_at=now
+        - Only if current status=PENDING
+        Use find_one_and_update with a filter on referred_id AND status=PENDING.
+        Return True if document was updated, False otherwise.
 
-  STEP 5: In the stop()/shutdown() method of the scheduler, call _release_lock() so clean shutdowns leave no stale lock.
+    async def invalidate_referral(self, referred_id: int) -> bool
+        Atomically set status=INVALIDATED, invalidated_at=now.
+        Only if current status=QUALIFIED.
+        Return True if updated.
 
-  IMPORTANT: Use Motor (async) for all MongoDB operations. The current code using self._locks.insert_one() synchronously inside an async method is also wrong — verify Motor is being used (AsyncIOMotorCollection), not pymongo Collection directly.
+    async def reactivate_referral(self, referred_id: int) -> bool
+        Atomically set status=QUALIFIED, invalidated_at=None, channel_member=True.
+        Only if current status=INVALIDATED.
+        Return True if updated.
 
----
+    async def get_wallet(self, user_id: int) -> Optional[dict]
 
-## BUG 4 — Structlog API misuse: unexpected keyword 'error_type'
-FILES: app/core/lifecycle.py AND main_bot.py
+    async def upsert_wallet(self, user_id: int) -> None
+        Use update_one with upsert=True.
+        On insert: set points_balance=0, total_earned=0, total_spent=0, active_referrals=0.
+        On update: do nothing (only creates if not exists).
 
-SYMPTOM:
-  TypeError: Logger._log() got an unexpected keyword argument 'error_type'
-  at: logger.exception(..., error_type='...')
+    async def increment_balance(self, user_id: int, amount: int) -> None
+        Atomically: points_balance += amount, total_earned += amount (only if amount > 0),
+        active_referrals += 1 (only if amount > 0, decrement if amount < 0).
+        Use $inc operator.
 
-ROOT CAUSE:
-  The code is using stdlib logging.Logger.exception() which does not accept extra keyword arguments beyond 'exc_info', 'stack_info', 'stacklevel'.
-  Structlog bound loggers DO accept arbitrary keyword args.
-  Either: (a) the logger is a stdlib logger being used with structlog syntax, OR (b) structlog is not properly configured.
+    async def decrement_balance(self, user_id: int) -> None
+        Atomically: points_balance = max(0, points_balance - 1), active_referrals -= 1.
+        Use update_one with $inc: {points_balance: -1, active_referrals: -1}.
+        Add a safeguard: also run update_one({'user_id': user_id, 'points_balance': {'$lt': 0}}, {'$set': {'points_balance': 0}}) after to clamp negative values.
 
-FIX:
-  Read app/core/lifecycle.py and main_bot.py first.
+    async def deduct_points(self, user_id: int, amount: int) -> bool
+        Deduct points for subscription discount.
+        Only deduct if points_balance >= amount.
+        Use find_one_and_update with filter: {user_id: user_id, points_balance: {$gte: amount}}
+        Update: {$inc: {points_balance: -amount, total_spent: amount}}
+        Return True if successful.
 
-  Option A (preferred): If the file already imports structlog and uses structlog.get_logger(), the issue is that somewhere in the logging chain it falls back to stdlib. Fix the structlog configuration to use structlog.stdlib.ProcessorFormatter properly.
+━━━━━━━━━━━━━━━━━━━━━━
+SERVICE (app/referral/service.py)
+━━━━━━━━━━━━━━━━━━━━━━
 
-  Option B: If logger = logging.getLogger(__name__) is used anywhere, replace with:
-    import structlog
-    logger = structlog.get_logger(__name__)
+Class: ReferralService
 
-  For structlog loggers, the correct call is:
-    logger.exception('message', error_type='startup_failure', exc_info=True)
-  OR:
-    logger.error('message', error_type='startup_failure', exc_info=True)
+Constructor: __init__(self, repository: ReferralRepository, bot: Client)
+    (bot: Pyrogram Client, used for channel membership checks)
 
-  For stdlib loggers, extra kwargs go in the 'extra' dict:
-    logger.exception('message', extra={'error_type': 'startup_failure'})
+Methods (ALL async):
 
-  Find every occurrence of logger.exception(..., error_type=...) and logger.error(..., error_type=...) in both files and fix them to match the actual logger type being used.
+    async def register_referral(self, referrer_id: int, referred_id: int) -> bool
+        Validation checks (return False immediately if any fail):
+        1. referrer_id == referred_id → return False (self-referral)
+        2. Check if referred_id already has a referral in DB → return False
+        3. Create pending referral via repository.create_pending()
+        4. Ensure referrer wallet exists via repository.upsert_wallet()
+        Return True on success.
+        Log all rejection reasons with structlog including referrer_id, referred_id, reason.
 
----
+    async def check_membership(self, user_id: int, channel_id: int) -> bool
+        Call bot.get_chat_member(channel_id, user_id).
+        Return True if status is member/administrator/creator.
+        Return False if ChatMemberStatus is BANNED, LEFT, or RESTRICTED.
+        Wrap in try/except UserNotParticipant → return False.
+        Wrap in try/except FloodWait as e → await asyncio.sleep(e.value) then retry once.
 
-## EXECUTION ORDER
-1. Read app/scheduler/scheduler.py fully
-2. Search project for 'WatermarkState' class definition
-3. Read app/core/lifecycle.py fully
-4. Read main_bot.py fully
-5. Apply all 4 fixes
-6. Write the corrected files back
-7. Output a summary of every line changed and why
+    async def qualify_pending_referrals(self, channel_id: int) -> int
+        Called by background job.
+        Get all pending referrals older than 24 hours via repository.get_pending_older_than(24).
+        For each:
+            - Check channel membership via check_membership()
+            - If member: repository.qualify_referral(), repository.increment_balance(referrer_id, +1)
+            - If not member: skip (leave pending, TTL will clean it)
+        Return count of qualified referrals.
+        Use asyncio.sleep(0.1) between each check to avoid burst API calls.
 
-## CONSTRAINTS
-- Do NOT change any other files
-- Do NOT refactor working code
-- Do NOT add new dependencies
-- Do NOT change method signatures unless required by the fix
-- Preserve all existing comments and docstrings
-- All MongoDB operations must use Motor (async), never sync pymongo
-- All logging must use structlog
-- Lock cleanup must be idempotent (safe to call multiple times)
+    async def handle_member_left(self, user_id: int) -> None
+        Called when a user leaves the required channel.
+        Get referral where referred_user_id=user_id and status=QUALIFIED.
+        If found: repository.invalidate_referral(user_id), repository.decrement_balance(referrer_id).
+        Log with structlog.
+
+    async def handle_member_rejoined(self, user_id: int, channel_id: int) -> None
+        Called when a user rejoins the required channel.
+        Get referral where referred_user_id=user_id and status=INVALIDATED.
+        If found: verify channel membership via check_membership().
+        If confirmed member: repository.reactivate_referral(user_id), repository.increment_balance(referrer_id, +1).
+
+    async def get_wallet(self, user_id: int) -> Optional[dict]
+        Return wallet dict or None via repository.get_wallet().
+
+    async def snapshot_discount(self, user_id: int, points_to_use: int, plan_price: int) -> dict
+        IMPORTANT: This locks a discount snapshot. Call this at payment creation, never at checkout display.
+        Validate: points_to_use <= wallet.points_balance
+        Validate: points_to_use <= plan_price (cannot discount more than plan price)
+        Deduct via repository.deduct_points(user_id, points_to_use).
+        If deduction failed (insufficient balance): raise ValueError('Insufficient referral balance')
+        Return: {'original_price': plan_price, 'discount_applied': points_to_use, 'final_price': plan_price - points_to_use, 'snapshotted_at': datetime.utcnow().isoformat()}
+
+━━━━━━━━━━━━━━━━━━━━━━
+SCHEDULER (app/referral/scheduler.py)
+━━━━━━━━━━━━━━━━━━━━━━
+
+Class: ReferralScheduler
+
+Constructor: __init__(self, service: ReferralService, scheduler: AsyncIOScheduler, channel_id: int)
+
+Methods:
+
+    def register_jobs(self) -> None
+        Register one APScheduler job:
+        Job ID: 'referral_qualification_sweep'
+        Trigger: IntervalTrigger(hours=1)
+        Func: self._qualification_job
+        misfire_grace_time: 300
+        max_instances: 1
+        replace_existing: True
+
+    async def _qualification_job(self) -> None
+        THIN. No business logic.
+        count = await self._service.qualify_pending_referrals(self._channel_id)
+        Log with structlog: {'event': 'referral_qualification_sweep', 'qualified_count': count}
+
+━━━━━━━━━━━━━━━━━━━━━━
+HANDLERS (app/referral/handlers.py)
+━━━━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT: These are INTEGRATION POINTS only. Thin handlers. No business logic here.
+
+Export two functions (do NOT auto-register them — return them for the main handler to call):
+
+    async def process_referral_start(client: Client, message: Message, referrer_id: int, service: ReferralService) -> None
+        Called from the existing /start handler when a ref_ payload is detected.
+        Call service.register_referral(referrer_id, message.from_user.id).
+        Do NOT send any message here. Just process the referral silently.
+        Log result with structlog.
+
+    async def show_referral_status(client: Client, message: Message, service: ReferralService) -> None
+        Called when user requests referral info.
+        Get wallet via service.get_wallet(message.from_user.id).
+        Format and send a message showing:
+        - Points balance
+        - Active referrals count  
+        - Total earned
+        - Their referral link: https://t.me/{BOT_USERNAME}?start=ref_{user_id}
+        If no wallet: show zeros.
+
+━━━━━━━━━━━━━━━━━━━━━━
+MEMBERSHIP EVENT INTEGRATION (app/handlers/membership_handler.py)
+━━━━━━━━━━━━━━━━━━━━━━
+
+Create this file if it does not exist.
+This handles @app.on_chat_member_updated for the required channel.
+
+Register a handler:
+    @app.on_chat_member_updated(filters.chat(MAIN_CHANNEL_ID))
+    async def on_channel_member_update(client, update: ChatMemberUpdated):
+        new_status = update.new_chat_member.status if update.new_chat_member else None
+        old_status = update.old_chat_member.status if update.old_chat_member else None
+        user_id = update.from_user.id
+
+        If old_status was member/admin/creator AND new_status is LEFT/BANNED:
+            await referral_service.handle_member_left(user_id)
+
+        If old_status was LEFT/BANNED AND new_status is member:
+            await referral_service.handle_member_rejoined(user_id, MAIN_CHANNEL_ID)
+
+━━━━━━━━━━━━━━━━━━━━━━
+CONSTRAINTS — READ CAREFULLY
+━━━━━━━━━━━━━━━━━━━━━━
+
+- NO Redis. Use only MongoDB for state.
+- All DB operations use Motor (AsyncIOMotorDatabase). Never sync pymongo.
+- All logging uses structlog.get_logger(__name__). Never stdlib logging.
+- No blocking calls inside async functions. No time.sleep(). Use asyncio.sleep().
+- No global mutable state.
+- No circular imports. referral/ module imports nothing from handlers/.
+- All imports are explicit. No wildcard imports.
+- Repository owns ALL DB access. Service NEVER touches collections directly.
+- Scheduler methods contain NO business logic.
+- Handlers contain NO business logic.
+- Do NOT modify any existing files outside app/referral/ EXCEPT:
+    - app/handlers/membership_handler.py (create or add to)
+    - app/core/lifecycle.py (only to register ReferralScheduler.register_jobs() and ReferralRepository.create_indexes())
+
+━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT REQUIRED
+━━━━━━━━━━━━━━━━━━━━━━
+
+Write all 6 files completely.
+After each file, state: WRITTEN: app/referral/filename.py
+Do not summarize. Do not add unrequested features.
+Do not claim tests passed unless you actually ran them.
 "

@@ -1,47 +1,29 @@
 from __future__ import annotations
-import asyncio
+import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from app.referral.service import ReferralService
-from pyrogram import Client
+
+logger = structlog.get_logger(__name__)
 
 class ReferralScheduler:
-    def __init__(self, bot: Client):
-        self._bot = bot
-        self._service = ReferralService()
-        self._scheduler = AsyncIOScheduler(timezone="UTC")
-        self._running = False
+    def __init__(self, service: ReferralService, scheduler: AsyncIOScheduler, channel_id: int):
+        self._service = service
+        self._scheduler = scheduler
+        self._channel_id = channel_id
 
-    async def start(self):
-        if self._running:
-            return
-            
-        # Ensure DB indexes exist
-        await self._service.repo.create_indexes()
-
-        # Job 1: Validate pending referrals (Every hour)
+    def register_jobs(self) -> None:
+        # Register one APScheduler job
         self._scheduler.add_job(
-            self._service.validate_pending_referrals,
-            "interval",
-            hours=1,
-            args=[self._bot],
-            id="referral_validation",
+            self._qualification_job,
+            trigger=IntervalTrigger(hours=1),
+            id='referral_qualification_sweep',
+            misfire_grace_time=300,
+            max_instances=1,
             replace_existing=True
         )
 
-        # Job 2: Recheck active members (Every 6 hours)
-        self._scheduler.add_job(
-            self._service.check_and_sync_active_referrals,
-            "interval",
-            hours=6,
-            args=[self._bot],
-            id="referral_sync",
-            replace_existing=True
-        )
-
-        self._scheduler.start()
-        self._running = True
-
-    async def stop(self):
-        if self._running:
-            self._scheduler.shutdown()
-            self._running = False
+    async def _qualification_job(self) -> None:
+        # THIN. No business logic.
+        count = await self._service.qualify_pending_referrals(self._channel_id)
+        logger.info('referral_qualification_sweep', qualified_count=count)
