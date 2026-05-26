@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.core.permissions import Role, permission_required
+from app.core.permissions import Role, permission_required, is_moderator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -226,3 +227,42 @@ async def handle_status(client: Client, message: Message) -> None:
             extra={"ctx_error": str(e)},
             exc_info=True,
         )
+
+
+@Client.on_callback_query(filters.regex(r"^admin:(dashboard|moderation)$"))
+async def handle_admin_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
+    """Handles admin menu callbacks."""
+    action = callback_query.data.split(":")[1]
+    user_id = callback_query.from_user.id
+
+    if not is_moderator(user_id):
+        await callback_query.answer("⛔ Unauthorised.", show_alert=True)
+        return
+
+    try:
+        if action == "dashboard":
+            # Repurpose /status logic for dashboard
+            from app.services.submission_service import get_pending_count
+            pending_count = get_pending_count()
+            admin_count = len(set(settings.ADMIN_IDS) | set(settings.SUDO_IDS))
+
+            text = (
+                "🛡 <b>ADMIN DASHBOARD</b>\n\n"
+                f"<b>System Status:</b> 🟢 Operational\n"
+                f"<b>Privileged Users:</b> {admin_count}\n"
+                f"<b>Pending Review:</b> {pending_count}\n\n"
+                "<i>Use commands /status or /handlers for deep diagnostics.</i>"
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+            ]])
+
+            await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            await callback_query.answer()
+
+        elif action == "moderation":
+            await callback_query.answer("Check the verification group for active submissions.", show_alert=True)
+
+    except Exception as e:
+        logger.error("Error in admin menu callback", extra={"ctx_user_id": user_id, "ctx_action": action, "ctx_error": str(e)}, exc_info=True)
+        await callback_query.answer("An error occurred.", show_alert=True)

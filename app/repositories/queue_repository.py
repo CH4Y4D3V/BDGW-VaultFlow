@@ -514,3 +514,22 @@ class QueueRepository:
 
     async def get_job_by_id(self, job_id: str) -> Optional[dict]:
         return await self._queue.find_one({"_id": ObjectId(job_id)})
+
+    async def get_user_queue(self, user_id: int, limit: int = 10) -> List[dict]:
+        """Fetch pending/processing jobs for a specific user."""
+        cursor = self._queue.find(
+            {
+                "metadata.submitter_user_id": user_id,
+                "status": {"$in": [
+                    JobStatus.PENDING, 
+                    JobStatus.LOCKED, 
+                    JobStatus.PROCESSING, 
+                    JobStatus.WATERMARKING, 
+                    JobStatus.READY, 
+                    JobStatus.DELIVERING
+                ]}
+            },
+            sort=[("created_at", -1)],
+            limit=limit
+        )
+        return await cursor.to_list(length=limit)

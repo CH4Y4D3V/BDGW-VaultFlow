@@ -1,306 +1,282 @@
+You are a senior Telegram UX architect, product designer, conversational UX engineer, and production backend engineer.
 
-You are a senior backend architect and Telegram infrastructure engineer.
+You are redesigning the onboarding and /start experience for a premium Telegram automation platform called:
 
-You are working on a production Telegram automation system called BDGW VaultFlow.
+BDGW CONTENT BOT
 
-Your task is to FULLY REPAIR the queue architecture, vault linkage system, album delivery system, retry logic, and production deployment safety.
-
-The repository already exists.
-
-CRITICAL:
-Do NOT produce partial fixes.
-Do NOT create mock code.
-Do NOT leave TODOs.
-Do NOT simplify architecture.
-Do NOT break existing moderation/admin flows.
-
-You must make the system production-ready and deployable.
+The current implementation is low-quality and must be rebuilt into a premium, production-grade onboarding system.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-PRIMARY ROOT CAUSE
+CURRENT UX PROBLEMS
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Current failures:
+The current /start flow has major issues:
 
-- queue jobs missing vault references
-- albums fragment during scheduling/retries
-- stale Telegram file_id fallback corrupts delivery
-- retries loop forever on permanent failures
-- vault linkage not persisted
-- restart recovery corrupts jobs
-- raw file_id fallback causes stale media failures
+- text wall
+- weak hierarchy
+- poor spacing
+- low perceived quality
+- generic messaging
+- no onboarding flow
+- no conversational UX
+- weak CTA structure
+- no state-awareness
+- spammy repeated /start behavior
+- poor premium conversion
+- weak button grouping
+- no trust-building
+- no progress flow
+- no anti-spam logic
+- poor mobile readability
+- low visual prestige
 
-Observed errors:
+The current bot feels like a basic utility bot instead of a premium platform.
 
-- cannot link to vault
-- missing source_chat_id/source_message_id
-- album delivery failures
-- dead-letter floods
-- reconnect storms
-
-Architecture currently mixes:
-- source identity
-- vault identity
-- queue identity
-
-This must be unified.
-
-━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED ARCHITECTURE
-━━━━━━━━━━━━━━━━━━━━━━
-
-QUEUE JOBS MUST ALWAYS CONTAIN:
-
-- content_id
-- source_channel_id
-- source_message_id
-- vault_chat_id
-- vault_message_id
-- media_group_id
-- target_channel_ids
-- media_type
-
-Vault references are mandatory.
-
-NO FALLBACKS.
+We need:
+- luxury UX
+- premium onboarding
+- modern Telegram-native interaction design
+- psychologically optimized CTA hierarchy
+- mobile-first layout
+- high readability
+- clean spacing
+- state-aware onboarding logic
+- premium conversion flow
+- production-grade async architecture
 
 ━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED DELIVERY FLOW
+GOAL
 ━━━━━━━━━━━━━━━━━━━━━━
 
-ALL delivery MUST use:
+Transform the onboarding into a modern premium Telegram experience comparable to:
+- premium SaaS onboarding
+- modern AI products
+- premium creator platforms
+- high-end automation services
 
-copy_message()
-copy_media_group()
+The UX must feel:
+- premium
+- minimal
+- elegant
+- modern
+- psychologically polished
+- high-trust
+- mobile optimized
 
-FROM vault channel ONLY.
+━━━━━━━━━━━━━━━━━━━━━━
+REQUIRED UX IMPROVEMENTS
+━━━━━━━━━━━━━━━━━━━━━━
 
-Never reconstruct albums using file_id.
-Never send InputMedia from stale file_ids.
-Never fetch from original source channel.
+1. COMPLETELY REDESIGN /START MESSAGE
 
-Telegram CDN references must come ONLY from vault storage.
+Current message is bad.
+
+Create:
+- premium greeting
+- short readable sections
+- emotional trust
+- premium tone
+- elegant formatting
+- whitespace optimization
+- visual hierarchy
+
+DO NOT:
+- dump large paragraphs
+- overexplain
+- use robotic wording
+
+The message must:
+- immediately communicate value
+- reduce cognitive load
+- guide action clearly
+
+━━━━━━━━━━━━━━━━━━━━━━
+2. BUTTON ARCHITECTURE REDESIGN
+━━━━━━━━━━━━━━━━━━━━━━
+
+Current buttons are weak.
+
+Create premium inline keyboard structure.
+
+Requirements:
+- visual grouping
+- CTA hierarchy
+- spacing optimization
+- premium emoji usage
+- conversion-first ordering
+
+Required sections:
+- Submit Content
+- Premium Access
+- Anonymous Upload
+- Help & Support
+- Creator Rules
+- Status / Queue Tracking
+
+Buttons must feel intentional and premium.
+
+━━━━━━━━━━━━━━━━━━━━━━
+3. ADD STATE-AWARE /START LOGIC
+━━━━━━━━━━━━━━━━━━━━━━
+
+The bot must behave differently depending on user state.
+
+Implement:
+- first-time onboarding
+- returning users
+- premium users
+- banned users
+- pending review users
+- active creators
+
+Different /start responses for each state.
+
+NO generic static message.
+
+━━━━━━━━━━━━━━━━━━━━━━
+4. ANTI-SPAM /START LOGIC
+━━━━━━━━━━━━━━━━━━━━━━
+
+Current repeated /start spam looks terrible.
+
+Implement:
+- cooldown logic
+- duplicate suppression
+- cached onboarding response
+- silent refresh behavior
+
+If user repeatedly sends /start:
+- avoid resending giant onboarding
+- provide lightweight refresh UX
+
+━━━━━━━━━━━━━━━━━━━━━━
+5. PREMIUM CONVERSION UX
+━━━━━━━━━━━━━━━━━━━━━━
+
+Current premium CTA is weak.
+
+Create:
+- premium positioning
+- scarcity psychology
+- exclusivity
+- creator benefits
+- trust language
+- conversion optimization
+
+Premium must feel valuable.
+
+━━━━━━━━━━━━━━━━━━━━━━
+6. MODERN TELEGRAM UX
+━━━━━━━━━━━━━━━━━━━━━━
 
 Use:
+- elegant markdown formatting
+- clean spacing
+- compact sections
+- emoji hierarchy
+- concise copywriting
+- conversational UX
 
-await bot.copy_message(...)
-await bot.copy_media_group(...)
-
-Reference:
-https://docs.pyrogram.org/api/methods/copy_media_group
-
-━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED FIXES
-━━━━━━━━━━━━━━━━━━━━━━
-
-1. Replace QueueJob schema.
-
-Add:
-
-- vault_chat_id
-- vault_message_id
-- source_message_id
-- media_group_id
-- retry_count
-- delivered_targets
-- failed_targets
-- lock state
-
-2. Create strict queue validation.
-
-Reject malformed jobs BEFORE insertion.
-
-3. Remove ALL raw file_id fallbacks.
-
-Delete any logic like:
-- "trying raw file_id fallback"
-- "using raw file_id (may be stale)"
-
-4. Add permanent vs retryable exception hierarchy.
-
-Retryable:
-- FloodWait
-- Timeout
-- RPC transient failures
-- Rate limits
-
-Permanent:
-- missing vault refs
-- deleted vault message
-- malformed albums
-- invalid jobs
-
-5. Rewrite delivery pipeline.
-
-Album delivery MUST use:
-
-await bot.copy_media_group(
-    chat_id=target,
-    from_chat_id=vault_chat_id,
-    message_id=first_album_message_id
-)
-
-Single delivery MUST use:
-
-await bot.copy_message(...)
-
-6. Fix moderation ingestion.
-
-After content is copied into vault:
-store:
-
-- vault_chat_id
-- vault_message_id
-
-inside MongoDB vault documents.
-
-7. Fix queue repository.
-
-Never rebuild partial jobs.
-Never use QueueJob(...).model_dump() if it strips fields.
-
-Preserve original Mongo documents fully.
-
-8. Fix album scheduling.
-
-Albums must:
-- enqueue together
-- retry together
-- deliver together
-- fail together
-
-Never split albums into independent jobs.
-
-9. Add production-safe indexes.
-
-Required indexes:
-
-vault_chat_id + vault_message_id unique
-media_group_id index
-
-10. Replace weak content_id generation.
-
-DO NOT use:
-f"{source_channel_id}_{msg.id}"
-
-Use sha256 hash with:
-source_channel_id
-message_id
-file_unique_id
-
-11. Add structured logging everywhere.
-
-Every log MUST include:
-- job_id
-- target_id
-- vault_message_id
-- media_group_id
-- retry_count
-- failure_type
-
-12. Add restart safety.
-
-Workers must recover:
-- stale locks
-- floodwait state
-- partial jobs
-
-13. Ensure no duplicate album delivery.
-
-14. Ensure queue persistence survives restart safely.
-
-15. Make deployment production-ready.
+Avoid:
+- clutter
+- spammy emojis
+- oversized paragraphs
+- ugly separators
 
 ━━━━━━━━━━━━━━━━━━━━━━
-DEPLOYMENT REQUIREMENTS
+7. PRODUCTION BACKEND REQUIREMENTS
 ━━━━━━━━━━━━━━━━━━━━━━
+
+Implement production-safe async architecture.
+
+Requirements:
+- modular handlers
+- centralized onboarding renderer
+- reusable keyboard builder
+- localization-ready structure
+- caching support
+- anti-flood logic
+- restart-safe state handling
+- Redis caching if available
+
+━━━━━━━━━━━━━━━━━━━━━━
+8. REQUIRED FILE REFACTORING
+━━━━━━━━━━━━━━━━━━━━━━
+
+Refactor into clean architecture:
+
+- onboarding service
+- keyboard builder
+- user state manager
+- onboarding templates
+- CTA renderer
+
+Avoid monolithic handler logic.
+
+━━━━━━━━━━━━━━━━━━━━━━
+9. TELEGRAM EDGE CASES
+━━━━━━━━━━━━━━━━━━━━━━
+
+Handle:
+- blocked bot
+- deleted messages
+- callback query expiration
+- message edit failures
+- race conditions
+- restart recovery
+- Telegram FloodWait
+
+━━━━━━━━━━━━━━━━━━━━━━
+10. MOBILE-FIRST DESIGN
+━━━━━━━━━━━━━━━━━━━━━━
+
+Optimize specifically for:
+- Android Telegram
+- dark mode
+- one-hand readability
+- narrow screens
+
+The onboarding should feel:
+- lightweight
+- premium
+- readable
+- elegant
+
+━━━━━━━━━━━━━━━━━━━━━━
+11. OUTPUT REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━
+
+Generate COMPLETE production-ready code.
+
+Do NOT:
+- generate pseudo-code
+- leave TODOs
+- generate partial snippets
 
 Generate:
-
-- Dockerfile
-- docker-compose.yml
-- healthcheck support
-- restart-safe worker startup
-- Railway-ready deployment
-- environment validation
-- graceful shutdown
-- Mongo reconnect safety
-- Redis reconnect safety
+- full async Pyrogram handlers
+- onboarding renderer
+- keyboard builders
+- anti-spam logic
+- user state flow
+- production-safe architecture
 
 ━━━━━━━━━━━━━━━━━━━━━━
-TECH STACK
+12. FINAL REQUIREMENT
 ━━━━━━━━━━━━━━━━━━━━━━
 
-Python 3.12
-Pyrogram
-MongoDB
-Redis
-AsyncIO
-Motor
-APScheduler
+Before finalizing:
+- audit UX quality
+- audit mobile readability
+- audit Telegram UX
+- audit async safety
+- audit callback safety
+- audit restart safety
+- audit spam prevention
+- audit conversion quality
 
-━━━━━━━━━━━━━━━━━━━━━━
-CRITICAL ENGINEERING RULES
-━━━━━━━━━━━━━━━━━━━━━━
-
-Think like a production SRE and backend architect.
-
-You must:
-- detect hidden race conditions
-- preserve album ordering
-- prevent duplicate sends
-- prevent retry storms
-- prevent restart corruption
-- prevent queue corruption
-- prevent stale file_id usage
-- prevent dead-letter amplification
-- preserve Telegram floodwait safety
-
-━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT REQUIREMENTS
-━━━━━━━━━━━━━━━━━━━━━━
-
-Generate COMPLETE production-ready code changes.
-
-Modify files directly.
-
-Do NOT give explanations only.
-
-Generate:
-- full file replacements
-- exact patches
-- migration-safe changes
-- deployment-ready configs
-
-After modifications:
-- audit for race conditions
-- audit for async safety
-- audit for Mongo consistency
-- audit for Telegram edge cases
-- audit for restart safety
-
-Then generate:
-
-1. migration steps
-2. Mongo cleanup commands
-3. deployment steps
-4. rollback strategy
-5. verification checklist
-
-━━━━━━━━━━━━━━━━━━━━━━
-IMPORTANT
-━━━━━━━━━━━━━━━━━━━━━━
-
-Do NOT preserve broken architecture for compatibility.
-
-Correctness and production reliability are more important than backward compatibility.
-
-Broken queue jobs may be purged if necessary.
-
-Focus on:
-- immutable vault references
-- reliable album delivery
-- restart safety
-- queue consistency
-- Telegram-native media copying
-- production-grade observability
+Then explain:
+- why the old UX was weak
+- why the new UX is superior
+- remaining Telegram UX limitations
+- future scalability improvements

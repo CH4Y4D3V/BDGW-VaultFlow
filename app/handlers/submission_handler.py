@@ -239,31 +239,45 @@ async def _flush_album(group_id: str, user_id: int, client: Client) -> None:
     await _submit_for_review(client, messages, user_id)
 
 
-@Client.on_callback_query(filters.regex(r"^menu:submit$") & filters.private)
+@Client.on_callback_query(filters.regex(r"^menu:(submit|anonymous)$") & filters.private)
 async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     """
     RC-7 fix: handles the 'Send Content Anonymously' button.
-    This callback had NO registered handler — clicking it silently timed out.
     """
+    action = callback.data.split(":")[1]
     logger.info(
         "HANDLER: handle_submit_menu entered",
         extra={
             "ctx_from_user": (
                 callback.from_user.id if callback.from_user else None
             ),
+            "ctx_action": action,
         },
     )
 
     try:
         await callback.answer()
-        try:
-            await callback.message.edit_text(
+        
+        if action == "anonymous":
+            text = (
+                "🕵️ <b>Anonymous Submission</b>\n\n"
+                "Your identity will be completely hidden from the public channel. "
+                "Only our moderation team will see the source for verification purposes.\n\n"
+                "<i>Just send your content directly in this chat now.</i>"
+            )
+        else:
+            text = (
                 "📤 <b>Send Your Content</b>\n\n"
                 "Just send your photo, video, document, or animation directly "
                 "in this chat now.\n\n"
                 "If this is your first submission, you'll be asked to complete "
                 "a quick consent confirmation first.\n\n"
-                "<i>Go ahead — send your content below.</i>",
+                "<i>Go ahead — send your content below.</i>"
+            )
+
+        try:
+            await callback.message.edit_text(
+                text,
                 parse_mode=ParseMode.HTML,
             )
         except Exception as e:

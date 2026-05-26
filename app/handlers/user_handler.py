@@ -9,12 +9,22 @@ from pyrogram.errors import FloodWait, RPCError, UserIsBlocked, PeerIdInvalid, I
 from pyrogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
+from app.core.database import DatabaseManager
+from app.core.redis_client import get_redis
+from app.repositories.subscription_repository import SubscriptionRepository
+from app.repositories.queue_repository import QueueRepository
+from app.services.onboarding_service import OnboardingService
+from app.bot.keyboards import KeyboardBuilder
 from app.services.subscription_service import SubscriptionService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_sub_repo = SubscriptionRepository(DatabaseManager.get_db())
+_queue_repo = QueueRepository(DatabaseManager.get_db())
+_onboarding_service = OnboardingService(_sub_repo)
 _sub_service = SubscriptionService()
+_redis = get_redis()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
@@ -182,38 +192,32 @@ def _format_status(sub, user_id: int) -> str:
 
 # ── /start and Menu Callbacks ─────────────────────────────────────────────────
 
-def _get_main_menu():
-    """Returns the main menu keyboard and text."""
-    text = (
-        "👋 <b>Welcome to VaultFlow!</b>\n\n"
-        "I am your friendly assistant for content submission and community interaction.\n\n"
-        "Use the buttons below to navigate."
-    )
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📋 My Status", callback_data="menu:mystatus"),
-            InlineKeyboardButton("📜 Rules", callback_data="menu:rules")
-        ],
-        [
-            InlineKeyboardButton("🆘 Support", callback_data="menu:support")
-        ]
-    ])
-    return text, keyboard
-
-
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
     try:
         if not message.from_user:
             return
         user_id = message.from_user.id
+
+        # ── Anti-Spam / Cooldown ──
+        spam_key = f"onboarding:spam:{user_id}"
+        if await _redis.exists(spam_key):
+            # Lightweight refresh UX: brief toast or ignore
+            # We ignore to avoid cluttering the chat with repeated /start responses
+            return
+        await _redis.set(spam_key, "1", ex=5)  # 5 second cooldown
+
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
         if len(message.command) > 1 and message.command[1] == "resubscribe":
             await handle_mystatus(client, message)
             return
 
-        text, keyboard = _get_main_menu()
+        text, keyboard = await _onboarding_service.render_onboarding(
+            user_id, 
+            message.from_user.first_name or "Creator"
+        )
+        
         await message.reply_text(
             text=text,
             parse_mode=ParseMode.HTML,
@@ -223,11 +227,12 @@ async def handle_start(client: Client, message: Message) -> None:
         import traceback
         logger.error(f"HANDLE_START CRASH: {e}\n{traceback.format_exc()}")
         try:
-            await message.reply_text(f"Start error: {type(e).__name__}: {e}")
+            await message.reply_text("❌ System busy. Please try again in a moment.")
         except Exception:
             pass
 
-@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home)$"))
+
+@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|premium|queue)$"))
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
     """Handles main menu callbacks, editing the message in-place."""
     action = callback_query.data.split(":")[1]
@@ -238,8 +243,48 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
     try:
         if action == "home":
-            text, keyboard = _get_main_menu()
+            text, keyboard = await _onboarding_service.render_onboarding(
+                user_id, 
+                callback_query.from_user.first_name or "Creator"
+            )
         
+        elif action == "premium":
+            text = (
+                "💎 <b>PREMIUM ACCESS</b>\n\n"
+                "Unlock the full power of VaultFlow with our Premium tier.\n\n"
+                "✨ <b>Exclusive Features:</b>\n"
+                "• <b>Priority Delivery:</b> Jump to the front of the queue.\n"
+                "• <b>Custom Watermarks:</b> Your brand on every piece of content.\n"
+                "• <b>Multi-Channel Sync:</b> Distribute to unlimited targets.\n"
+                "• <b>Advanced Analytics:</b> Track your content's performance.\n"
+                "• <b>24/7 Priority Support:</b> Direct line to our engineers.\n\n"
+                "<i>Join the elite circle of creators today.</i>"
+            )
+            keyboard = KeyboardBuilder.build_premium_conversion()
+
+        elif action == "queue":
+            jobs = await _queue_repo.get_user_queue(user_id)
+            if not jobs:
+                text = (
+                    "⏳ <b>Active Queue</b>\n\n"
+                    "Your queue is currently empty.\n\n"
+                    "Submit new content to see it tracked here in real-time."
+                )
+            else:
+                lines = ["⏳ <b>Active Queue</b>\n"]
+                for i, job in enumerate(jobs, 1):
+                    status = job.get("status", "pending").capitalize()
+                    media_type = job.get("media_type", "text").capitalize()
+                    created_at = job.get("created_at")
+                    date_str = created_at.strftime("%H:%M") if created_at else "??"
+                    
+                    icon = "🟢" if status == "Delivering" else "🟡"
+                    lines.append(f"{i}. {icon} <b>{media_type}</b> — {status} <code>[{date_str}]</code>")
+                
+                text = "\n".join(lines)
+            
+            keyboard = KeyboardBuilder.build_back_button()
+
         elif action == "rules":
             text = await _get_rules_text()
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
