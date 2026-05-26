@@ -55,6 +55,15 @@ class DistributionPriority(int, Enum):
     MODERATED = 3
 
 
+class DistributionResult(BaseModel):
+    job_id: str
+    target_id: str
+    success: bool
+    delivered_at: Optional[datetime] = None
+    error: Optional[str] = None
+    floodwait_seconds: Optional[int] = None
+
+
 class WatermarkPosition(str, Enum):
     BOTTOM_RIGHT = "BOTTOM_RIGHT"
     BOTTOM_LEFT = "BOTTOM_LEFT"
@@ -69,6 +78,10 @@ class QueueMetrics(BaseModel):
     completed_count: int = 0
     failed_count: int = 0
     dead_count: int = 0
+
+
+# Alias for backwards compatibility or expected naming convention
+QueueState = JobStatus
 
 
 class QueueJob(BaseModel):
