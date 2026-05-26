@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import IndexModel, ASCENDING, DESCENDING
@@ -5,6 +6,80 @@ from app.config import settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class DataMigrationManager:
+    """
+    Handles database stabilization and migration auditing during startup.
+    Ensures legacy data is repaired or quarantined before strict indexes are applied.
+    """
+
+    @classmethod
+    async def stabilize_queue(cls, db: AsyncIOMotorDatabase) -> None:
+        """
+        Audit and stabilize the queue collection to prevent index creation failures.
+        """
+        logger.info("MIGRATION: Starting queue stabilization audit...")
+        
+        queue = db[settings.QUEUE_COLLECTION]
+        quarantine = db[settings.QUARANTINE_COLLECTION]
+        
+        # 1. Detect and Quarantine NULL Vault References in Active Jobs
+        # These are the primary cause of E11000 duplicate key errors on unique indexes.
+        active_statuses = ["pending", "processing", "locked", "watermarking", "ready", "delivering"]
+        
+        invalid_ref_query = {
+            "status": {"$in": active_statuses},
+            "$or": [
+                {"vault_chat_id": None},
+                {"vault_message_id": None},
+                {"vault_chat_id": 0},
+                {"vault_message_id": 0}
+            ]
+        }
+        
+        invalid_count = await queue.count_documents(invalid_ref_query)
+        if invalid_count > 0:
+            logger.warning(
+                f"MIGRATION: Detected {invalid_count} active jobs with null/invalid vault references. Quarantining...",
+                extra={"ctx_count": invalid_count}
+            )
+            
+            # Move to quarantine before deletion to preserve history
+            cursor = queue.find(invalid_ref_query)
+            async for doc in cursor:
+                doc["quarantine_reason"] = "migration_null_vault_reference"
+                doc["quarantined_at"] = datetime.now(timezone.utc)
+                await quarantine.insert_one(doc)
+            
+            # Purge from active queue so index creation can proceed
+            result = await queue.delete_many(invalid_ref_query)
+            logger.info(f"MIGRATION: Removed {result.deleted_count} invalid jobs from active queue.")
+
+        # 2. Resolve Content ID Duplicates in Active Queue
+        # Enforces uniqueness for content_id across all active states.
+        pipeline = [
+            {"$match": {"status": {"$in": active_statuses}}},
+            {"$group": {"_id": "$content_id", "count": {"$sum": 1}, "ids": {"$push": "$_id"}}},
+            {"$match": {"count": {"$gt": 1}}}
+        ]
+        
+        content_dups = await queue.aggregate(pipeline).to_list(length=None)
+        if content_dups:
+            logger.warning(f"MIGRATION: Detected {len(content_dups)} duplicate active content groups. Resolving...")
+            for dup in content_dups:
+                # Keep the first one, quarantine others
+                ids_to_quarantine = dup["ids"][1:]
+                for doc_id in ids_to_quarantine:
+                    doc = await queue.find_one({"_id": doc_id})
+                    if doc:
+                        doc["quarantine_reason"] = "migration_duplicate_content_id"
+                        doc["quarantined_at"] = datetime.now(timezone.utc)
+                        await quarantine.insert_one(doc)
+                        await queue.delete_one({"_id": doc_id})
+            logger.info(f"MIGRATION: Resolved {len(content_dups)} content_id conflicts.")
+
+        logger.info("MIGRATION: Queue stabilization complete.")
 
 
 class DatabaseManager:
@@ -44,6 +119,10 @@ class DatabaseManager:
             except Exception:
                 logger.warning("MongoDB replica set NOT detected — transactions will be disabled/unavailable")
                 cls._transactions_supported = False
+
+            # ── MIGRATION STABILIZATION ──────────────────────────────────────
+            # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
+            await DataMigrationManager.stabilize_queue(cls._db)
 
             # ── Schema Verification ──────────────────────────────────────────
             logger.debug("Initiating index verification/creation phase...")
@@ -89,25 +168,22 @@ class DatabaseManager:
             if collection_name == settings.QUEUE_COLLECTION:
                 try:
                     existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
-                    target_name = "unique_active_content"
-                    
-                    # Find if target exists
-                    found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
-                    if found_index:
-                        # Identify expected definition
-                        expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
-                        if expected:
-                            expected_partial = expected.document.get("partialFilterExpression")
-                            actual_partial = found_index.get("partialFilterExpression")
-                            
-                            if actual_partial != expected_partial:
-                                logger.warning(
-                                    f"Index definition mismatch for {target_name}. "
-                                    f"Actual: {actual_partial} vs Expected: {expected_partial}. "
-                                    "Surgically recreating..."
-                                )
-                                await db[collection_name].drop_index(target_name)
-                                logger.info(f"Dropped conflicting index: {target_name}")
+                    # We check both unique_active_content and vault_ref_unique
+                    for target_name in ["unique_active_content", "vault_ref_unique"]:
+                        found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
+                        if found_index:
+                            expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
+                            if expected:
+                                expected_partial = expected.document.get("partialFilterExpression")
+                                actual_partial = found_index.get("partialFilterExpression")
+                                
+                                if actual_partial != expected_partial:
+                                    logger.warning(
+                                        f"Index definition mismatch for {target_name}. "
+                                        f"Actual: {actual_partial} vs Expected: {expected_partial}. "
+                                        "Surgically recreating..."
+                                    )
+                                    await db[collection_name].drop_index(target_name)
                 except Exception as e:
                     logger.warning(f"Surgical index audit failed (non-fatal): {e}")
 
@@ -158,7 +234,9 @@ class DatabaseManager:
                 unique=True,
                 background=True,
                 partialFilterExpression={
-                    "status": {"$in": ["pending", "processing", "locked", "watermarking", "ready", "delivering"]}
+                    "status": {"$in": ["pending", "processing", "locked", "watermarking", "ready", "delivering"]},
+                    "vault_chat_id": {"$gt": 0},
+                    "vault_message_id": {"$gt": 0}
                 },
             ),
             IndexModel(

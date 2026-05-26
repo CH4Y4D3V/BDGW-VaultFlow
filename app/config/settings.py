@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     CHANNEL_CONFIG_COLLECTION: str = "channel_config"
     PENDING_COLLECTION: str = "pending_submissions"
     SCHEDULER_JOBS_COLLECTION: str = "scheduler_jobs"
+    QUARANTINE_COLLECTION: str = "quarantine"
 
     # ── Redis ─────────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
