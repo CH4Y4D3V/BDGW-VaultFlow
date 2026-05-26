@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from pydantic import BaseModel, Field
 
@@ -17,9 +17,20 @@ class JobStatus(str, Enum):
     LOCKED = "locked"
     PROCESSING = "processing"
     WATERMARKING = "watermarking"
+    READY = "ready"
+    DELIVERING = "delivering"
     COMPLETED = "completed"
     FAILED = "failed"
     DEAD = "dead"
+    QUARANTINE = "quarantine"
+
+
+class WatermarkState(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    UPLOADED = "uploaded"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class ModerationState(str, Enum):
@@ -29,6 +40,7 @@ class ModerationState(str, Enum):
     REJECTED = "rejected"
     POSTED = "posted"
     FAILED = "failed"
+    QUARANTINE = "quarantine"
 
 
 class ModerationDestination(str, Enum):
@@ -55,6 +67,12 @@ class QueueJob(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
 
     # ─────────────────────────────
+    # Versioning
+    # ─────────────────────────────
+    schema_version: int = 1
+    migration_version: int = 0
+
+    # ─────────────────────────────
     # Stable identifiers
     # ─────────────────────────────
 
@@ -73,6 +91,8 @@ class QueueJob(BaseModel):
     # ─────────────────────────────
 
     target_channel_ids: List[str]
+    delivery_key: Optional[str] = None  # "{job_id}:{target_id}" for idempotency
+    album_delivery_batch_id: Optional[str] = None  # for sequential fallback tracking
 
     # ─────────────────────────────
     # Media
@@ -80,7 +100,7 @@ class QueueJob(BaseModel):
 
     media_type: MediaType
 
-    media_file_id: Optional[str] = None
+    media_file_id: Optional[str] = None  # METADATA ONLY - NEVER USE FOR DELIVERY
     media_unique_id: Optional[str] = None
 
     media_path: Optional[str] = None
@@ -106,7 +126,7 @@ class QueueJob(BaseModel):
 
     delivered_targets: List[str] = Field(default_factory=list)
 
-    failed_targets: List[dict] = Field(default_factory=list)
+    failed_targets: Dict[str, str] = Field(default_factory=dict)
 
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
@@ -115,11 +135,14 @@ class QueueJob(BaseModel):
     failed_at: Optional[datetime] = None
 
     # ─────────────────────────────
-    # Watermark
+    # Watermark tracking
     # ─────────────────────────────
 
     watermark_required: bool = False
     watermark_config: Optional[dict] = None
+    watermark_generation_id: Optional[str] = None
+    album_sequence_index: Optional[int] = None
+    watermark_state: WatermarkState = WatermarkState.PENDING
 
     # ─────────────────────────────
     # Metadata

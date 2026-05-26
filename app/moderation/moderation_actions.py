@@ -201,6 +201,12 @@ async def post_to_destination(
     return True
 
 
+def _generate_content_id(chat_id: int, message_id: int, file_unique_id: Optional[str]) -> str:
+    """Deterministic SHA256 content_id generation."""
+    raw = f"{chat_id}:{message_id}:{file_unique_id or 'none'}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 # ── Vault archival ────────────────────────────────────────────────────────────
 
 async def archive_to_vault(
@@ -213,15 +219,8 @@ async def archive_to_vault(
 ) -> list[int]:
     """
     Two-step vault archival:
-    1. copy_message() to VAULT_CHANNEL_ID  (Bug 1 fix: no forward headers on vault copies)
+    1. copy_message() to VAULT_CHANNEL_ID
     2. Upsert metadata to MongoDB
-
-    initial_status parameter:
-      - QUEUED  (default) : content goes into scheduler distribution pipeline
-      - POSTED            : content was already immediately posted (approve flow)
-                            prevents double-post by keeping it OUT of scheduler
-
-    Returns list of vault_message_ids. Never raises.
     """
     if not messages:
         return []
@@ -232,41 +231,25 @@ async def archive_to_vault(
             consent_doc = await _consent_service.get_active_consent(submitter_user_id)
             if consent_doc:
                 resolved_consent_id = str(consent_doc["_id"])
-            else:
-                logger.warning(
-                    "No active consent record found for submitter",
-                    extra={"ctx_user_id": submitter_user_id},
-                )
         except Exception as e:
-            logger.warning(
-                "Failed to fetch consent record — proceeding without it",
-                extra={"ctx_user_id": submitter_user_id, "ctx_error": str(e)},
-            )
+            logger.warning("Failed to fetch consent record", extra={"ctx_error": str(e)})
 
     vault_message_ids: list[int] = []
-
-    # ── Step 2: MongoDB vault metadata ────────────────────────────────────────
     db = DatabaseManager.get_db()
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
     
-    for msg in messages:
-        media = None
-        copied_msg = None
-        if msg.media:
-            try:
-                media = getattr(msg, msg.media.value, None)
-            except Exception:
-                pass
-
+    for i, msg in enumerate(messages):
+        media = getattr(msg, str(msg.media.value), None) if msg.media else None
         file_unique_id = getattr(media, "file_unique_id", None) if media else None
         file_id = getattr(media, "file_id", None) if media else None
         file_size = getattr(media, "file_size", 0) if media else 0
         media_type_str = msg.media.value if msg.media else "text"
 
-        content_id = f"{msg.chat.id}_{msg.id}"
+        content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
         checksum = _compute_checksum(file_unique_id, file_size or 0)
 
+        copied_msg = None
         if settings.VAULT_CHANNEL_ID:
             for attempt in range(_MAX_RETRIES):
                 try:
@@ -279,12 +262,7 @@ async def archive_to_vault(
                 except FloodWait as e:
                     await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
                 except RPCError as e:
-                    logger.error(
-                        "Failed to copy message to vault channel",
-                        extra={"ctx_msg_id": msg.id, "ctx_error": str(e), "ctx_attempt": attempt + 1},
-                    )
-                    if attempt == _MAX_RETRIES - 1:
-                        break
+                    logger.error("Vault copy failed", extra={"ctx_error": str(e), "ctx_attempt": attempt + 1})
                     await asyncio.sleep(2 ** attempt)
 
         vault_msg_id = copied_msg.id if copied_msg else 0
@@ -293,24 +271,21 @@ async def archive_to_vault(
         update_doc = {
             "$setOnInsert": {
                 "content_id": content_id,
-                "source_chat_id": str(msg.chat.id),
-                "source_message_id": msg.id,
-                "media_group_id": msg.media_group_id,
-                "media_type": media_type_str,
-                "file_id": file_id,
-                "file_unique_id": file_unique_id,
-                "file_size": file_size,
-                "caption": msg.caption or msg.text or "",
                 "created_at": now,
                 "usage_count": 0,
-                "last_posted_at": None,
-                "cooldown_until": None,
             },
             "$set": {
                 "source_chat_id": str(msg.chat.id),
                 "source_message_id": msg.id,
                 "vault_message_id": vault_msg_id if vault_msg_id else None,
                 "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
+                "media_group_id": msg.media_group_id,
+                "album_sequence_index": i if msg.media_group_id else None,
+                "media_type": media_type_str,
+                "file_id": file_id,
+                "file_unique_id": file_unique_id,
+                "file_size": file_size,
+                "caption": msg.caption or msg.text or "",
                 "moderation_destination": dest,
                 "status": initial_status,
                 "distribution_state": ModerationState.PENDING.value,
@@ -325,18 +300,7 @@ async def archive_to_vault(
             },
         }
 
-        try:
-            await vault_col.update_one(
-                {"content_id": content_id},
-                update_doc,
-                upsert=True,
-            )
-        except Exception:
-            logger.error(
-                "Vault MongoDB write failed for content_id %s",
-                content_id,
-                exc_info=True,
-            )
+        await vault_col.update_one({"content_id": content_id}, update_doc, upsert=True)
 
     return vault_message_ids
 
@@ -353,7 +317,6 @@ async def enqueue_for_distribution(
 
     target_group_id = _destination_group_id(dest)
     if not target_group_id:
-        logger.error("Cannot enqueue: destination group not configured", extra={"ctx_dest": dest})
         return False
 
     watermark_config = _get_watermark_config(dest)
@@ -361,45 +324,41 @@ async def enqueue_for_distribution(
 
     now = datetime.now(timezone.utc)
     deadline = now + timedelta(hours=settings.QUEUE_DEADLINE_HOURS)
-
     group_id = messages[0].media_group_id if messages else None
-    content_id = (
-        f"mod_{group_id}"
-        if group_id
-        else f"mod_{messages[0].chat.id}_{messages[0].id}"
-    )
-
-    # Bug 5 fix: use f"submission_{dest}" not str(msg.chat.id).
-    # msg.chat.id is the submitter's private DM — not a channel.
-    # submission_{dest} matches the value seeded by ChannelService.seed_channels().
+    
     source_channel_id = f"submission_{dest}"
+    
+    # Validation: Ensure all items have vault references
+    if not all(vid > 0 for vid in vault_message_ids) or len(vault_message_ids) != len(messages):
+        logger.error("Enqueue aborted: missing vault references for album items")
+        return False
 
     for i, msg in enumerate(messages):
-        media = None
-        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
-        if msg.media:
-            try:
-                media = getattr(msg, msg.media.value, None)
-            except Exception:
-                pass
+        media = getattr(msg, str(msg.media.value), None) if msg.media else None
+        file_unique_id = getattr(media, "file_unique_id", None) if media else None
+        
+        content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
+        vault_msg_id = vault_message_ids[i]
 
-        file_id = getattr(media, "file_id", None) if media else None
         media_type_str = msg.media.value if msg.media else "text"
-
         try:
             media_type = MediaType(media_type_str)
         except ValueError:
             media_type = MediaType.TEXT
 
-        item_content_id = f"{content_id}_{i}" if len(messages) > 1 else content_id
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
         job = QueueJob(
-            content_id=item_content_id,
+            schema_version=1,
+            content_id=content_id,
             source_channel_id=source_channel_id,
+            source_message_id=msg.id,
+            vault_chat_id=settings.VAULT_CHANNEL_ID,
+            vault_message_id=vault_msg_id,
+            media_group_id=group_id,
             target_channel_ids=[str(target_group_id)],
             media_type=media_type,
-            media_file_id=file_id,
+            media_file_id=getattr(media, "file_id", None) if media else None,
             caption=msg.caption or msg.text or "",
             priority=DistributionPriority.MODERATED,
             status=initial_status,
@@ -408,41 +367,23 @@ async def enqueue_for_distribution(
             queue_deadline=deadline,
             watermark_required=watermark_required,
             watermark_config=watermark_config,
+            album_sequence_index=i if group_id else None,
             metadata={
-                "media_group_id": group_id,
-                "message_id": msg.id,
                 "submitter_user_id": submitter_user_id,
                 "destination": dest,
                 "moderated_at": now.isoformat(),
-                "vault_message_id": vault_msg_id,
-                "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if settings.VAULT_CHANNEL_ID else None,
                 "source_chat_id": msg.chat.id,
-                "source_message_id": msg.id,
             },
         )
 
         try:
             await queue_repo.enqueue(job)
         except DuplicateJobError:
-            logger.debug("Duplicate queue job skipped", extra={"ctx_content_id": item_content_id})
+            continue
         except Exception:
-            logger.error(
-                "Failed to enqueue moderated job",
-                extra={"ctx_content_id": item_content_id},
-                exc_info=True,
-            )
+            logger.error("Failed to enqueue moderated job", exc_info=True)
             return False
 
-    logger.info(
-        "Content enqueued for distribution",
-        extra={
-            "ctx_content_id": content_id,
-            "ctx_dest": dest,
-            "ctx_deadline": deadline.isoformat(),
-            "ctx_count": len(messages),
-            "ctx_watermark": watermark_required,
-        },
-    )
     return True
 
 

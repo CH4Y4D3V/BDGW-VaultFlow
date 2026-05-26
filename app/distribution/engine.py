@@ -61,11 +61,14 @@ class DistributionEngine:
         self._worker_pool: Optional[DispatcherWorkerPool] = None
         self._watermark_pool: Optional[WatermarkWorkerPool] = None
 
-        # Shared singletons across all distribution workers
+        # shared singletons across all distribution workers
         self._rate_limiter = RateLimiterService()
         self._flood_handler = FloodWaitHandler()
         self._balancer = TargetBalancer()
         self._supervisor = SystemSupervisor()
+
+        # FIX: Ensure persistent floodwaits are loaded before workers start
+        self._flood_handler.load_from_redis()
 
         self._running = False
 

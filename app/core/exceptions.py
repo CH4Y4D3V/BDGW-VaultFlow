@@ -10,6 +10,14 @@ class PermanentJobError(VaultFlowBaseError):
     pass
 
 
+class RetryableDeliveryError(RetryableError):
+    pass
+
+
+class PermanentDeliveryError(PermanentJobError):
+    pass
+
+
 class QueueLockError(RetryableError):
     pass
 
@@ -26,7 +34,7 @@ class MaxRetriesExceededError(PermanentJobError):
     pass
 
 
-class FloodWaitError(RetryableError):
+class FloodWaitError(RetryableDeliveryError):
     def __init__(self, seconds: int, message: str = ""):
         self.seconds = seconds
         super().__init__(message or f"FloodWait: wait {seconds}s")
@@ -48,11 +56,11 @@ class MediaFileNotFoundError(PermanentJobError):
     pass
 
 
-class DispatcherError(RetryableError):
+class DispatcherError(RetryableDeliveryError):
     pass
 
 
-class RateLimitExceededError(RetryableError):
+class RateLimitExceededError(RetryableDeliveryError):
     pass
 
 
@@ -69,4 +77,19 @@ class InvalidQueueJobError(PermanentJobError):
 
 
 class VaultMessageDeletedError(PermanentJobError):
+    pass
+
+
+class ConsistencyViolationError(PermanentJobError):
+    """Raised when a data consistency rule is violated (e.g. duplicate delivery prevented)."""
+    pass
+
+
+class APIDegradationError(RetryableDeliveryError):
+    """Raised when Telegram API is showing signs of degradation (e.g. copy_media_group failure)."""
+    pass
+
+
+class QuarantineError(PermanentJobError):
+    """Raised when a job is unrecoverable and must be moved to quarantine."""
     pass

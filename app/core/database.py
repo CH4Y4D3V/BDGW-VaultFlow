@@ -61,8 +61,30 @@ class DatabaseManager:
                 name="unique_active_content",
                 unique=True,
                 partialFilterExpression={
-                    "status": {"$in": ["pending", "processing", "locked", "watermarking"]}
+                    "status": {"$in": ["pending", "processing", "locked", "watermarking", "ready", "delivering"]}
                 },
+            ),
+            IndexModel(
+                [("delivery_key", ASCENDING)],
+                name="delivery_key_unique",
+                unique=True,
+                sparse=True,
+                background=True,
+            ),
+            IndexModel(
+                [("vault_chat_id", ASCENDING), ("vault_message_id", ASCENDING)],
+                name="vault_ref_unique",
+                unique=True,
+                background=True,
+                partialFilterExpression={
+                    "status": {"$in": ["pending", "processing", "locked", "watermarking", "ready", "delivering"]}
+                },
+            ),
+            IndexModel(
+                [("media_group_id", ASCENDING)],
+                name="queue_media_group",
+                background=True,
+                sparse=True,
             ),
             IndexModel(
                 [("status", ASCENDING), ("locked_by", ASCENDING), ("priority", DESCENDING)],
@@ -109,32 +131,21 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Dead letter ───────────────────────────────────────────────────────
-        await db[settings.DEAD_LETTER_COLLECTION].create_indexes([
-            IndexModel([("original_job_id", ASCENDING)], name="original_job", unique=True),
-            IndexModel([("dead_at", DESCENDING)], name="dead_recency", background=True),
-            IndexModel([("source_channel_id", ASCENDING)], name="dlq_channel", background=True),
-        ])
-
-        # ── Distributed locks ─────────────────────────────────────────────────
-        await db[settings.LOCK_COLLECTION].create_indexes([
-            IndexModel([("lock_key", ASCENDING)], name="lock_key_unique", unique=True),
-            IndexModel([("expires_at", ASCENDING)], name="lock_expiry_ttl", expireAfterSeconds=0),
-        ])
-
-        # ── Metrics ───────────────────────────────────────────────────────────
-        await db[settings.METRICS_COLLECTION].create_indexes([
-            IndexModel([("collected_at", DESCENDING)], name="metrics_recency", background=True),
-            IndexModel(
-                [("collected_at", ASCENDING)],
-                name="metrics_ttl",
-                expireAfterSeconds=2592000,
-            ),
-        ])
-
         # ── Vault ─────────────────────────────────────────────────────────────
         await db[settings.VAULT_COLLECTION].create_indexes([
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
+            IndexModel(
+                [("vault_chat_id", ASCENDING), ("vault_message_id", ASCENDING)],
+                name="vault_message_unique",
+                unique=True,
+                background=True,
+            ),
+            IndexModel(
+                [("media_group_id", ASCENDING)],
+                name="vault_media_group",
+                background=True,
+                sparse=True,
+            ),
             IndexModel(
                 [("status", ASCENDING), ("moderation_destination", ASCENDING), ("created_at", ASCENDING)],
                 name="vault_dist_query",
@@ -143,12 +154,6 @@ class DatabaseManager:
             IndexModel(
                 [("file_unique_id", ASCENDING)],
                 name="vault_file_unique",
-                background=True,
-                sparse=True,
-            ),
-            IndexModel(
-                [("vault_message_id", ASCENDING)],
-                name="vault_msg_id",
                 background=True,
                 sparse=True,
             ),

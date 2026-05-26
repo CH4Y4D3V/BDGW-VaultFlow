@@ -48,10 +48,6 @@ class DistributionDispatcher:
         remaining = [t for t in target_ids if t not in delivered]
 
         if not remaining:
-            logger.info(
-                "All targets already delivered",
-                extra={"ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id},
-            )
             for job in job_docs:
                 await self._queue.mark_completed(str(job["_id"]))
             return True
@@ -60,47 +56,58 @@ class DistributionDispatcher:
         all_succeeded = True
 
         for target_id in sorted_targets:
-            if self._flood_handler.is_blocked(target_id):
-                wait = self._flood_handler.seconds_until_available(target_id)
+            # ── Distributed Idempotency Lock ──────────────────────────────────
+            # Acquire lock to prevent duplicate delivery to this target
+            lock_acquired = await self._queue.acquire_delivery_lock(primary_id, target_id)
+            if not lock_acquired:
                 logger.warning(
-                    "Target is flood-waited, skipping for now",
-                    extra={
-                        "ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id,
-                        "ctx_target": target_id,
-                        "ctx_wait": wait,
-                    },
+                    "Duplicate delivery prevented: lock already held for target",
+                    extra={"ctx_job_id": primary_id, "ctx_target": target_id}
                 )
-                all_succeeded = False
                 continue
 
-            allowed, reason = await self._rate_limiter.check_and_consume(target_id)
-            if not allowed:
-                logger.warning(
-                    "Rate limit hit, deferring target",
-                    extra={
-                        "ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id,
-                        "ctx_target": target_id,
-                        "ctx_reason": reason,
-                    },
-                )
-                all_succeeded = False
-                continue
+            try:
+                if self._flood_handler.is_blocked(target_id):
+                    all_succeeded = False
+                    continue
 
-            result = await self._dispatch_to_target(job_docs, primary_id, target_id)
+                allowed, reason = await self._rate_limiter.check_and_consume(target_id)
+                if not allowed:
+                    all_succeeded = False
+                    continue
 
-            if result.success:
+                # Transition jobs to DELIVERING state
                 for job in job_docs:
-                    await self._queue.record_target_delivered(str(job["_id"]), target_id)
-                await self._balancer.record_delivery(target_id, success=True)
-                logger.info(
-                    "Target delivered",
-                    extra={"ctx_group_id": primary_job.get("metadata", {}).get("media_group_id") or primary_id, "ctx_target": target_id},
-                )
-            else:
-                for job in job_docs:
-                    await self._queue.record_target_failed(str(job["_id"]), target_id, result.error or "unknown")
-                await self._balancer.record_delivery(target_id, success=False)
-                all_succeeded = False
+                    await self._queue.mark_delivering(str(job["_id"]), worker_id)
+
+                # ── Heartbeat Task ────────────────────────────────────────────
+                heartbeat_stop = asyncio.Event()
+                async def _heartbeat():
+                    while not heartbeat_stop.is_set():
+                        await asyncio.sleep(30)
+                        await self._queue.extend_delivery_lock(primary_id, target_id)
+                
+                heartbeat_task = asyncio.create_task(_heartbeat())
+
+                try:
+                    result = await self._dispatch_to_target(job_docs, primary_id, target_id)
+                finally:
+                    heartbeat_stop.set()
+                    await heartbeat_task
+
+                if result.success:
+                    for job in job_docs:
+                        await self._queue.record_target_delivered(str(job["_id"]), target_id)
+                    await self._balancer.record_delivery(target_id, success=True)
+                else:
+                    for job in job_docs:
+                        await self._queue.record_target_failed(str(job["_id"]), target_id, result.error or "unknown")
+                    await self._balancer.record_delivery(target_id, success=False)
+                    all_succeeded = False
+            
+            finally:
+                # Release lock after delivery attempt (success or fail)
+                await self._queue.release_delivery_lock(primary_id, target_id)
 
         # Re-fetch to get current delivered state
         updated = await self._queue.get_job_by_id(primary_id)
