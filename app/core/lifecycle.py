@@ -103,28 +103,27 @@ class AppLifecycle:
                 )
                 raise
 
-        # 4. Distribution Engine
-        from app.bot.delivery import execute_telegram_delivery
-        from app.bot.provider import fetch_distribution_content
+            # 4. Distribution Engine
+            from app.bot.delivery import execute_telegram_delivery
+            from app.bot.provider import fetch_distribution_content
 
-        self._engine = DistributionEngine(
-            delivery_callback=execute_telegram_delivery,
-            content_provider_callback=fetch_distribution_content,
-        )
-
-        try:
-           await self._engine.start()
-        except Exception as e:
-            logger.exception(
-            "Failed to start Distribution Engine",
-            error_type=type(e).__name__,
-            error_message=str(e)
+            self._engine = DistributionEngine(
+                delivery_callback=execute_telegram_delivery,
+                content_provider_callback=fetch_distribution_content,
             )
-            raise
+
+            try:
+                await self._engine.start()
+            except Exception as e:
+                logger.exception(
+                    "Failed to start Distribution Engine",
+                    error_type=type(e).__name__,
+                    error_message=str(e)
+                )
+                raise
 
             try:
                 await self._subscription_worker.start(bot=self._bot)
-                
             except Exception:
                 logger.error("Failed to start Subscription Worker", exc_info=True)
                 self._subscription_worker = None

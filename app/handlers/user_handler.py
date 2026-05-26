@@ -217,9 +217,23 @@ async def handle_start(client: Client, message: Message) -> None:
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
-        if len(message.command) > 1 and message.command[1] == "resubscribe":
-            await handle_mystatus(client, message)
-            return
+        # ── Referral Payload Handling ──
+        if len(message.command) > 1:
+            payload = message.command[1]
+            if payload.startswith("ref_"):
+                try:
+                    referrer_id = int(payload.split("_")[1])
+                    from app.referral.service import ReferralService
+                    ref_service = ReferralService()
+                    success, ref_text = await ref_service.handle_referral_start(client, referrer_id, user_id)
+                    # We continue to show onboarding after processing referral
+                    if success:
+                        await message.reply_text(f"✨ <b>Referral System</b>\n\n{ref_text}")
+                except (IndexError, ValueError):
+                    pass
+            elif payload == "resubscribe":
+                await handle_mystatus(client, message)
+                return
 
         onboarding_service = _get_onboarding_service()
         text, keyboard = await onboarding_service.render_onboarding(
@@ -241,7 +255,7 @@ async def handle_start(client: Client, message: Message) -> None:
             pass
 
 
-@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|premium|queue)$"))
+@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|premium|queue|referrals)$"))
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
     """Handles main menu callbacks, editing the message in-place."""
     action = callback_query.data.split(":")[1]
@@ -279,6 +293,28 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 "<i>Join the elite circle of creators today.</i>"
             )
             keyboard = KeyboardBuilder.build_premium_conversion()
+
+        elif action == "referrals":
+            from app.referral.service import ReferralService
+            ref_service = ReferralService()
+            wallet = await ref_service.repo.get_wallet(user_id)
+            if not wallet:
+                await ref_service.repo.upsert_wallet(user_id)
+                wallet = await ref_service.repo.get_wallet(user_id)
+
+            bot_username = await _get_bot_username(client)
+            ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+            
+            text = (
+                "📊 <b>Your Referral Status</b>\n\n"
+                f"💰 <b>Points Balance:</b> <code>{wallet['points_balance']}</code>\n"
+                f"📈 <b>Total Earned:</b> <code>{wallet['total_earned']}</code>\n"
+                f"👥 <b>Active Referrals:</b> <code>{wallet['active_referrals']}</code>\n\n"
+                "🔗 <b>Your Referral Link:</b>\n"
+                f"<code>{ref_link}</code>\n\n"
+                "<i>Share this link. Each qualified referral earns you 1 point toward Premium discounts!</i>"
+            )
+            keyboard = KeyboardBuilder.build_back_button()
 
         elif action == "queue":
             queue_repo = _get_queue_repo()

@@ -48,10 +48,11 @@ class KeyboardBuilder:
             InlineKeyboardButton("🆘 Support", callback_data="menu:support")
         ])
 
-        # Row 4: Anonymous (Secondary Action)
+        # Row 4: Secondary Growth & Privacy
         if state != "admin":
             buttons.append([
-                InlineKeyboardButton("🕵️ Anonymous Upload", callback_data="menu:anonymous")
+                InlineKeyboardButton("👥 Referrals", callback_data="menu:referrals"),
+                InlineKeyboardButton("🕵️ Anonymous", callback_data="menu:anonymous")
             ])
 
         return InlineKeyboardMarkup(buttons)

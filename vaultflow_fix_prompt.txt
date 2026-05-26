@@ -1,156 +1,127 @@
-MANDATORY BUSINESS CONSTANTS
+gemini -p "
+You are a senior backend architect fixing a production Python Telegram bot (BDGW VaultFlow).
 
-The following business logic is STRICT and MUST NOT be modified.
+## STACK
+- Python 3.12
+- Pyrogram v2
+- Motor (async MongoDB)
+- APScheduler
+- Structlog (NOT stdlib logging)
+- AsyncIO
 
-━━━━━━━━━━━━━━━━━━━━━━
-PREMIUM PLANS
-━━━━━━━━━━━━━━━━━━━━━━
+## YOUR TASK
+Fix exactly 4 bugs identified from production crash logs. Do NOT rewrite unrelated code. Do NOT change architecture. Surgical fixes only.
 
-Subscription plans:
+---
 
-• 1 Month — ৳499
-• 3 Months — ৳1299
-• 6 Months — ৳2199
+## BUG 1 — Missing import: DuplicateKeyError
+FILE: app/scheduler/scheduler.py
 
-Future support required:
-• Eid flash sale
-• temporary campaigns
-• limited offers
-• quota-based discounts
+SYMPTOM:
+  NameError: name 'DuplicateKeyError' is not defined. Did you mean: 'DuplicateJobError'?
+  at: except DuplicateKeyError:
 
-Pricing architecture must support:
+FIX:
+  Add at top of file:
+    from pymongo.errors import DuplicateKeyError
 
-* future campaign engine
-* temporary overrides
-* discount stacking rules
-* expiry windows
-* analytics tracking
+---
 
-━━━━━━━━━━━━━━━━━━━━━━
-REQUIRED MAIN BUTTONS
-━━━━━━━━━━━━━━━━━━━━━━
+## BUG 2 — Missing import: WatermarkState
+FILE: app/scheduler/scheduler.py
 
-Main onboarding buttons:
+SYMPTOM:
+  NameError: name 'WatermarkState' is not defined
+  at: _run_startup_integrity_scan
 
-💎 Join Premium
-📩 Send Content Anonymously
-🆘 Need Help
+FIX:
+  Read the file first. Find where WatermarkState is defined in the project (likely app/watermark/models.py or app/distribution/models.py).
+  Add the correct import at the top of scheduler.py.
+  Do NOT guess the import path — use Read tool to locate the class definition first.
 
-Additional onboarding/navigation buttons may be added,
-but these core actions MUST remain preserved.
+---
 
-━━━━━━━━━━━━━━━━━━━━━━
-PAYMENT WORKFLOW RULES
-━━━━━━━━━━━━━━━━━━━━━━
+## BUG 3 — Stale MongoDB lock on restart
+FILE: app/scheduler/scheduler.py
 
-CRITICAL:
+SYMPTOM:
+  pymongo.errors.DuplicateKeyError: E11000 duplicate key error
+  collection: bdgw_vaultflow.locks
+  index: lock_key_unique
+  dup key: { lock_key: 'scheduler_active_singleton' }
 
-Payment timeout MUST NOT start until:
+ROOT CAUSE:
+  On crash or hard restart, the lock document is never deleted from MongoDB.
+  Every new startup attempts insert_one() which fails with DuplicateKeyError.
+  The except clause fails because DuplicateKeyError is not imported (Bug 1).
+  Even after Bug 1 is fixed, the logic is wrong: catching DuplicateKeyError and returning False means the scheduler NEVER starts after any crash.
 
-1. admin sends payment instructions
-2. Telegram delivery succeeds
-3. payment intent is persisted
+FIX STRATEGY — Implement proper restart-safe lock acquisition:
 
-ONLY THEN:
+  STEP 1: On startup, before attempting to acquire the lock, DELETE any existing stale lock document.
+  Use delete_many({'lock_key': 'scheduler_active_singleton'}) as the first operation in _acquire_lock() or a new _release_stale_lock() method called in start().
 
-* pending_payment state begins
-* timeout begins
+  STEP 2: Then attempt insert_one() as normal.
 
-This lifecycle is mandatory.
+  STEP 3: The lock document should include a 'created_at' field with datetime.utcnow() and an 'instance_id' field (uuid4 string) for auditability.
 
-━━━━━━━━━━━━━━━━━━━━━━
-WORKFLOW ISOLATION RULES
-━━━━━━━━━━━━━━━━━━━━━━
+  STEP 4: Add a _release_lock() method that deletes the lock by instance_id on graceful shutdown.
 
-The following systems MUST remain isolated:
+  STEP 5: In the stop()/shutdown() method of the scheduler, call _release_lock() so clean shutdowns leave no stale lock.
 
-A) Payment System
-B) Support System
-C) Moderation System
-D) Distribution System
+  IMPORTANT: Use Motor (async) for all MongoDB operations. The current code using self._locks.insert_one() synchronously inside an async method is also wrong — verify Motor is being used (AsyncIOMotorCollection), not pymongo Collection directly.
 
-NEVER ALLOW:
+---
 
-* payment proofs into support
-* moderation callbacks into payment
-* support interception of payment flows
-* subscription logic inside moderation queue
+## BUG 4 — Structlog API misuse: unexpected keyword 'error_type'
+FILES: app/core/lifecycle.py AND main_bot.py
 
-━━━━━━━━━━━━━━━━━━━━━━
-FSM SAFETY RULES
-━━━━━━━━━━━━━━━━━━━━━━
+SYMPTOM:
+  TypeError: Logger._log() got an unexpected keyword argument 'error_type'
+  at: logger.exception(..., error_type='...')
 
-FSM uses:
+ROOT CAUSE:
+  The code is using stdlib logging.Logger.exception() which does not accept extra keyword arguments beyond 'exc_info', 'stack_info', 'stacklevel'.
+  Structlog bound loggers DO accept arbitrary keyword args.
+  Either: (a) the logger is a stdlib logger being used with structlog syntax, OR (b) structlog is not properly configured.
 
-* aiogram FSM
-* MemoryStorage
+FIX:
+  Read app/core/lifecycle.py and main_bot.py first.
 
-MemoryStorage is NOT trusted persistence.
+  Option A (preferred): If the file already imports structlog and uses structlog.get_logger(), the issue is that somewhere in the logging chain it falls back to stdlib. Fix the structlog configuration to use structlog.stdlib.ProcessorFormatter properly.
 
-Database is source of truth.
+  Option B: If logger = logging.getLogger(__name__) is used anywhere, replace with:
+    import structlog
+    logger = structlog.get_logger(__name__)
 
-FSM may ONLY control:
+  For structlog loggers, the correct call is:
+    logger.exception('message', error_type='startup_failure', exc_info=True)
+  OR:
+    logger.error('message', error_type='startup_failure', exc_info=True)
 
-* temporary interaction state
-* current conversation step
+  For stdlib loggers, extra kwargs go in the 'extra' dict:
+    logger.exception('message', extra={'error_type': 'startup_failure'})
 
-Critical workflow state MUST persist in database.
+  Find every occurrence of logger.exception(..., error_type=...) and logger.error(..., error_type=...) in both files and fix them to match the actual logger type being used.
 
-━━━━━━━━━━━━━━━━━━━━━━
-VAULT DELIVERY RULES
-━━━━━━━━━━━━━━━━━━━━━━
+---
 
-ALL distribution MUST use:
+## EXECUTION ORDER
+1. Read app/scheduler/scheduler.py fully
+2. Search project for 'WatermarkState' class definition
+3. Read app/core/lifecycle.py fully
+4. Read main_bot.py fully
+5. Apply all 4 fixes
+6. Write the corrected files back
+7. Output a summary of every line changed and why
 
-* copy_message()
-* copy_media_group()
-
-ONLY from immutable vault references.
-
-Forbidden:
-
-* stale file_id fallback
-* InputMedia reconstruction
-* source-channel delivery
-* direct watermark upload delivery
-
-━━━━━━━━━━━━━━━━━━━━━━
-MODERATION FLOW RULES
-━━━━━━━━━━━━━━━━━━━━━━
-
-Current moderation architecture is already correct.
-
-Must preserve:
-
-* verification hub
-* moderation callbacks
-* queue system
-* vault archival
-* scheduler
-* fairness rotation
-* duplicate prevention
-* watermarking
-* cooldown logic
-
-DO NOT redesign these systems incorrectly.
-
-━━━━━━━━━━━━━━━━━━━━━━
-SUPPORT SYSTEM RULES
-━━━━━━━━━━━━━━━━━━━━━━
-
-Support system uses Telegram forum topics.
-
-Each user:
-
-* receives isolated topic
-* persistent support history
-* dedicated admin thread
-
-Before admin accepts:
-
-* user → admin forwarding allowed
-* admin → user blocked
-
-After acceptance:
-
-* bidirectional forwarding enabled
+## CONSTRAINTS
+- Do NOT change any other files
+- Do NOT refactor working code
+- Do NOT add new dependencies
+- Do NOT change method signatures unless required by the fix
+- Preserve all existing comments and docstrings
+- All MongoDB operations must use Motor (async), never sync pymongo
+- All logging must use structlog
+- Lock cleanup must be idempotent (safe to call multiple times)
+"
