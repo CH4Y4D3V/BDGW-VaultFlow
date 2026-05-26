@@ -56,7 +56,7 @@ class DispatcherWorker:
             return
 
         # Recover any stale jobs from crashed workers on startup
-        recovered = await self._queue_repo.recover_stale_processing_jobs()
+        recovered = await self._queue_repo.recover_stale_jobs()
         if recovered:
             logger.warning(
                 f"Worker startup: recovered {recovered} stale jobs",

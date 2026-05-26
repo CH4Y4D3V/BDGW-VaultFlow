@@ -70,77 +70,109 @@ class QueueRepository:
 
     async def claim_watermark_jobs(self, worker_id: str, batch_size: int = 1) -> List[dict]:
         """Atomically claim jobs for watermarking, supporting media groups."""
+        from app.core.database import DatabaseManager
+        use_transactions = DatabaseManager.transactions_supported()
+        
         now = datetime.now(timezone.utc)
         claimed = []
         claimed_ids = []
 
-        async with await self._db.client.start_session() as session:
+        if use_transactions:
+            async with await self._db.client.start_session() as session:
+                for _ in range(batch_size):
+                    # 1. Find an eligible candidate
+                    doc = await self._queue.find_one(
+                        {
+                            "status": JobStatus.WATERMARKING,
+                            "_id": {"$nin": claimed_ids},
+                            "watermark_required": True,
+                            "watermark_state": WatermarkState.PENDING,
+                            "locked_by": None,
+                        },
+                        sort=[("priority", -1), ("created_at", 1)],
+                        session=session
+                    )
+                    if not doc:
+                        break
+
+                    group_id = doc.get("media_group_id")
+                    
+                    async with session.start_transaction():
+                        if group_id:
+                            # 2. Claim entire group atomically
+                            result = await self._queue.update_many(
+                                {
+                                    "media_group_id": group_id,
+                                    "status": JobStatus.WATERMARKING,
+                                    "locked_by": None,
+                                },
+                                {
+                                    "$set": {
+                                        "status": JobStatus.LOCKED,
+                                        "locked_by": worker_id,
+                                        "locked_at": now,
+                                        "updated_at": now,
+                                        "watermark_state": WatermarkState.PROCESSING,
+                                    }
+                                },
+                                session=session
+                            )
+                            if result.modified_count > 0:
+                                cursor = self._queue.find({
+                                    "media_group_id": group_id,
+                                    "locked_by": worker_id,
+                                }).sort("album_sequence_index", 1)
+                                async for g_doc in cursor:
+                                    if g_doc["_id"] not in claimed_ids:
+                                        claimed.append(g_doc)
+                                        claimed_ids.append(g_doc["_id"])
+                        else:
+                            # 2. Claim single job
+                            res = await self._queue.find_one_and_update(
+                                {"_id": doc["_id"], "locked_by": None},
+                                {
+                                    "$set": {
+                                        "status": JobStatus.LOCKED,
+                                        "locked_by": worker_id,
+                                        "locked_at": now,
+                                        "updated_at": now,
+                                        "watermark_state": WatermarkState.PROCESSING,
+                                    }
+                                },
+                                return_document=ReturnDocument.AFTER,
+                                session=session
+                            )
+                            if res:
+                                claimed.append(res)
+                                claimed_ids.append(res["_id"])
+        else:
+            # Standalone MongoDB: Use atomic find_one_and_update (no multi-document atomicity for albums)
             for _ in range(batch_size):
-                # 1. Find an eligible candidate
-                doc = await self._queue.find_one(
+                res = await self._queue.find_one_and_update(
                     {
                         "status": JobStatus.WATERMARKING,
-                        "_id": {"$nin": claimed_ids},
                         "watermark_required": True,
                         "watermark_state": WatermarkState.PENDING,
                         "locked_by": None,
+                        "_id": {"$nin": claimed_ids}
+                    },
+                    {
+                        "$set": {
+                            "status": JobStatus.LOCKED,
+                            "locked_by": worker_id,
+                            "locked_at": now,
+                            "updated_at": now,
+                            "watermark_state": WatermarkState.PROCESSING,
+                        }
                     },
                     sort=[("priority", -1), ("created_at", 1)],
-                    session=session
+                    return_document=ReturnDocument.AFTER
                 )
-                if not doc:
+                if res:
+                    claimed.append(res)
+                    claimed_ids.append(res["_id"])
+                else:
                     break
-
-                group_id = doc.get("media_group_id")
-                
-                async with session.start_transaction():
-                    if group_id:
-                        # 2. Claim entire group atomically
-                        result = await self._queue.update_many(
-                            {
-                                "media_group_id": group_id,
-                                "status": JobStatus.WATERMARKING,
-                                "locked_by": None,
-                            },
-                            {
-                                "$set": {
-                                    "status": JobStatus.LOCKED,
-                                    "locked_by": worker_id,
-                                    "locked_at": now,
-                                    "updated_at": now,
-                                    "watermark_state": WatermarkState.PROCESSING,
-                                }
-                            },
-                            session=session
-                        )
-                        if result.modified_count > 0:
-                            cursor = self._queue.find({
-                                "media_group_id": group_id,
-                                "locked_by": worker_id,
-                            }).sort("album_sequence_index", 1)
-                            async for g_doc in cursor:
-                                if g_doc["_id"] not in claimed_ids:
-                                    claimed.append(g_doc)
-                                    claimed_ids.append(g_doc["_id"])
-                    else:
-                        # 2. Claim single job
-                        res = await self._queue.find_one_and_update(
-                            {"_id": doc["_id"], "locked_by": None},
-                            {
-                                "$set": {
-                                    "status": JobStatus.LOCKED,
-                                    "locked_by": worker_id,
-                                    "locked_at": now,
-                                    "updated_at": now,
-                                    "watermark_state": WatermarkState.PROCESSING,
-                                }
-                            },
-                            return_document=ReturnDocument.AFTER,
-                            session=session
-                        )
-                        if res:
-                            claimed.append(res)
-                            claimed_ids.append(res["_id"])
 
         return claimed
 
@@ -149,76 +181,111 @@ class QueueRepository:
         Atomically claim the next N pending jobs.
         If a claimed job is part of a media group, atomically claims the ENTIRE group.
         """
+        from app.core.database import DatabaseManager
+        use_transactions = DatabaseManager.transactions_supported()
+
         now = datetime.now(timezone.utc)
         claimed = []
         claimed_ids = []
 
-        async with await self._db.client.start_session() as session:
+        if use_transactions:
+            async with await self._db.client.start_session() as session:
+                for _ in range(batch_size):
+                    # 1. Find candidate
+                    doc = await self._queue.find_one(
+                        {
+                            "status": JobStatus.PENDING,
+                            "_id": {"$nin": claimed_ids},
+                            "$or": [
+                                {"execute_after": None},
+                                {"execute_after": {"$lte": now}},
+                            ],
+                            "locked_by": None,
+                        },
+                        sort=[("priority", -1), ("execute_after", 1), ("_id", 1)],
+                        session=session
+                    )
+                    if not doc:
+                        break
+
+                    group_id = doc.get("media_group_id")
+                    async with session.start_transaction():
+                        if group_id:
+                            # 2. Claim group
+                            result = await self._queue.update_many(
+                                {
+                                    "media_group_id": group_id,
+                                    "status": JobStatus.PENDING,
+                                    "locked_by": None,
+                                },
+                                {
+                                    "$set": {
+                                        "status": JobStatus.LOCKED,
+                                        "locked_by": worker_id,
+                                        "locked_at": now,
+                                        "updated_at": now,
+                                    }
+                                },
+                                session=session
+                            )
+                            if result.modified_count > 0:
+                                cursor = self._queue.find({
+                                    "media_group_id": group_id,
+                                    "locked_by": worker_id,
+                                }).sort("album_sequence_index", 1)
+                                async for g_doc in cursor:
+                                    if g_doc["_id"] not in claimed_ids:
+                                        claimed.append(g_doc)
+                                        claimed_ids.append(g_doc["_id"])
+                        else:
+                            # 2. Claim single
+                            res = await self._queue.find_one_and_update(
+                                {"_id": doc["_id"], "locked_by": None},
+                                {
+                                    "$set": {
+                                        "status": JobStatus.LOCKED,
+                                        "locked_by": worker_id,
+                                        "locked_at": now,
+                                        "updated_at": now,
+                                    }
+                                },
+                                return_document=ReturnDocument.AFTER,
+                                session=session
+                            )
+                            if res:
+                                claimed.append(res)
+                                claimed_ids.append(res["_id"])
+        else:
+            # Standalone MongoDB fallback
             for _ in range(batch_size):
-                # 1. Find candidate
-                doc = await self._queue.find_one(
+                res = await self._queue.find_one_and_update(
                     {
                         "status": JobStatus.PENDING,
-                        "_id": {"$nin": claimed_ids},
+                        "locked_by": None,
                         "$or": [
                             {"execute_after": None},
                             {"execute_after": {"$lte": now}},
                         ],
-                        "locked_by": None,
+                        "_id": {"$nin": claimed_ids}
+                    },
+                    {
+                        "$set": {
+                            "status": JobStatus.LOCKED,
+                            "locked_by": worker_id,
+                            "locked_at": now,
+                            "updated_at": now,
+                        }
                     },
                     sort=[("priority", -1), ("execute_after", 1), ("_id", 1)],
-                    session=session
+                    return_document=ReturnDocument.AFTER
                 )
-                if not doc:
+                if res:
+                    claimed.append(res)
+                    claimed_ids.append(res["_id"])
+                else:
                     break
 
-                group_id = doc.get("media_group_id")
-                async with session.start_transaction():
-                    if group_id:
-                        # 2. Claim group
-                        result = await self._queue.update_many(
-                            {
-                                "media_group_id": group_id,
-                                "status": JobStatus.PENDING,
-                                "locked_by": None,
-                            },
-                            {
-                                "$set": {
-                                    "status": JobStatus.LOCKED,
-                                    "locked_by": worker_id,
-                                    "locked_at": now,
-                                    "updated_at": now,
-                                }
-                            },
-                            session=session
-                        )
-                        if result.modified_count > 0:
-                            cursor = self._queue.find({
-                                "media_group_id": group_id,
-                                "locked_by": worker_id,
-                            }).sort("album_sequence_index", 1)
-                            async for g_doc in cursor:
-                                if g_doc["_id"] not in claimed_ids:
-                                    claimed.append(g_doc)
-                                    claimed_ids.append(g_doc["_id"])
-                    else:
-                        # 2. Claim single
-                        res = await self._queue.find_one_and_update(
-                            {"_id": doc["_id"], "locked_by": None},
-                            {
-                                "$set": {
-                                    "status": JobStatus.LOCKED,
-                                    "locked_by": worker_id,
-                                    "locked_at": now,
-                                    "updated_at": now,
-                                }
-                            },
-                            return_document=ReturnDocument.AFTER,
-                            session=session
-                        )
-                        if res:
-                            claimed.append(res)
-                            claimed_ids.append(res["_id"])
+        return claimed
 
         return claimed
 

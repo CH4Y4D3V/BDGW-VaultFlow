@@ -11,27 +11,54 @@ class DatabaseManager:
     _client: Optional[AsyncIOMotorClient] = None
     _db: Optional[AsyncIOMotorDatabase] = None
     _initialized: bool = False
+    _transactions_supported: bool = False
 
     @classmethod
     async def connect(cls) -> None:
         if cls._initialized:
             return
 
-        client = AsyncIOMotorClient(
-            settings.MONGO_URI,
-            serverSelectionTimeoutMS=5000,
-            maxPoolSize=settings.MONGO_MAX_POOL_SIZE,
-            minPoolSize=settings.MONGO_MIN_POOL_SIZE,
-            retryWrites=True,
-        )
-        cls._client = client
-        cls._db = client[settings.MONGO_DB_NAME]
+        logger.info("Starting MongoDB connection process...")
+        try:
+            client = AsyncIOMotorClient(
+                settings.MONGO_URI,
+                serverSelectionTimeoutMS=5000,
+                maxPoolSize=settings.MONGO_MAX_POOL_SIZE,
+                minPoolSize=settings.MONGO_MIN_POOL_SIZE,
+                retryWrites=True,
+            )
+            cls._client = client
+            cls._db = client[settings.MONGO_DB_NAME]
 
-        await client.admin.command("ping")
-        logger.info("MongoDB connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
+            # ── Connection Test ───────────────────────────────────────────────
+            logger.debug("Pinging MongoDB admin database...")
+            await client.admin.command("ping")
+            logger.info("MongoDB socket connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
 
-        await cls._ensure_indexes()
-        cls._initialized = True
+            # ── Capabilities Audit ───────────────────────────────────────────
+            try:
+                # Check for replica set status (needed for transactions)
+                status = await client.admin.command("replSetGetStatus")
+                logger.info("MongoDB replica set detected", extra={"ctx_set_name": status.get("set")})
+                cls._transactions_supported = True
+            except Exception:
+                logger.warning("MongoDB replica set NOT detected — transactions will be disabled/unavailable")
+                cls._transactions_supported = False
+
+            # ── Schema Verification ──────────────────────────────────────────
+            logger.debug("Initiating index verification/creation phase...")
+            await cls._ensure_indexes()
+            
+            cls._initialized = True
+            logger.info("MongoDB initialization complete (Connection + Indices)")
+
+        except Exception as e:
+            logger.exception("FATAL: MongoDB initialization failed during connect sequence")
+            raise e
+
+    @classmethod
+    def transactions_supported(cls) -> bool:
+        return cls._transactions_supported
 
     @classmethod
     async def disconnect(cls) -> None:
@@ -54,8 +81,39 @@ class DatabaseManager:
     async def _ensure_indexes(cls) -> None:
         db = cls.get_db()
 
+        async def _safe_create(collection_name: str, indexes: list[IndexModel]) -> None:
+            logger.debug(f"Verifying indexes for collection: {collection_name}")
+            try:
+                await db[collection_name].create_indexes(indexes)
+                logger.debug(f"Successfully verified indexes for {collection_name}")
+            except Exception as e:
+                # RC-10 FIX: Catch index specification mismatches.
+                # If an index exists with the same name but different options (e.g. unique=True changed),
+                # MongoDB throws an OperationFailure. We attempt to resolve by dropping the offending index.
+                error_str = str(e)
+                if "already exists with different options" in error_str or "IndexOptionsConflict" in error_str:
+                    logger.warning(
+                        f"Index conflict detected in {collection_name}. Attempting recovery...",
+                        extra={"ctx_collection": collection_name, "ctx_error": error_str}
+                    )
+                    # We can't easily know which index failed from the bulk call without parsing the message,
+                    # so we drop all indexes for this collection (except _id) and recreate.
+                    # This is safe for startup/maintenance windows.
+                    try:
+                        await db[collection_name].drop_indexes()
+                        await db[collection_name].create_indexes(indexes)
+                        logger.info(f"Successfully recovered and recreated indexes for {collection_name}")
+                        return
+                    except Exception as secondary_e:
+                        logger.exception(f"Index recovery failed for {collection_name}")
+                        raise secondary_e
+                
+                logger.error(f"Index creation failed for collection: {collection_name}")
+                logger.exception(f"Underlying error for {collection_name}: {e}")
+                raise e
+
         # ── Queue ─────────────────────────────────────────────────────────────
-        await db[settings.QUEUE_COLLECTION].create_indexes([
+        await _safe_create(settings.QUEUE_COLLECTION, [
             IndexModel(
                 [("content_id", ASCENDING)],
                 name="unique_active_content",
@@ -137,7 +195,7 @@ class DatabaseManager:
         ])
 
         # ── Vault ─────────────────────────────────────────────────────────────
-        await db[settings.VAULT_COLLECTION].create_indexes([
+        await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
             IndexModel(
                 [("vault_chat_id", ASCENDING), ("vault_message_id", ASCENDING)],
@@ -165,14 +223,13 @@ class DatabaseManager:
         ])
 
         # ── Pending submissions ───────────────────────────────────────────────
-        await db[settings.PENDING_COLLECTION].create_indexes([
+        await _safe_create(settings.PENDING_COLLECTION, [
             IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="pending_expiry_ttl",
                 expireAfterSeconds=0,
             ),
-            # FIX 11: index on submitter_user_id for admin queries
             IndexModel(
                 [("submitter_user_id", ASCENDING)],
                 name="pending_by_submitter",
@@ -181,7 +238,7 @@ class DatabaseManager:
         ])
 
         # ── Subscriptions ─────────────────────────────────────────────────────
-        await db["subscriptions"].create_indexes([
+        await _safe_create("subscriptions", [
             IndexModel([("user_id", ASCENDING)], name="sub_user_unique", unique=True),
             IndexModel(
                 [("status", ASCENDING), ("expires_at", ASCENDING)],
@@ -206,7 +263,7 @@ class DatabaseManager:
         ])
 
         # ── Memberships ───────────────────────────────────────────────────────
-        await db["memberships"].create_indexes([
+        await _safe_create("memberships", [
             IndexModel(
                 [("user_id", ASCENDING), ("chat_id", ASCENDING)],
                 name="membership_unique",
@@ -230,7 +287,7 @@ class DatabaseManager:
         ])
 
         # ── Invites ───────────────────────────────────────────────────────────
-        await db["invites"].create_indexes([
+        await _safe_create("invites", [
             IndexModel([("token", ASCENDING)], name="invite_token_unique", unique=True),
             IndexModel(
                 [("created_by", ASCENDING), ("status", ASCENDING)],
@@ -248,7 +305,6 @@ class DatabaseManager:
                 background=True,
                 sparse=True,
             ),
-            # FIX 10: index on intended_user_id for efficient identity verification queries
             IndexModel(
                 [("intended_user_id", ASCENDING), ("chat_id", ASCENDING), ("status", ASCENDING)],
                 name="invite_intended_user",
@@ -257,7 +313,7 @@ class DatabaseManager:
         ])
 
         # ── Activity ──────────────────────────────────────────────────────────
-        await db["activity"].create_indexes([
+        await _safe_create("activity", [
             IndexModel(
                 [("user_id", ASCENDING), ("timestamp", DESCENDING)],
                 name="activity_user_time",
@@ -278,17 +334,17 @@ class DatabaseManager:
                 [("timestamp", ASCENDING)],
                 name="activity_ttl",
                 background=True,
-                expireAfterSeconds=7776000,  # 90-day retention
+                expireAfterSeconds=7776000,
             ),
         ])
 
-        # ── Bot config (rules, welcome messages, etc.) ────────────────────────
-        await db["bot_config"].create_indexes([
+        # ── Bot config ────────────────────────────────────────────────────────
+        await _safe_create("bot_config", [
             IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
         ])
 
         # ── User topics ───────────────────────────────────────────────────────
-        await db["user_topics"].create_indexes([
+        await _safe_create("user_topics", [
             IndexModel(
                 [("user_id", ASCENDING), ("topic_type", ASCENDING)],
                 name="user_topic_unique",
@@ -303,7 +359,7 @@ class DatabaseManager:
         ])
 
         # ── Support messages ──────────────────────────────────────────────────
-        await db["support_messages"].create_indexes([
+        await _safe_create("support_messages", [
             IndexModel(
                 [("topic_id", ASCENDING)],
                 name="support_msg_topic",
@@ -314,13 +370,11 @@ class DatabaseManager:
                 name="support_msg_user",
                 background=True,
             ),
-            # FIX 11: compound index for user+direction queries
             IndexModel(
                 [("user_id", ASCENDING), ("direction", ASCENDING), ("created_at", DESCENDING)],
                 name="support_user_direction",
                 background=True,
             ),
-            # FIX 11: unique sparse index on hub_message_id + direction
             IndexModel(
                 [("hub_message_id", ASCENDING), ("direction", ASCENDING)],
                 name="support_hub_msg_unique",
@@ -330,7 +384,7 @@ class DatabaseManager:
         ])
 
         # ── Moderation audit ──────────────────────────────────────────────────
-        await db["moderation_audit"].create_indexes([
+        await _safe_create("moderation_audit", [
             IndexModel(
                 [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
                 name="audit_by_admin",
@@ -351,7 +405,7 @@ class DatabaseManager:
         ])
 
         # ── Consent records ───────────────────────────────────────────────────
-        await db["consent_records"].create_indexes([
+        await _safe_create("consent_records", [
             IndexModel(
                 [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
                 name="consent_user_type_active",
@@ -360,13 +414,12 @@ class DatabaseManager:
         ])
 
         # ── Creator profiles ──────────────────────────────────────────────────
-        await db["creator_profiles"].create_indexes([
+        await _safe_create("creator_profiles", [
             IndexModel(
                 [("user_id", ASCENDING)],
                 name="creator_profile_user_unique",
                 unique=True,
             ),
-            # FIX 11: index on status for admin queries (active/suspended/banned creators)
             IndexModel(
                 [("status", ASCENDING)],
                 name="creator_by_status",
@@ -374,8 +427,8 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: submissions collection ────────────────────────────────────────
-        await db["submissions"].create_indexes([
+        # ── M3: submissions ───────────────────────────────────────────────────
+        await _safe_create("submissions", [
             IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
                 name="submissions_status_created",
@@ -384,8 +437,8 @@ class DatabaseManager:
             IndexModel([("user_id", ASCENDING)], name="submissions_user", background=True),
         ])
 
-        # ── M3: takedown_requests collection ─────────────────────────────────
-        await db["takedown_requests"].create_indexes([
+        # ── M3: takedown_requests ─────────────────────────────────────────────
+        await _safe_create("takedown_requests", [
             IndexModel(
                 [("content_id", ASCENDING), ("status", ASCENDING)],
                 name="takedown_content_status",
@@ -400,8 +453,8 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: floodwait_tracking collection ─────────────────────────────────
-        await db["floodwait_tracking"].create_indexes([
+        # ── M3: floodwait_tracking ────────────────────────────────────────────
+        await _safe_create("floodwait_tracking", [
             IndexModel(
                 [("target_id", ASCENDING), ("recorded_at", DESCENDING)],
                 name="fw_target_time",
@@ -411,12 +464,12 @@ class DatabaseManager:
                 [("recorded_at", ASCENDING)],
                 name="fw_ttl",
                 background=True,
-                expireAfterSeconds=2592000,  # 30-day retention
+                expireAfterSeconds=2592000,
             ),
         ])
 
-        # ── M3: distribution_jobs (metrics history alias) ─────────────────────
-        await db["distribution_jobs"].create_indexes([
+        # ── M3: distribution_jobs ─────────────────────────────────────────────
+        await _safe_create("distribution_jobs", [
             IndexModel([("content_id", ASCENDING)], name="distjob_content", background=True),
             IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
@@ -425,8 +478,8 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: vault_items additional indexes (checksum, cooldown, submitter) ─
-        await db[settings.VAULT_COLLECTION].create_indexes([
+        # ── M3: vault_items checksum/cooldown ─────────────────────────────────
+        await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel(
                 [("checksum", ASCENDING)],
                 name="vault_checksum_unique",
