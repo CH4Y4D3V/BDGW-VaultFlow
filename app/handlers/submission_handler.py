@@ -22,7 +22,6 @@ from app.services import submission_service
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-_redis = get_redis()
 
 _album_buffer: dict[str, list[Message]] = defaultdict(list)
 _album_tasks: dict[str, asyncio.Task] = {}
@@ -250,8 +249,9 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     user_id = callback.from_user.id if callback.from_user else 0
     
     # ── Anti-Spam / Debounce ──
+    redis = get_redis()
     spam_key = f"menu:spam:{user_id}"
-    if await _redis.exists(spam_key):
+    if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
     await _redis.set(spam_key, "1", ex=1)

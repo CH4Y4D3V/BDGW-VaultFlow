@@ -76,8 +76,10 @@ class AppLifecycle:
             await self._bot.start()
             me = await self._bot.get_me()
             logger.info(
-                "Telegram client connected",
-                extra={"ctx_bot_username": me.username, "ctx_bot_id": me.id},
+                "boot_stage", 
+                stage="pyrogram_connected", 
+                bot_username=me.username,
+                bot_id=me.id
             )
 
             # FIX 8: Cache the bot's own user_id so group_handler can check
@@ -88,7 +90,8 @@ class AppLifecycle:
             await self._verify_channel_access()
 
             # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
-            self._audit_handler_registration()
+            total_handlers = self._audit_handler_registration()
+            logger.info("boot_stage", stage="handlers_registered", count=total_handlers)
 
         except (Exception, SystemExit):
             logger.error("Failed to start Pyrogram client", exc_info=True)
@@ -170,7 +173,7 @@ class AppLifecycle:
             )
             sys.exit(1)
 
-    def _audit_handler_registration(self) -> None:
+    def _audit_handler_registration(self) -> int:
         """
         Emit a detailed breakdown of all registered Pyrogram handlers.
         """
@@ -184,7 +187,7 @@ class AppLifecycle:
                     "STARTUP AUDIT: bot.dispatcher is None — "
                     "Pyrogram plugin system may not have initialised"
                 )
-                return
+                return 0
 
             groups = getattr(dispatcher, "groups", None)
             if groups is None:
@@ -192,7 +195,7 @@ class AppLifecycle:
                     "STARTUP AUDIT: bot.dispatcher.groups is None — "
                     "cannot verify handler registration"
                 )
-                return
+                return 0
 
             for group_id, handlers in groups.items():
                 handler_names = []
@@ -213,7 +216,7 @@ class AppLifecycle:
                 extra={"ctx_error": str(e)},
                 exc_info=True,
             )
-            return
+            return 0
 
         if total_handlers == 0:
             logger.critical(
@@ -253,6 +256,8 @@ class AppLifecycle:
                 total_handlers,
                 extra={"ctx_total": total_handlers},
             )
+
+        return total_handlers
 
     async def stop(self) -> None:
         logger.info("Initiating graceful shutdown...")

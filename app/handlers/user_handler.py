@@ -20,11 +20,18 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_sub_repo = SubscriptionRepository(DatabaseManager.get_db())
-_queue_repo = QueueRepository(DatabaseManager.get_db())
-_onboarding_service = OnboardingService(_sub_repo)
+# ── Global Instances (Lazy Loaded) ───────────────────────────────────────────
+
+def _get_sub_repo():
+    return SubscriptionRepository(DatabaseManager.get_db())
+
+def _get_queue_repo():
+    return QueueRepository(DatabaseManager.get_db())
+
+def _get_onboarding_service():
+    return OnboardingService(_get_sub_repo())
+
 _sub_service = SubscriptionService()
-_redis = get_redis()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
@@ -200,12 +207,13 @@ async def handle_start(client: Client, message: Message) -> None:
         user_id = message.from_user.id
 
         # ── Anti-Spam / Cooldown ──
+        redis = get_redis()
         spam_key = f"onboarding:spam:{user_id}"
-        if await _redis.exists(spam_key):
+        if await redis.exists(spam_key):
             # Lightweight refresh UX: brief toast or ignore
             # We ignore to avoid cluttering the chat with repeated /start responses
             return
-        await _redis.set(spam_key, "1", ex=5)  # 5 second cooldown
+        await redis.set(spam_key, "1", ex=5)  # 5 second cooldown
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
@@ -213,7 +221,8 @@ async def handle_start(client: Client, message: Message) -> None:
             await handle_mystatus(client, message)
             return
 
-        text, keyboard = await _onboarding_service.render_onboarding(
+        onboarding_service = _get_onboarding_service()
+        text, keyboard = await onboarding_service.render_onboarding(
             user_id, 
             message.from_user.first_name or "Creator"
         )
@@ -239,18 +248,20 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
     user_id = callback_query.from_user.id
     
     # ── Anti-Spam / Debounce ──
+    redis = get_redis()
     spam_key = f"menu:spam:{user_id}"
-    if await _redis.exists(spam_key):
+    if await redis.exists(spam_key):
         await callback_query.answer("Slow down! Processing...", show_alert=False)
         return
-    await _redis.set(spam_key, "1", ex=1)  # 1 second debounce
+    await redis.set(spam_key, "1", ex=1)  # 1 second debounce
     
     text = ""
     keyboard = None
 
     try:
+        onboarding_service = _get_onboarding_service()
         if action == "home":
-            text, keyboard = await _onboarding_service.render_onboarding(
+            text, keyboard = await onboarding_service.render_onboarding(
                 user_id, 
                 callback_query.from_user.first_name or "Creator"
             )
@@ -270,7 +281,8 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             keyboard = KeyboardBuilder.build_premium_conversion()
 
         elif action == "queue":
-            jobs = await _queue_repo.get_user_queue(user_id)
+            queue_repo = _get_queue_repo()
+            jobs = await queue_repo.get_user_queue(user_id)
             if not jobs:
                 text = (
                     "⏳ <b>Active Queue</b>\n\n"

@@ -32,7 +32,6 @@ from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-_redis = get_redis()
 
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
@@ -81,8 +80,9 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     user_id = callback.from_user.id if callback.from_user else 0
     
     # ── Anti-Spam / Debounce ──
+    redis = get_redis()
     spam_key = f"menu:spam:{user_id}"
-    if await _redis.exists(spam_key):
+    if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
     await _redis.set(spam_key, "1", ex=1)
