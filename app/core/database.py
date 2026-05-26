@@ -83,22 +83,45 @@ class DatabaseManager:
 
         async def _safe_create(collection_name: str, indexes: list[IndexModel]) -> None:
             logger.debug(f"Verifying indexes for collection: {collection_name}")
+            
+            # ── RC-11: Surgical Index Reconciliation ──────────────────────────
+            # Specifically for the 'unique_active_content' index which often changes partial expressions
+            if collection_name == settings.QUEUE_COLLECTION:
+                try:
+                    existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
+                    target_name = "unique_active_content"
+                    
+                    # Find if target exists
+                    found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
+                    if found_index:
+                        # Identify expected definition
+                        expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
+                        if expected:
+                            expected_partial = expected.document.get("partialFilterExpression")
+                            actual_partial = found_index.get("partialFilterExpression")
+                            
+                            if actual_partial != expected_partial:
+                                logger.warning(
+                                    f"Index definition mismatch for {target_name}. "
+                                    f"Actual: {actual_partial} vs Expected: {expected_partial}. "
+                                    "Surgically recreating..."
+                                )
+                                await db[collection_name].drop_index(target_name)
+                                logger.info(f"Dropped conflicting index: {target_name}")
+                except Exception as e:
+                    logger.warning(f"Surgical index audit failed (non-fatal): {e}")
+
             try:
                 await db[collection_name].create_indexes(indexes)
                 logger.debug(f"Successfully verified indexes for {collection_name}")
             except Exception as e:
-                # RC-10 FIX: Catch index specification mismatches.
-                # If an index exists with the same name but different options (e.g. unique=True changed),
-                # MongoDB throws an OperationFailure. We attempt to resolve by dropping the offending index.
+                # RC-10 FIX: Catch other index specification mismatches.
                 error_str = str(e)
                 if "already exists with different options" in error_str or "IndexOptionsConflict" in error_str:
                     logger.warning(
                         f"Index conflict detected in {collection_name}. Attempting recovery...",
                         extra={"ctx_collection": collection_name, "ctx_error": error_str}
                     )
-                    # We can't easily know which index failed from the bulk call without parsing the message,
-                    # so we drop all indexes for this collection (except _id) and recreate.
-                    # This is safe for startup/maintenance windows.
                     try:
                         await db[collection_name].drop_indexes()
                         await db[collection_name].create_indexes(indexes)
