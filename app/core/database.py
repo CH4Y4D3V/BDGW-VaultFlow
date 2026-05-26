@@ -406,24 +406,6 @@ class DatabaseManager:
                 sparse=True,
             ),
         ])
-            IndexModel(
-                [("media_group_id", ASCENDING)],
-                name="vault_media_group",
-                background=True,
-                sparse=True,
-            ),
-            IndexModel(
-                [("status", ASCENDING), ("moderation_destination", ASCENDING), ("created_at", ASCENDING)],
-                name="vault_dist_query",
-                background=True,
-            ),
-            IndexModel(
-                [("file_unique_id", ASCENDING)],
-                name="vault_file_unique",
-                background=True,
-                sparse=True,
-            ),
-        ])
 
         # ── Pending submissions ───────────────────────────────────────────────
         await _safe_create(settings.PENDING_COLLECTION, [
