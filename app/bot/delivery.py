@@ -14,7 +14,7 @@ from pyrogram.client import Client
 from pyrogram.errors import FloodWait, RPCError
 
 from app.bot.client import get_bot
-from app.core.config import settings
+from app.config.settings import settings
 from app.core.exceptions import (
     FloodWaitError,
     DispatcherError,
