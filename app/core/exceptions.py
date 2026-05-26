@@ -1,54 +1,72 @@
 class VaultFlowBaseError(Exception):
-    """Base for all VaultFlow distribution engine errors."""
+    pass
 
 
-class QueueLockError(VaultFlowBaseError):
-    """Failed to acquire distributed lock."""
+class RetryableError(VaultFlowBaseError):
+    pass
 
 
-class StaleLockError(VaultFlowBaseError):
-    """Lock is stale and was forcefully released."""
+class PermanentJobError(VaultFlowBaseError):
+    pass
 
 
-class JobNotFoundError(VaultFlowBaseError):
-    """Referenced job does not exist in the queue."""
+class QueueLockError(RetryableError):
+    pass
 
 
-class MaxRetriesExceededError(VaultFlowBaseError):
-    """Job has exhausted all retry attempts."""
+class StaleLockError(RetryableError):
+    pass
 
 
-class FloodWaitError(VaultFlowBaseError):
-    """Telegram FloodWait encountered during dispatch."""
+class JobNotFoundError(PermanentJobError):
+    pass
 
+
+class MaxRetriesExceededError(PermanentJobError):
+    pass
+
+
+class FloodWaitError(RetryableError):
     def __init__(self, seconds: int, message: str = ""):
         self.seconds = seconds
-        super().__init__(message or f"FloodWait: must wait {seconds}s")
+        super().__init__(message or f"FloodWait: wait {seconds}s")
 
 
-class WatermarkProcessingError(VaultFlowBaseError):
-    """FFmpeg watermark processing failed."""
+class WatermarkProcessingError(PermanentJobError):
+    pass
 
 
 class FFmpegTimeoutError(WatermarkProcessingError):
-    """FFmpeg process exceeded allowed timeout."""
+    pass
 
 
 class FFmpegNotFoundError(WatermarkProcessingError):
-    """FFmpeg binary not found on system."""
+    pass
 
 
-class MediaFileNotFoundError(VaultFlowBaseError):
-    """Source media file does not exist."""
+class MediaFileNotFoundError(PermanentJobError):
+    pass
 
 
-class DispatcherError(VaultFlowBaseError):
-    """Generic dispatcher failure."""
+class DispatcherError(RetryableError):
+    pass
 
 
-class RateLimitExceededError(VaultFlowBaseError):
-    """Internal rate limit exceeded; caller should back off."""
+class RateLimitExceededError(RetryableError):
+    pass
 
 
-class DuplicateJobError(VaultFlowBaseError):
-    """Job for this content/target combination already exists."""
+class DuplicateJobError(PermanentJobError):
+    pass
+
+
+class VaultReferenceMissingError(PermanentJobError):
+    pass
+
+
+class InvalidQueueJobError(PermanentJobError):
+    pass
+
+
+class VaultMessageDeletedError(PermanentJobError):
+    pass

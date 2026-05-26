@@ -23,17 +23,15 @@ class JobStatus(str, Enum):
 
 
 class ModerationState(str, Enum):
-    """Explicit moderation state machine — replaces boolean flags."""
-    PENDING = "pending"       # Awaiting moderator action
-    APPROVED = "approved"     # Approved for immediate posting
-    QUEUED = "queued"         # Approved for scheduled distribution
-    REJECTED = "rejected"     # Rejected — not archived, not distributed
-    POSTED = "posted"         # Successfully delivered to destination
-    FAILED = "failed"         # Delivery or processing failed
+    PENDING = "pending"
+    APPROVED = "approved"
+    QUEUED = "queued"
+    REJECTED = "rejected"
+    POSTED = "posted"
+    FAILED = "failed"
 
 
 class ModerationDestination(str, Enum):
-    """Distribution destination selected by moderator."""
     NSFW = "nsfw"
     PREMIUM = "premium"
 
@@ -42,7 +40,6 @@ class DistributionPriority(int, Enum):
     LOW = 0
     NORMAL = 1
     HIGH = 2
-    # Moderator-queued content gets priority over random scheduler content
     MODERATED = 3
 
 
@@ -56,48 +53,76 @@ class WatermarkPosition(str, Enum):
 
 class QueueJob(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
+
+    # ─────────────────────────────
+    # Stable identifiers
+    # ─────────────────────────────
+
     content_id: str
+
     source_channel_id: str
+    source_message_id: Optional[int] = None
+
+    vault_chat_id: int
+    vault_message_id: int
+
+    media_group_id: Optional[str] = None
+
+    # ─────────────────────────────
+    # Distribution
+    # ─────────────────────────────
+
     target_channel_ids: List[str]
+
+    # ─────────────────────────────
+    # Media
+    # ─────────────────────────────
+
     media_type: MediaType
+
     media_file_id: Optional[str] = None
+    media_unique_id: Optional[str] = None
+
     media_path: Optional[str] = None
     caption: Optional[str] = None
+
+    # ─────────────────────────────
+    # Queue execution
+    # ─────────────────────────────
+
     priority: DistributionPriority = DistributionPriority.NORMAL
+
     status: JobStatus = JobStatus.PENDING
+
+    retry_count: int = 0
     max_retries: int = 3
+
     execute_after: Optional[datetime] = None
-    # For moderator-queued content: must dispatch before this deadline
     queue_deadline: Optional[datetime] = None
+
+    # ─────────────────────────────
+    # Delivery state
+    # ─────────────────────────────
+
+    delivered_targets: List[str] = Field(default_factory=list)
+
+    failed_targets: List[dict] = Field(default_factory=list)
+
+    locked_by: Optional[str] = None
+    locked_at: Optional[datetime] = None
+
+    completed_at: Optional[datetime] = None
+    failed_at: Optional[datetime] = None
+
+    # ─────────────────────────────
+    # Watermark
+    # ─────────────────────────────
+
     watermark_required: bool = False
     watermark_config: Optional[dict] = None
+
+    # ─────────────────────────────
+    # Metadata
+    # ─────────────────────────────
+
     metadata: dict = Field(default_factory=dict)
-
-
-class DeadLetterJob(BaseModel):
-    original_job_id: str
-    content_id: str
-    source_channel_id: str
-    target_channel_ids: List[str]
-    failure_reason: str
-    retry_history: List[dict] = Field(default_factory=list)
-    final_error: str
-    dead_at: datetime
-    metadata: dict = Field(default_factory=dict)
-
-
-class QueueMetrics(BaseModel):
-    pending_count: int = 0
-    processing_count: int = 0
-    completed_count: int = 0
-    failed_count: int = 0
-    dead_count: int = 0
-
-
-class DistributionResult(BaseModel):
-    job_id: str
-    target_id: str
-    success: bool
-    error: Optional[str] = None
-    floodwait_seconds: Optional[int] = None
-    delivered_at: Optional[datetime] = None
