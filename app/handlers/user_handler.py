@@ -31,10 +31,10 @@ def _get_flood_buffer() -> int:
     return getattr(settings, "FLOODWAIT_EXTRA_BUFFER", 2)
 
 def _get_sub_repo():
-    return SubscriptionRepository(DatabaseManager.get_db())
+    return SubscriptionRepository()
 
 def _get_queue_repo():
-    return QueueRepository(DatabaseManager.get_db())
+    return QueueRepository()
 
 def _get_onboarding_service():
     return OnboardingService(_get_sub_repo())
