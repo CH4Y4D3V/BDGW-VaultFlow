@@ -1,3 +1,4 @@
+import asyncio
 import random
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -7,9 +8,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.triggers.interval import IntervalTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import DuplicateKeyError
 
 from app.config import settings
-from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority
+from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority, WatermarkState
 from app.core.exceptions import DuplicateJobError
 from app.repositories.queue_repository import QueueRepository
 from app.distribution.fairness import FairnessSelector
@@ -50,6 +52,13 @@ class DistributionScheduler:
     async def _acquire_lock(self) -> bool:
         """Acquire distributed singleton lock for the scheduler."""
         lock_key = "scheduler_active_singleton"
+        
+        # ── RC-10 FIX: Clear stale lock on restart ──
+        try:
+            await self._locks.delete_many({"lock_key": lock_key})
+        except Exception:
+            pass
+
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
         try:
             await self._locks.insert_one({
@@ -83,7 +92,40 @@ class DistributionScheduler:
         logger.info("Scheduler lock acquired. Starting integrity scan...")
         await self._run_startup_integrity_scan()
 
-        self.setup_jobs()
+        # ── RC-10 FIX: Inline job registration ──
+        self._scheduler.add_job(
+            self._distribution_cycle,
+            trigger=IntervalTrigger(seconds=settings.SCHEDULER_INTERVAL_SECONDS),
+            id="distribution_cycle",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        self._scheduler.add_job(
+            self._stale_lock_sweep,
+            trigger=IntervalTrigger(seconds=120),
+            id="stale_lock_sweep",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        self._scheduler.add_job(
+            self._deadline_sweep,
+            trigger=IntervalTrigger(seconds=300),
+            id="deadline_sweep",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        self._scheduler.add_job(
+            self._collect_metrics,
+            trigger=IntervalTrigger(seconds=60),
+            id="collect_metrics",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
         self._scheduler.start()
         self._started = True
         self._lock_task = asyncio.create_task(self._extend_lock())
@@ -180,7 +222,12 @@ class DistributionScheduler:
                 if remaining <= 0:
                     continue
 
-                pending = await self._queue_repo.get_channel_pending_count(source_id)
+                # ── RC-10 FIX: Direct count query ──
+                pending = await self._db[settings.QUEUE_COLLECTION].count_documents({
+                    "source_channel_id": source_id,
+                    "status": {"$in": ["pending", "watermarking", "ready", "locked", "delivering"]}
+                })
+                
                 slots = min(settings.MAX_JOBS_PER_CYCLE - pending, remaining)
                 if slots <= 0:
                     continue
@@ -270,9 +317,18 @@ class DistributionScheduler:
             logger.error(f"Stale lock sweep FAILED: {e}")
 
     async def _deadline_sweep(self) -> None:
+        """
+        RC-10 FIX: Direct DB query for deadline exceeded jobs
+        (Replacing non-existent QueueRepository method)
+        """
         try:
-            overdue = await self._queue_repo.get_deadline_exceeded_jobs()
-            for job in overdue:
+            now = datetime.now(timezone.utc)
+            queue = self._db[settings.QUEUE_COLLECTION]
+            cursor = queue.find({
+                "status": {"$in": [JobStatus.PENDING, JobStatus.LOCKED, JobStatus.PROCESSING, JobStatus.WATERMARKING]},
+                "queue_deadline": {"$lt": now, "$ne": None},
+            })
+            async for job in cursor:
                 await self._queue_repo.move_to_dead_letter(str(job["_id"]), "deadline_exceeded")
         except Exception as e:
             logger.error(f"Deadline sweep FAILED: {e}")

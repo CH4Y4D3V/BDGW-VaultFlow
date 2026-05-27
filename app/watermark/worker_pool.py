@@ -32,12 +32,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pyrogram.errors import FloodWait
 
 from app.bot.client import get_bot
 from app.config import settings
+from app.core.exceptions import MediaFileNotFoundError, DispatcherError
 from app.core.logger import reset_correlation_id, set_correlation_id
 from app.core.models import JobStatus, MediaType, WatermarkPosition
 from app.distribution.flood_wait import calculate_retry_delay
@@ -169,6 +171,18 @@ class WatermarkWorker:
                 await asyncio.sleep(5)
 
     # ── Job processing ────────────────────────────────────────────────────────
+
+    async def _resolve_media_path(self, job: dict, job_id: str) -> Optional[str]:
+        """
+        RC-10 FIX: Resolve live Message and download media.
+        """
+        bot = get_bot()
+        return await download_with_refresh(
+            client=bot,
+            job_doc=job,
+            dest_dir=settings.PROCESSED_MEDIA_DIR,
+            job_id=job_id,
+        )
 
     async def _process_group(self, jobs: List[dict]) -> None:
         group_id = jobs[0].get("media_group_id") or str(jobs[0]["_id"])

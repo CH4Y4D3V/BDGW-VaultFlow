@@ -287,7 +287,27 @@ class QueueRepository:
 
         return claimed
 
-        return claimed
+    async def get_recently_posted_content_ids(
+        self, source_channel_id: str, hours: int = 168
+    ) -> set:
+        """
+        RC-10 FIX: Fetch set of content IDs posted in last X hours.
+        Used by FairnessSelector.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cursor = self._queue.find(
+            {
+                "source_channel_id": source_channel_id,
+                "status": JobStatus.COMPLETED,
+                "completed_at": {"$gte": cutoff},
+            },
+            {"content_id": 1},
+        )
+        ids = set()
+        async for doc in cursor:
+            if doc.get("content_id"):
+                ids.add(doc["content_id"])
+        return ids
 
     # ─── State Transitions ────────────────────────────────────────────────────
 

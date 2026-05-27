@@ -72,61 +72,59 @@ class AppLifecycle:
             logger.exception("BOOT FAILURE: Channel seeding failed")
             sys.exit(1)
 
-            # 3. Telegram Client
-            try:
-                logger.info("Starting Pyrogram client...")
-                await self._bot.start()
-                me = await self._bot.get_me()
-                set_bot_id(me.id)
+        # 3. Telegram Client
+        try:
+            logger.info("Starting Pyrogram client...")
+            await self._bot.start()
+            me = await self._bot.get_me()
+            
+            # FIX 8: Cache the bot's own user_id so group_handler can check
+            # message.from_user.id == get_bot_id() without calling get_me() per message.
+            set_bot_id(me.id)
 
-                try:
-                    await self._verify_channel_access()
-                except Exception as verify_err:
-                    logger.warning(
-                        "channel_access_check_failed",
-                        error=str(verify_err),
-                        note="Continuing boot in degraded state"
-                    )
+            # Verify bot can access critical channels
+            await self._verify_channel_access()
 
-                total_handlers = self._audit_handler_registration()
-                logger.info("boot_stage",
-                    stage="pyrogram_connected",
-                    bot_username=me.username,
-                    total_handlers=total_handlers
-                )
-
-            except Exception as e:
-                logger.exception(
-                    "Failed to start Pyrogram client",
-                    error_type=type(e).__name__,
-                    error_message=str(e)
-                )
-                raise
-
-            # 4. Distribution Engine
-            from app.bot.delivery import execute_telegram_delivery
-            from app.bot.provider import fetch_distribution_content
-
-            self._engine = DistributionEngine(
-                delivery_callback=execute_telegram_delivery,
-                content_provider_callback=fetch_distribution_content,
+            # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
+            total_handlers = self._audit_handler_registration()
+            
+            logger.info(
+                "Pyrogram connected", 
+                extra={"ctx_bot_username": me.username, "ctx_total_handlers": total_handlers}
             )
 
-            try:
-                await self._engine.start()
-            except Exception as e:
-                logger.exception(
-                    "Failed to start Distribution Engine",
-                    error_type=type(e).__name__,
-                    error_message=str(e)
-                )
-                raise
+        except Exception as e:
+            logger.exception(
+                "Failed to start Pyrogram client",
+                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)}
+            )
+            await DatabaseManager.disconnect()
+            sys.exit(1)
 
-            try:
-                await self._subscription_worker.start(bot=self._bot)
-            except Exception:
-                logger.error("Failed to start Subscription Worker", exc_info=True)
-                self._subscription_worker = None
+        # 4. Distribution Engine
+        from app.bot.delivery import execute_telegram_delivery
+        from app.bot.provider import fetch_distribution_content
+
+        self._engine = DistributionEngine(
+            delivery_callback=execute_telegram_delivery,
+            content_provider_callback=fetch_distribution_content,
+        )
+
+        try:
+            await self._engine.start()
+        except Exception as e:
+            logger.exception(
+                "Failed to start Distribution Engine",
+                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)}
+            )
+            raise
+
+        try:
+            self._subscription_worker = SubscriptionWorker()
+            await self._subscription_worker.start(bot=self._bot)
+        except Exception:
+            logger.error("Failed to start Subscription Worker", exc_info=True)
+            self._subscription_worker = None
 
         # 6. Referral System Integration
         try:

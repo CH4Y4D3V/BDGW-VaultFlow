@@ -32,7 +32,7 @@ async def async_main() -> None:
         # Address already in use.
         await lifecycle.start()
 
-        logger.info("boot_stage", stage="idle_entered")
+        logger.info("VaultFlow idle — waiting for shutdown signal.")
         logger.info("Main loop running. Waiting for shutdown signal.")
         await stop_event.wait()
     except asyncio.CancelledError:

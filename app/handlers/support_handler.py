@@ -85,7 +85,7 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
-    await _redis.set(spam_key, "1", ex=1)
+    await redis.set(spam_key, "1", ex=1)
     
     logger.info(
         "HANDLER: handle_support_menu entered",

@@ -1,288 +1,363 @@
-gemini -p "
-You are implementing a production referral system for BDGW VaultFlow.
-This is a NEW feature, NOT a bug fix. The existing runtime is stable.
-Do NOT touch any existing files unless explicitly listed below.
+You are fixing a production Python Telegram bot (BDGW VaultFlow) that is crash-looping on Railway. 
+Read every file mentioned before touching anything. Make surgical fixes only — no rewrites, no 
+architecture changes, no new dependencies. Preserve all existing comments and docstrings.
 
-## STACK
-- Python 3.12, Pyrogram v2, Motor (async MongoDB), APScheduler, Structlog
-- NO Redis. NO new infrastructure dependencies.
+---
 
-## WHAT YOU ARE BUILDING
-A referral system with these components:
-1. MongoDB collections (referrals + referral_wallets)
-2. Repository layer
-3. Service layer
-4. APScheduler background jobs
-5. Handler integration points (only /start and a referral status command)
+## VERIFIED CRASH (fix this first, it is blocking all other fixes)
 
-━━━━━━━━━━━━━━━━━━━━━━
-FILE STRUCTURE TO CREATE
-━━━━━━━━━━━━━━━━━━━━━━
+FILE: main_bot.py — line 35
 
-app/referral/
-    __init__.py           (empty)
-    models.py             (dataclasses/enums only, no DB logic)
-    repository.py         (all MongoDB operations, Motor async)
-    service.py            (business logic only, calls repository)
-    scheduler.py          (APScheduler jobs only, delegates to service)
-    handlers.py           (Pyrogram handlers, thin — calls service only)
+PROBLEM:
+  logger.info("boot_stage", stage="idle_entered")
+  get_logger() returns stdlib logging.Logger. Stdlib loggers reject unknown kwargs.
+  TypeError: Logger._log() got an unexpected keyword argument 'stage'
+  This crashes on every boot before Pyrogram even starts.
 
-━━━━━━━━━━━━━━━━━━━━━━
-MODELS (app/referral/models.py)
-━━━━━━━━━━━━━━━━━━━━━━
+FIX: Replace that single line with:
+  logger.info("VaultFlow idle — waiting for shutdown signal.")
 
-Create these dataclasses using Python dataclasses (not Pydantic):
+---
 
-ReferralStatus enum:
-    PENDING = 'pending'
-    QUALIFIED = 'qualified'
-    INVALIDATED = 'invalidated'
+## CRITICAL: lifecycle.py — entire Telegram startup is dead code
 
-ReferralDocument dataclass:
-    referrer_user_id: int
-    referred_user_id: int
-    status: ReferralStatus
-    qualified: bool
-    channel_member: bool
-    bot_active: bool
-    created_at: datetime
-    qualified_at: Optional[datetime]
-    invalidated_at: Optional[datetime]
+FILE: app/core/lifecycle.py — AppLifecycle.start()
 
-ReferralWallet dataclass:
-    user_id: int
-    points_balance: int
-    total_earned: int
-    total_spent: int
-    active_referrals: int
+PROBLEM:
+  Read the file. The channel seeding block is:
+    try:
+        channel_service = ChannelService()
+        await channel_service.seed_channels()
+    except Exception:
+        logger.exception("BOOT FAILURE: Channel seeding failed")
+        sys.exit(1)
 
-━━━━━━━━━━━━━━━━━━━━━━
-REPOSITORY (app/referral/repository.py)
-━━━━━━━━━━━━━━━━━━━━━━
+        # 3. Telegram Client   ← THIS IS INSIDE THE EXCEPT BLOCK
+        try:
+            await self._bot.start()
+            ...
 
-Class: ReferralRepository
+  Everything from "# 3. Telegram Client" through the subscription worker start
+  is indented ONE LEVEL TOO DEEP — it lives inside the except block, after sys.exit(1).
+  sys.exit(1) raises SystemExit making all of it unreachable. The bot connects to 
+  MongoDB, seeds channels, logs "VaultFlow fully started", then immediately crashes 
+  on line 35. Pyrogram NEVER starts. No handlers are ever registered.
 
-Constructor: __init__(self, db: AsyncIOMotorDatabase)
+FIX:
+  Dedent the entire block from "# 3. Telegram Client" through 
+  "await self._subscription_worker.start(bot=self._bot)" (and its try/except wrapper)
+  so it is at the SAME indentation level as the channel seeding try/except block above it.
+  The referral scheduler block (# 6) is already at the correct level — do not touch it.
 
-Collections used:
-    self._referrals = db['referrals']
-    self._wallets = db['referral_wallets']
+  After fixing indentation, also fix these stdlib logger calls in the now-reachable block
+  (they use structlog-style kwargs that will crash the same way as line 35):
 
-Methods to implement (ALL async):
+  WRONG:
+    logger.warning("channel_access_check_failed", error=str(verify_err), note="...")
+    logger.info("boot_stage", stage="pyrogram_connected", bot_username=me.username, total_handlers=total_handlers)
+    logger.exception("Failed to start Pyrogram client", error_type=type(e).__name__, error_message=str(e))
+    logger.exception("Failed to start Distribution Engine", error_type=type(e).__name__, error_message=str(e))
 
-    async def create_indexes(self) -> None
-        Index 1: unique index on referred_user_id (prevents double referral at DB level)
-        Index 2: compound index on (referrer_user_id, status) for wallet sync queries
-        Index 3: TTL index on created_at with expireAfterSeconds=172800 (48hrs) WHERE status=PENDING only
-            NOTE: MongoDB TTL only supports single-field. Use a partial filter expression.
-        Index 4: index on (status, created_at) for the qualification background job
+  CORRECT replacements:
+    logger.warning("Channel access check failed — continuing in degraded state", extra={"ctx_error": str(verify_err)})
+    logger.info("Pyrogram connected", extra={"ctx_bot_username": me.username, "ctx_total_handlers": total_handlers})
+    logger.exception("Failed to start Pyrogram client", extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)})
+    logger.exception("Failed to start Distribution Engine", extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)})
 
-    async def create_pending(self, referrer_id: int, referred_id: int) -> bool
-        Insert pending referral document.
-        Return True on success, False if referred_user_id already exists (DuplicateKeyError).
-        Import: from pymongo.errors import DuplicateKeyError
-        Use insert_one with the full ReferralDocument fields.
+---
 
-    async def get_referral_by_referred(self, referred_id: int) -> Optional[dict]
-        Return the referral document for a referred user or None.
+## CRITICAL: lifecycle.py — subscription worker never instantiated
 
-    async def get_pending_older_than(self, hours: int) -> List[dict]
-        Return all pending referrals older than N hours.
-        Query: status=PENDING, created_at <= (now - timedelta(hours=hours))
+FILE: app/core/lifecycle.py
 
-    async def qualify_referral(self, referred_id: int) -> bool
-        Atomically:
-        - Set status=QUALIFIED, qualified=True, qualified_at=now
-        - Only if current status=PENDING
-        Use find_one_and_update with a filter on referred_id AND status=PENDING.
-        Return True if document was updated, False otherwise.
+PROBLEM:
+  self._subscription_worker is set to None in __init__ and never assigned a real instance.
+  The call to self._subscription_worker.start(bot=self._bot) raises AttributeError.
 
-    async def invalidate_referral(self, referred_id: int) -> bool
-        Atomically set status=INVALIDATED, invalidated_at=now.
-        Only if current status=QUALIFIED.
-        Return True if updated.
+FIX:
+  In start(), before the try block that calls self._subscription_worker.start(), add:
+    self._subscription_worker = SubscriptionWorker()
+  
+  SubscriptionWorker is imported at the top of the file already. Just add the instantiation.
 
-    async def reactivate_referral(self, referred_id: int) -> bool
-        Atomically set status=QUALIFIED, invalidated_at=None, channel_member=True.
-        Only if current status=INVALIDATED.
-        Return True if updated.
+---
 
-    async def get_wallet(self, user_id: int) -> Optional[dict]
+## CRITICAL: scheduler.py — missing imports, missing setup_jobs(), stale lock
 
-    async def upsert_wallet(self, user_id: int) -> None
-        Use update_one with upsert=True.
-        On insert: set points_balance=0, total_earned=0, total_spent=0, active_referrals=0.
-        On update: do nothing (only creates if not exists).
+FILE: app/scheduler/scheduler.py
 
-    async def increment_balance(self, user_id: int, amount: int) -> None
-        Atomically: points_balance += amount, total_earned += amount (only if amount > 0),
-        active_referrals += 1 (only if amount > 0, decrement if amount < 0).
-        Use $inc operator.
+PROBLEM 1 — Missing imports:
+  Read the file. These are used but not imported:
+    asyncio                          (asyncio.create_task, asyncio.sleep used throughout)
+    from pymongo.errors import DuplicateKeyError   (used in _acquire_lock)
+    WatermarkState                   (used in _run_startup_integrity_scan)
+    JobStatus                        (used in _run_startup_integrity_scan — verify it's imported)
 
-    async def decrement_balance(self, user_id: int) -> None
-        Atomically: points_balance = max(0, points_balance - 1), active_referrals -= 1.
-        Use update_one with $inc: {points_balance: -1, active_referrals: -1}.
-        Add a safeguard: also run update_one({'user_id': user_id, 'points_balance': {'$lt': 0}}, {'$set': {'points_balance': 0}}) after to clamp negative values.
+FIX: Add the missing imports at the top of the file.
+  WatermarkState is defined in app/core/models.py — verify by reading that file before adding the import.
 
-    async def deduct_points(self, user_id: int, amount: int) -> bool
-        Deduct points for subscription discount.
-        Only deduct if points_balance >= amount.
-        Use find_one_and_update with filter: {user_id: user_id, points_balance: {$gte: amount}}
-        Update: {$inc: {points_balance: -amount, total_spent: amount}}
-        Return True if successful.
+PROBLEM 2 — setup_jobs() is called but does not exist:
+  start() calls self.setup_jobs() but no such method is defined.
+  The scheduler jobs (_distribution_cycle, _stale_lock_sweep, _deadline_sweep, _collect_metrics)
+  are defined as methods but never registered with self._scheduler.
 
-━━━━━━━━━━━━━━━━━━━━━━
-SERVICE (app/referral/service.py)
-━━━━━━━━━━━━━━━━━━━━━━
+FIX: Replace self.setup_jobs() in start() with inline APScheduler job registration:
 
-Class: ReferralService
+    self._scheduler.add_job(
+        self._distribution_cycle,
+        trigger=IntervalTrigger(seconds=settings.SCHEDULER_INTERVAL_SECONDS),
+        id="distribution_cycle",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    self._scheduler.add_job(
+        self._stale_lock_sweep,
+        trigger=IntervalTrigger(seconds=120),
+        id="stale_lock_sweep",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    self._scheduler.add_job(
+        self._deadline_sweep,
+        trigger=IntervalTrigger(seconds=300),
+        id="deadline_sweep",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    self._scheduler.add_job(
+        self._collect_metrics,
+        trigger=IntervalTrigger(seconds=60),
+        id="collect_metrics",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
-Constructor: __init__(self, repository: ReferralRepository, bot: Client)
-    (bot: Pyrogram Client, used for channel membership checks)
+PROBLEM 3 — Stale lock on restart, scheduler never starts after crash:
+  _acquire_lock() uses insert_one() which fails with DuplicateKeyError on every restart
+  because the previous lock document is never deleted. The except DuplicateKeyError 
+  branch just returns False, so the scheduler never starts after any crash or redeploy.
 
-Methods (ALL async):
+FIX: At the START of _acquire_lock(), before the try block, add a stale lock cleanup:
+    await self._locks.delete_many({"lock_key": "scheduler_active_singleton"})
+  
+  This is safe — delete_many is idempotent, deletes 0 or more docs. Then the insert_one 
+  below it will always succeed on first attempt.
 
-    async def register_referral(self, referrer_id: int, referred_id: int) -> bool
-        Validation checks (return False immediately if any fail):
-        1. referrer_id == referred_id → return False (self-referral)
-        2. Check if referred_id already has a referral in DB → return False
-        3. Create pending referral via repository.create_pending()
-        4. Ensure referrer wallet exists via repository.upsert_wallet()
-        Return True on success.
-        Log all rejection reasons with structlog including referrer_id, referred_id, reason.
+PROBLEM 4 — _distribution_cycle calls get_channel_pending_count() which does not exist:
+  self._queue_repo.get_channel_pending_count(source_id) is called but QueueRepository
+  has no such method.
 
-    async def check_membership(self, user_id: int, channel_id: int) -> bool
-        Call bot.get_chat_member(channel_id, user_id).
-        Return True if status is member/administrator/creator.
-        Return False if ChatMemberStatus is BANNED, LEFT, or RESTRICTED.
-        Wrap in try/except UserNotParticipant → return False.
-        Wrap in try/except FloodWait as e → await asyncio.sleep(e.value) then retry once.
+FIX: Replace that call inline in _distribution_cycle with a direct count query:
+    pending = await self._db[settings.QUEUE_COLLECTION].count_documents({
+        "source_channel_id": source_id,
+        "status": {"$in": ["pending", "watermarking", "ready", "locked", "delivering"]}
+    })
 
-    async def qualify_pending_referrals(self, channel_id: int) -> int
-        Called by background job.
-        Get all pending referrals older than 24 hours via repository.get_pending_older_than(24).
-        For each:
-            - Check channel membership via check_membership()
-            - If member: repository.qualify_referral(), repository.increment_balance(referrer_id, +1)
-            - If not member: skip (leave pending, TTL will clean it)
-        Return count of qualified referrals.
-        Use asyncio.sleep(0.1) between each check to avoid burst API calls.
+PROBLEM 5 — _deadline_sweep calls get_deadline_exceeded_jobs() which does not exist:
+  QueueRepository has no get_deadline_exceeded_jobs() method.
 
-    async def handle_member_left(self, user_id: int) -> None
-        Called when a user leaves the required channel.
-        Get referral where referred_user_id=user_id and status=QUALIFIED.
-        If found: repository.invalidate_referral(user_id), repository.decrement_balance(referrer_id).
-        Log with structlog.
+FIX: Replace the body of _deadline_sweep() with a direct DB query:
+    async def _deadline_sweep(self) -> None:
+        try:
+            now = datetime.now(timezone.utc)
+            queue = self._db[settings.QUEUE_COLLECTION]
+            cursor = queue.find({
+                "status": {"$in": ["pending", "locked", "processing", "watermarking"]},
+                "queue_deadline": {"$lt": now, "$ne": None},
+            })
+            async for job in cursor:
+                await self._queue_repo.move_to_dead_letter(str(job["_id"]), "deadline_exceeded")
+        except Exception as e:
+            logger.error(f"Deadline sweep FAILED: {e}")
 
-    async def handle_member_rejoined(self, user_id: int, channel_id: int) -> None
-        Called when a user rejoins the required channel.
-        Get referral where referred_user_id=user_id and status=INVALIDATED.
-        If found: verify channel membership via check_membership().
-        If confirmed member: repository.reactivate_referral(user_id), repository.increment_balance(referrer_id, +1).
+---
 
-    async def get_wallet(self, user_id: int) -> Optional[dict]
-        Return wallet dict or None via repository.get_wallet().
+## BROKEN: dispatcher.py — missing import asyncio
 
-    async def snapshot_discount(self, user_id: int, points_to_use: int, plan_price: int) -> dict
-        IMPORTANT: This locks a discount snapshot. Call this at payment creation, never at checkout display.
-        Validate: points_to_use <= wallet.points_balance
-        Validate: points_to_use <= plan_price (cannot discount more than plan price)
-        Deduct via repository.deduct_points(user_id, points_to_use).
-        If deduction failed (insufficient balance): raise ValueError('Insufficient referral balance')
-        Return: {'original_price': plan_price, 'discount_applied': points_to_use, 'final_price': plan_price - points_to_use, 'snapshotted_at': datetime.utcnow().isoformat()}
+FILE: app/distribution/dispatcher.py
 
-━━━━━━━━━━━━━━━━━━━━━━
-SCHEDULER (app/referral/scheduler.py)
-━━━━━━━━━━━━━━━━━━━━━━
+PROBLEM:
+  asyncio.Event() and asyncio.create_task() are used for the heartbeat mechanism
+  but import asyncio is missing from the file.
 
-Class: ReferralScheduler
+FIX: Add import asyncio at the top of the file with the other stdlib imports.
 
-Constructor: __init__(self, service: ReferralService, scheduler: AsyncIOScheduler, channel_id: int)
+---
 
-Methods:
+## BROKEN: submission_handler.py and support_handler.py — _redis NameError
 
-    def register_jobs(self) -> None
-        Register one APScheduler job:
-        Job ID: 'referral_qualification_sweep'
-        Trigger: IntervalTrigger(hours=1)
-        Func: self._qualification_job
-        misfire_grace_time: 300
-        max_instances: 1
-        replace_existing: True
+FILE: app/handlers/submission_handler.py
 
-    async def _qualification_job(self) -> None
-        THIN. No business logic.
-        count = await self._service.qualify_pending_referrals(self._channel_id)
-        Log with structlog: {'event': 'referral_qualification_sweep', 'qualified_count': count}
+PROBLEM:
+  In handle_submit_menu():
+    redis = get_redis()
+    ...
+    await _redis.set(spam_key, "1", ex=1)   ← _redis is not defined, should be redis
 
-━━━━━━━━━━━━━━━━━━━━━━
-HANDLERS (app/referral/handlers.py)
-━━━━━━━━━━━━━━━━━━━━━━
+FIX: Change _redis.set to redis.set in that line.
 
-IMPORTANT: These are INTEGRATION POINTS only. Thin handlers. No business logic here.
+FILE: app/handlers/support_handler.py
 
-Export two functions (do NOT auto-register them — return them for the main handler to call):
+PROBLEM:
+  In handle_support_menu():
+    redis = get_redis()
+    ...
+    await _redis.set(spam_key, "1", ex=1)   ← same bug
 
-    async def process_referral_start(client: Client, message: Message, referrer_id: int, service: ReferralService) -> None
-        Called from the existing /start handler when a ref_ payload is detected.
-        Call service.register_referral(referrer_id, message.from_user.id).
-        Do NOT send any message here. Just process the referral silently.
-        Log result with structlog.
+FIX: Change _redis.set to redis.set in that line.
 
-    async def show_referral_status(client: Client, message: Message, service: ReferralService) -> None
-        Called when user requests referral info.
-        Get wallet via service.get_wallet(message.from_user.id).
-        Format and send a message showing:
-        - Points balance
-        - Active referrals count  
-        - Total earned
-        - Their referral link: https://t.me/{BOT_USERNAME}?start=ref_{user_id}
-        If no wallet: show zeros.
+---
 
-━━━━━━━━━━━━━━━━━━━━━━
-MEMBERSHIP EVENT INTEGRATION (app/handlers/membership_handler.py)
-━━━━━━━━━━━━━━━━━━━━━━
+## BROKEN: watermark/worker_pool.py — missing imports and missing method
 
-Create this file if it does not exist.
-This handles @app.on_chat_member_updated for the required channel.
+FILE: app/watermark/worker_pool.py
 
-Register a handler:
-    @app.on_chat_member_updated(filters.chat(MAIN_CHANNEL_ID))
-    async def on_channel_member_update(client, update: ChatMemberUpdated):
-        new_status = update.new_chat_member.status if update.new_chat_member else None
-        old_status = update.old_chat_member.status if update.old_chat_member else None
-        user_id = update.from_user.id
+PROBLEM 1 — Missing imports:
+  _process_group uses:
+    List[dict]              → needs: from typing import List (or use list[dict] since Python 3.12)
+    MediaFileNotFoundError  → needs: from app.core.exceptions import MediaFileNotFoundError
+    DispatcherError         → needs: from app.core.exceptions import DispatcherError
+    FloodWait               → needs: from pyrogram.errors import FloodWait
 
-        If old_status was member/admin/creator AND new_status is LEFT/BANNED:
-            await referral_service.handle_member_left(user_id)
+FIX: Add all four to the imports at the top of the file.
+  Since this is Python 3.12, you can also just change List[dict] to list[dict] inline 
+  in the method signature instead of adding the typing import — either is acceptable.
 
-        If old_status was LEFT/BANNED AND new_status is member:
-            await referral_service.handle_member_rejoined(user_id, MAIN_CHANNEL_ID)
+PROBLEM 2 — _resolve_media_path() called but not defined:
+  self._resolve_media_path(job, job_id) is called in _process_group but WatermarkWorker
+  has no such method. download_with_refresh is imported but never wired up.
 
-━━━━━━━━━━━━━━━━━━━━━━
-CONSTRAINTS — READ CAREFULLY
-━━━━━━━━━━━━━━━━━━━━━━
+FIX: Add this method to the WatermarkWorker class:
 
-- NO Redis. Use only MongoDB for state.
-- All DB operations use Motor (AsyncIOMotorDatabase). Never sync pymongo.
-- All logging uses structlog.get_logger(__name__). Never stdlib logging.
-- No blocking calls inside async functions. No time.sleep(). Use asyncio.sleep().
-- No global mutable state.
-- No circular imports. referral/ module imports nothing from handlers/.
-- All imports are explicit. No wildcard imports.
-- Repository owns ALL DB access. Service NEVER touches collections directly.
-- Scheduler methods contain NO business logic.
-- Handlers contain NO business logic.
-- Do NOT modify any existing files outside app/referral/ EXCEPT:
-    - app/handlers/membership_handler.py (create or add to)
-    - app/core/lifecycle.py (only to register ReferralScheduler.register_jobs() and ReferralRepository.create_indexes())
+    async def _resolve_media_path(self, job: dict, job_id: str) -> Optional[str]:
+        bot = get_bot()
+        return await download_with_refresh(
+            client=bot,
+            job_doc=job,
+            dest_dir=settings.PROCESSED_MEDIA_DIR,
+            job_id=job_id,
+        )
 
-━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT REQUIRED
-━━━━━━━━━━━━━━━━━━━━━━
+---
 
-Write all 6 files completely.
-After each file, state: WRITTEN: app/referral/filename.py
-Do not summarize. Do not add unrequested features.
-Do not claim tests passed unless you actually ran them.
-"
+## BROKEN: queue_repository.py — missing methods and duplicate return
+
+FILE: app/repositories/queue_repository.py
+
+PROBLEM 1 — Duplicate unreachable return:
+  claim_next() has two return claimed statements — the second one at the end of the 
+  method is unreachable dead code. Remove it.
+
+PROBLEM 2 — get_recently_posted_content_ids() missing:
+  FairnessSelector calls this method but it does not exist on QueueRepository.
+
+FIX: Add this method to QueueRepository:
+
+    async def get_recently_posted_content_ids(
+        self, source_channel_id: str, hours: int = 168
+    ) -> set:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cursor = self._queue.find(
+            {
+                "source_channel_id": source_channel_id,
+                "status": JobStatus.COMPLETED,
+                "completed_at": {"$gte": cutoff},
+            },
+            {"content_id": 1},
+        )
+        ids = set()
+        async for doc in cursor:
+            if doc.get("content_id"):
+                ids.add(doc["content_id"])
+        return ids
+
+---
+
+## SECONDARY: referral system init failure
+
+The logs show "Failed to initialize Referral System" on every boot. 
+
+FILE: app/core/lifecycle.py (or wherever referral init is called — read the file to find it)
+
+Read app/referral/db.py and app/referral/scheduler.py. The ReferralRepository.__init__() 
+calls DatabaseManager.get_db() at construction time. If called before DatabaseManager.connect() 
+completes, it raises RuntimeError: "Database not initialized."
+
+Check where in lifecycle.py or the referral scheduler the ReferralRepository is 
+instantiated. If it's being instantiated at module import time or too early in the boot 
+sequence, wrap it in a try/except that logs a warning but does not crash the boot, OR 
+delay construction until after the DB connection is confirmed.
+
+The "Failed to initialize Referral System" should be a warning, not a crash trigger.
+Ensure the except block in lifecycle.py around the referral scheduler logs at WARNING 
+level and continues — never sys.exit() for the referral system.
+
+---
+
+## SECONDARY: Index verification DEGRADED on every boot
+
+The logs show "DEGRADED: Index verification failed" consistently. This is non-fatal per 
+the existing code but it fires on every boot which means indexes are being recreated 
+with conflicting options every time.
+
+FILE: app/core/database.py — _safe_create() and _ensure_indexes()
+
+Read the file. The vault collection has _safe_create called TWICE — once in the main 
+index block and once for the M3 checksum/cooldown indexes. Both calls create indexes on 
+the same collection. If any index name already exists with different options, the second 
+call triggers the full drop_indexes() + recreate path, which is destructive and slow.
+
+FIX: Merge all vault indexes into a single _safe_create(settings.VAULT_COLLECTION, [...]) 
+call. Find both calls to _safe_create(settings.VAULT_COLLECTION, ...) in _ensure_indexes() 
+and combine their index lists into one call.
+
+---
+
+## EXECUTION ORDER
+
+1. Read main_bot.py
+2. Fix main_bot.py line 35
+
+3. Read app/core/lifecycle.py in full
+4. Fix the indentation (dead code block)
+5. Fix all stdlib logger calls with structlog-style kwargs in lifecycle.py
+6. Add self._subscription_worker = SubscriptionWorker() instantiation
+
+7. Read app/scheduler/scheduler.py in full
+8. Read app/core/models.py to confirm WatermarkState import path
+9. Add all missing imports to scheduler.py
+10. Replace self.setup_jobs() with inline add_job() calls
+11. Fix _acquire_lock() stale lock cleanup
+12. Fix _distribution_cycle pending count query
+13. Fix _deadline_sweep to use direct DB query
+
+14. Read app/distribution/dispatcher.py
+15. Add import asyncio
+
+16. Read app/handlers/submission_handler.py
+17. Fix _redis → redis
+
+18. Read app/handlers/support_handler.py  
+19. Fix _redis → redis
+
+20. Read app/watermark/worker_pool.py in full
+21. Add missing imports
+22. Add _resolve_media_path() method
+
+23. Read app/repositories/queue_repository.py in full
+24. Remove duplicate return claimed
+25. Add get_recently_posted_content_ids() method
+
+26. Read app/core/database.py
+27. Merge the two vault _safe_create() calls into one
+
+28. Read app/core/lifecycle.py again and app/referral/scheduler.py
+29. Fix referral init failure (wrap in non-fatal try/except if not already)
+
+After all fixes, output a summary listing every file changed and every line modified.
+Do not modify any file not listed above. Do not change method signatures unless 
+explicitly required by a fix above. Do not add new dependencies.

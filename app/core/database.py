@@ -412,6 +412,25 @@ class DatabaseManager:
                 background=True,
                 sparse=True,
             ),
+            # M3 checksum/cooldown/submitter indexes
+            IndexModel(
+                [("checksum", ASCENDING)],
+                name="vault_checksum_unique",
+                unique=True,
+                sparse=True,
+                background=True,
+            ),
+            IndexModel(
+                [("distribution_state", ASCENDING), ("cooldown_until", ASCENDING)],
+                name="vault_state_cooldown",
+                background=True,
+            ),
+            IndexModel(
+                [("submitter_user_id", ASCENDING)],
+                name="vault_submitter",
+                background=True,
+                sparse=True,
+            ),
         ])
 
         # ── Pending submissions ───────────────────────────────────────────────
@@ -667,28 +686,6 @@ class DatabaseManager:
                 [("status", ASCENDING), ("created_at", ASCENDING)],
                 name="distjob_status_created",
                 background=True,
-            ),
-        ])
-
-        # ── M3: vault_items checksum/cooldown ─────────────────────────────────
-        await _safe_create(settings.VAULT_COLLECTION, [
-            IndexModel(
-                [("checksum", ASCENDING)],
-                name="vault_checksum_unique",
-                unique=True,
-                sparse=True,
-                background=True,
-            ),
-            IndexModel(
-                [("distribution_state", ASCENDING), ("cooldown_until", ASCENDING)],
-                name="vault_state_cooldown",
-                background=True,
-            ),
-            IndexModel(
-                [("submitter_user_id", ASCENDING)],
-                name="vault_submitter",
-                background=True,
-                sparse=True,
             ),
         ])
 
