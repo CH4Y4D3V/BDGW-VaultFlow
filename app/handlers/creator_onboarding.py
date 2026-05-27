@@ -457,5 +457,3 @@ async def handle_become_creator(client: Client, message: Message) -> None:
             message,
             "⚠️ An error occurred. Please try again.",
         )
-,
-        )
