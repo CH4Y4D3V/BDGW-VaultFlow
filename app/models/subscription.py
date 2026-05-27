@@ -119,15 +119,16 @@ class Subscription:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Subscription":
+        now = datetime.now(timezone.utc)
         return cls(
             user_id=data["user_id"],
-            plan=Plan(data["plan"]),
-            status=SubscriptionStatus(data["status"]),
-            started_at=data["started_at"],
+            plan=Plan(data.get("plan", Plan.FREE)),
+            status=SubscriptionStatus(data.get("status", SubscriptionStatus.EXPIRED)),
+            started_at=data.get("started_at") or data.get("created_at") or now,
             expires_at=data.get("expires_at"),
             grace_until=data.get("grace_until"),
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
+            created_at=data.get("created_at") or now,
+            updated_at=data.get("updated_at") or now,
             notes=data.get("notes"),
             granted_by=data.get("granted_by"),
         )
