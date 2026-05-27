@@ -406,6 +406,7 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
             logger.error(
                 "handle_payment_proof_capture: failed to create payment topic",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                exc_info=True,
             )
             await _safe_reply(
                 message,

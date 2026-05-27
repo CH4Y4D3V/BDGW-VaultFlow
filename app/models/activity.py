@@ -61,8 +61,8 @@ class Activity:
     def from_dict(cls, data: dict) -> "Activity":
         return cls(
             user_id=data["user_id"],
-            action=ActivityAction(data["action"]),
-            timestamp=data["timestamp"],
+            action=ActivityAction(data.get("action", ActivityAction.AUDIT)),
+            timestamp=data.get("timestamp") or datetime.now(),
             chat_id=data.get("chat_id"),
             performed_by=data.get("performed_by"),
             metadata=data.get("metadata", {}),

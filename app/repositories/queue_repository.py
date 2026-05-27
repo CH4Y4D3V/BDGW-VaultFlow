@@ -534,6 +534,18 @@ class QueueRepository:
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
+    async def get_channel_pending_count(self, channel_id: str) -> int:
+        """Return count of PENDING jobs for a given channel_id."""
+        return await self._queue.count_documents(
+            {"source_channel_id": channel_id, "status": JobStatus.PENDING}
+        )
+
+    async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
+        """Return jobs whose deadline has passed and are still pending."""
+        return await self._queue.find(
+            {"deadline": {"$lt": cutoff}, "status": JobStatus.PENDING}
+        ).to_list(length=500)
+
     async def recover_stale_jobs(self) -> int:
         """Recover jobs from crashed workers."""
         threshold = datetime.now(timezone.utc) - timedelta(
@@ -560,27 +572,14 @@ class QueueRepository:
     # ─── Fairness / Repost Prevention ────────────────────────────────────────
 
     async def get_recently_posted_content_ids(
-        self, source_channel_id: str, hours: int = 168
-    ) -> set:
-        """
-        FIX 14: FairnessSelector calls this method but it was not defined.
-        Returns a set of content_ids that were completed within the last `hours`
-        for the given source_channel_id. Used to prevent reposting.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        cursor = self._queue.find(
-            {
-                "source_channel_id": source_channel_id,
-                "status": JobStatus.COMPLETED,
-                "completed_at": {"$gte": cutoff},
-            },
-            {"content_id": 1},
-        )
-        ids: set = set()
-        async for doc in cursor:
-            if doc.get("content_id"):
-                ids.add(doc["content_id"])
-        return ids
+        self, channel_id: str, limit: int = 100
+    ) -> list[str]:
+        """Return content_ids of the most recently posted jobs for a channel."""
+        docs = await self._queue.find(
+            {"source_channel_id": channel_id, "status": JobStatus.COMPLETED},
+            {"content_id": 1}
+        ).sort("completed_at", -1).limit(limit).to_list(length=limit)
+        return [d["content_id"] for d in docs if "content_id" in d]
 
     # ─── Metrics ─────────────────────────────────────────────────────────────
 

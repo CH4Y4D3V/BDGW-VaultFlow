@@ -92,9 +92,7 @@ async def trace_callback_update(client: Client, callback: CallbackQuery) -> None
 
 
 @Client.on_chat_member_updated(group=-1)
-async def trace_member_update(
-    client: Client, update: ChatMemberUpdated
-) -> None:
+async def trace_member_update(client: Client, update: ChatMemberUpdated) -> None:
     """
     Fires for EVERY ChatMemberUpdated event before other handlers.
     """
@@ -119,4 +117,4 @@ async def trace_member_update(
             },
         )
     except Exception as e:
-        logger.error("UPDATE_TRACE: failed to log member update", exc_info=e)
+        logger.error("UPDATE_TRACE: failed to log member update", exc_info=True)

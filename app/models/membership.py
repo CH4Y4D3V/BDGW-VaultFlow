@@ -48,13 +48,14 @@ class Membership:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Membership":
+        now = datetime.now()
         return cls(
             user_id=data["user_id"],
             chat_id=data["chat_id"],
-            chat_type=ChatType(data["chat_type"]),
-            status=MembershipStatus(data["status"]),
-            joined_at=data["joined_at"],
-            last_verified=data["last_verified"],
+            chat_type=ChatType(data.get("chat_type", ChatType.PUBLIC)),
+            status=MembershipStatus(data.get("status", MembershipStatus.REMOVED)),
+            joined_at=data.get("joined_at") or now,
+            last_verified=data.get("last_verified") or now,
             removed_at=data.get("removed_at"),
             removed_reason=data.get("removed_reason"),
         )
