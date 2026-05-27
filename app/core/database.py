@@ -191,20 +191,21 @@ class DatabaseManager:
         logger.debug("Initiating index verification/creation phase...")
         try:
             await cls._ensure_indexes()
-
-            # ── Referral System Indexes ──────────────────────────────────
-            from app.referral.db import ReferralRepository
-            ref_repo = ReferralRepository()
-            await ref_repo.create_indexes()
-
-            logger.info("MongoDB initialization complete (Connection + Indices)")
+            logger.info("All MongoDB indexes verified/created")
         except Exception as e:
-
             logger.error(
                 "DEGRADED: Index verification failed. Application will boot with missing/stale indexes.",
                 extra={"ctx_error": str(e)}
             )
-            # We do NOT raise here (FIX 4)
+
+        # ── Referral System Indexes (Non-FATAL) ──────────────────────────────
+        try:
+            from app.referral.db import ReferralRepository
+            ref_repo = ReferralRepository()
+            await ref_repo.create_indexes()
+            logger.info("MongoDB initialization complete (Connection + Indices)")
+        except Exception as e:
+            logger.warning("Referral index setup failed (non-fatal)", extra={"ctx_error": str(e)})
             
         cls._initialized = True
 
