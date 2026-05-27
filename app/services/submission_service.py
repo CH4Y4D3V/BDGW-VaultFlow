@@ -173,7 +173,7 @@ async def ingest_approved(msg_id: int) -> Optional[int]:
 
     for msg in messages:
         source_channel_id = str(msg.chat.id)
-        await _pipeline.ingest(msg, source_channel_id)
+        await _get_pipeline().ingest(msg, source_channel_id)
 
     logger.info(
         "Submission approved and ingested (legacy path)",

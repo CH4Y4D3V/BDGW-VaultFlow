@@ -36,7 +36,8 @@ logger = get_logger(__name__)
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
-_support_repo = SupportRepository()
+def _get_support_repo():
+    return SupportRepository()
 
 
 async def _safe_reply(
@@ -257,7 +258,7 @@ async def handle_hub_support_message_persist(
 
         # RC-6 fix: DB persistence only — NO copy_message / routing here
         try:
-            await _support_repo.save_message({
+            await _get_support_repo().save_message({
                 "user_id": user_id,
                 "topic_id": thread_id,
                 "user_message_id": None,

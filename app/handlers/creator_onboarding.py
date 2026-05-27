@@ -42,7 +42,8 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_consent_service = ConsentService()
+def _get_consent_service():
+    return ConsentService()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 
 
@@ -70,7 +71,7 @@ async def check_and_gate_creator(client: Client, message: Message) -> bool:
     )
 
     try:
-        is_verified = await _consent_service.is_verified_creator(user_id)
+        is_verified = await _get_consent_service().is_verified_creator(user_id)
     except Exception as e:
         # RC-5 fix: DB error path must still give user feedback
         logger.error(
@@ -125,7 +126,7 @@ async def _send_onboarding_prompt(client: Client, message: Message) -> None:
 
     # Check creator profile status — suspended/banned get a different message
     try:
-        profile = await _consent_service.get_creator_profile(user_id)
+        profile = await _get_consent_service().get_creator_profile(user_id)
     except Exception as e:
         logger.error(
             "_send_onboarding_prompt: get_creator_profile raised",
@@ -260,7 +261,7 @@ async def handle_consent_agree(client: Client, callback: CallbackQuery) -> None:
 
         # Double-click protection
         try:
-            already = await _consent_service.is_verified_creator(user_id)
+            already = await _get_consent_service().is_verified_creator(user_id)
         except Exception as e:
             logger.error(
                 "handle_consent_agree: is_verified_creator raised",
@@ -289,11 +290,11 @@ async def handle_consent_agree(client: Client, callback: CallbackQuery) -> None:
 
         # Create consent record
         try:
-            record_id = await _consent_service.create_consent_record(
+            record_id = await _get_consent_service().create_consent_record(
                 user_id=user_id,
                 telegram_username=username,
             )
-            await _consent_service.register_creator(
+            await _get_consent_service().register_creator(
                 user_id=user_id,
                 consent_record_id=record_id,
                 telegram_username=username,
@@ -423,7 +424,7 @@ async def handle_become_creator(client: Client, message: Message) -> None:
         user_id = message.from_user.id
 
         try:
-            already = await _consent_service.is_verified_creator(user_id)
+            already = await _get_consent_service().is_verified_creator(user_id)
         except Exception as e:
             logger.error(
                 "handle_become_creator: is_verified_creator raised",
@@ -455,4 +456,6 @@ async def handle_become_creator(client: Client, message: Message) -> None:
         await _safe_reply(
             message,
             "⚠️ An error occurred. Please try again.",
+        )
+,
         )

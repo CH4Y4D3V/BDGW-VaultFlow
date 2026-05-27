@@ -30,8 +30,11 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_sub_service = SubscriptionService()
-_invite_service = InviteService()
+def _get_sub_service():
+    return SubscriptionService()
+
+def _get_invite_service():
+    return InviteService()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
@@ -511,7 +514,7 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
         admin_id = message.from_user.id
 
         try:
-            sub = await _sub_service.grant(
+            sub = await _get_sub_service().grant(
                 user_id=user_id,
                 plan=plan,
                 duration_days=days,
@@ -530,7 +533,7 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
         premium_chat_id = settings.PREMIUM_GROUP_ID
         if premium_chat_id:
             try:
-                invite = await _invite_service.generate_premium_invite(
+                invite = await _get_invite_service().generate_premium_invite(
                     client=client,
                     user_id=user_id,
                     chat_id=premium_chat_id,
@@ -604,4 +607,6 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
                 "⚠️ An unexpected error occurred. Please try again."
             )
         except Exception:
+            pass
+t Exception:
             pass

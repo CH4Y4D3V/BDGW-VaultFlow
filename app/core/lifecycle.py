@@ -171,8 +171,8 @@ class AppLifecycle:
             init_membership_handler(ref_service)
 
         except Exception:
-            # FIX (referral): non-fatal — log at warning level, never sys.exit()
-            logger.warning("Failed to initialize Referral System", exc_info=True)
+            # FIX (referral): non-fatal — log at exception level, never sys.exit()
+            logger.exception("Failed to initialize Referral System", exc_info=True)
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")

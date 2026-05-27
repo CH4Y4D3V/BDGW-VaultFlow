@@ -27,7 +27,9 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_takedown_service = TakedownService()
+def _get_takedown_service():
+    return TakedownService()
+
 _MAX_RETRIES = 3
 
 
@@ -73,7 +75,7 @@ async def handle_report(client: Client, message: Message) -> None:
     reported_by = message.from_user.id
 
     try:
-        record_id = await _takedown_service.submit_report(
+        record_id = await _get_takedown_service().submit_report(
             content_id=content_id,
             reported_by=reported_by,
             reason=reason,
@@ -119,7 +121,7 @@ async def handle_dmca(client: Client, message: Message) -> None:
     reported_by = message.from_user.id
 
     try:
-        record_id = await _takedown_service.submit_report(
+        record_id = await _get_takedown_service().submit_report(
             content_id=content_id,
             reported_by=reported_by,
             reason=reason,
@@ -165,7 +167,7 @@ async def handle_content_claim(client: Client, message: Message) -> None:
     reported_by = message.from_user.id
 
     try:
-        record_id = await _takedown_service.submit_report(
+        record_id = await _get_takedown_service().submit_report(
             content_id=content_id,
             reported_by=reported_by,
             reason=reason,
@@ -213,7 +215,7 @@ async def handle_execute_takedown(client: Client, message: Message) -> None:
     moderator_id = message.from_user.id
 
     try:
-        success = await _takedown_service.execute_takedown(
+        success = await _get_takedown_service().execute_takedown(
             content_id=content_id,
             reviewed_by=moderator_id,
         )
@@ -263,7 +265,7 @@ async def handle_dismiss_report(client: Client, message: Message) -> None:
     moderator_id = message.from_user.id
 
     try:
-        await _takedown_service.dismiss_report(
+        await _get_takedown_service().dismiss_report(
             content_id=content_id,
             reviewed_by=moderator_id,
         )
@@ -292,7 +294,7 @@ async def handle_dismiss_report(client: Client, message: Message) -> None:
 @permission_required(Role.MODERATOR)
 async def handle_pending_reports(client: Client, message: Message) -> None:
     try:
-        reports = await _takedown_service.get_pending_reports()
+        reports = await _get_takedown_service().get_pending_reports()
     except Exception as e:
         logger.error("Failed to fetch pending reports", extra={"ctx_error": str(e)})
         await _safe_reply(message, "⚠️ Failed to fetch pending reports.")
