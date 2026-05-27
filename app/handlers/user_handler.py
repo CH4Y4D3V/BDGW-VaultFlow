@@ -20,7 +20,15 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Global Instances (Lazy Loaded) ───────────────────────────────────────────
+# ── Lazy getters — NO module-level instantiation ──────────────────────────────
+# FIX: _sub_service = SubscriptionService() was module-level.
+# If SubscriptionService.__init__ has any side effects, it crashes the plugin
+# loader silently — Pyrogram skips the file and registers zero handlers from it.
+# FIX: _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER was module-level.
+# settings access at import time can fail before the app is fully initialised.
+
+def _get_flood_buffer() -> int:
+    return getattr(settings, "FLOODWAIT_EXTRA_BUFFER", 2)
 
 def _get_sub_repo():
     return SubscriptionRepository(DatabaseManager.get_db())
@@ -31,8 +39,9 @@ def _get_queue_repo():
 def _get_onboarding_service():
     return OnboardingService(_get_sub_repo())
 
-_sub_service = SubscriptionService()
-_FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
+def _get_sub_service():
+    return SubscriptionService()
+
 _MAX_RETRIES = 3
 
 # Cache bot username to avoid repeated get_me() calls
@@ -48,6 +57,38 @@ async def _get_bot_username(client: Client) -> str:
         except Exception:
             _bot_username = ""
     return _bot_username
+
+
+# ── Redis spam guard — fault tolerant ────────────────────────────────────────
+# FIX: Previous implementation crashed handle_start entirely if Redis was
+# unavailable. get_redis() returning None or raising caused an AttributeError
+# on the very first line of the handler. The outer try/except caught it but
+# the error reply also failed silently — result: /start appeared completely dead.
+# The UPDATE_TRACE fired (handler WAS registered) but no log output followed
+# because the crash happened before line 218's logger call.
+# Fix: Redis spam checks are now best-effort. If Redis is down, skip the check
+# and serve the user. Rate limiting is a nice-to-have, not a hard dependency.
+
+async def _check_spam_guard(key: str, ttl_seconds: int) -> bool:
+    """
+    Returns True if the user is within the cooldown window (should be blocked).
+    Returns False if they should be allowed through — including when Redis is down.
+    Never raises.
+    """
+    try:
+        redis = get_redis()
+        if redis is None:
+            return False
+        if await redis.exists(key):
+            return True
+        await redis.set(key, "1", ex=ttl_seconds)
+        return False
+    except Exception as e:
+        logger.warning(
+            "Redis spam guard unavailable — skipping check",
+            extra={"ctx_key": key, "ctx_error": str(e)},
+        )
+        return False
 
 
 # ── DM delivery helper ────────────────────────────────────────────────────────
@@ -74,7 +115,7 @@ async def _send_private(
         except (UserIsBlocked, PeerIdInvalid, InputUserDeactivated):
             return False
         except FloodWait as e:
-            await asyncio.sleep(int(e.value) + _FLOOD_BUFFER)
+            await asyncio.sleep(int(e.value) + _get_flood_buffer())
         except RPCError as e:
             logger.warning(
                 "DM delivery failed",
@@ -136,7 +177,6 @@ async def _get_rules_text() -> str:
     Falls back to default text.
     """
     try:
-        from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
         doc = await db["bot_config"].find_one({"key": "rules"})
         if doc and doc.get("value"):
@@ -197,7 +237,7 @@ def _format_status(sub, user_id: int) -> str:
     return "\n".join(lines)
 
 
-# ── /start and Menu Callbacks ─────────────────────────────────────────────────
+# ── /start ────────────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
@@ -206,14 +246,10 @@ async def handle_start(client: Client, message: Message) -> None:
             return
         user_id = message.from_user.id
 
-        # ── Anti-Spam / Cooldown ──
-        redis = get_redis()
+        # ── Anti-Spam / Cooldown (best-effort — degrades gracefully if Redis down)
         spam_key = f"onboarding:spam:{user_id}"
-        if await redis.exists(spam_key):
-            # Lightweight refresh UX: brief toast or ignore
-            # We ignore to avoid cluttering the chat with repeated /start responses
+        if await _check_spam_guard(spam_key, ttl_seconds=5):
             return
-        await redis.set(spam_key, "1", ex=5)  # 5 second cooldown
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
@@ -226,51 +262,60 @@ async def handle_start(client: Client, message: Message) -> None:
                     from app.referral.repository import ReferralRepository
                     from app.referral.service import ReferralService
                     from app.referral.handlers import process_referral_start
-                    
+
                     ref_repo = ReferralRepository(DatabaseManager.get_db())
                     ref_service = ReferralService(ref_repo, client)
-                    
+
                     await process_referral_start(client, message, referrer_id, ref_service)
                 except (IndexError, ValueError):
                     pass
+                except Exception as e:
+                    # Referral failure must never block /start from completing
+                    logger.warning(
+                        "Referral processing failed — continuing start",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                    )
             elif payload == "resubscribe":
                 await handle_mystatus(client, message)
                 return
 
         onboarding_service = _get_onboarding_service()
         text, keyboard = await onboarding_service.render_onboarding(
-            user_id, 
+            user_id,
             message.from_user.first_name or "Creator"
         )
-        
+
         await message.reply_text(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
     except Exception as e:
-        import traceback
-        logger.error(f"HANDLE_START CRASH: {e}\n{traceback.format_exc()}")
+        logger.error(
+            "handle_start crashed",
+            extra={"ctx_user_id": getattr(message.from_user, "id", "?"), "ctx_error": str(e)},
+            exc_info=True,
+        )
         try:
             await message.reply_text("❌ System busy. Please try again in a moment.")
         except Exception:
             pass
 
 
+# ── Menu Callbacks ────────────────────────────────────────────────────────────
+
 @Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|premium|queue|referrals)$"))
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
     """Handles main menu callbacks, editing the message in-place."""
     action = callback_query.data.split(":")[1]
     user_id = callback_query.from_user.id
-    
-    # ── Anti-Spam / Debounce ──
-    redis = get_redis()
+
+    # ── Anti-Spam / Debounce (best-effort)
     spam_key = f"menu:spam:{user_id}"
-    if await redis.exists(spam_key):
+    if await _check_spam_guard(spam_key, ttl_seconds=1):
         await callback_query.answer("Slow down! Processing...", show_alert=False)
         return
-    await redis.set(spam_key, "1", ex=1)  # 1 second debounce
-    
+
     text = ""
     keyboard = None
 
@@ -278,10 +323,10 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
         onboarding_service = _get_onboarding_service()
         if action == "home":
             text, keyboard = await onboarding_service.render_onboarding(
-                user_id, 
+                user_id,
                 callback_query.from_user.first_name or "Creator"
             )
-        
+
         elif action == "premium":
             text = (
                 "💎 <b>PREMIUM ACCESS</b>\n\n"
@@ -297,16 +342,24 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             keyboard = KeyboardBuilder.build_premium_conversion()
 
         elif action == "referrals":
-            from app.referral.repository import ReferralRepository
-            from app.referral.service import ReferralService
-            from app.referral.handlers import show_referral_status
-            
-            ref_repo = ReferralRepository(DatabaseManager.get_db())
-            ref_service = ReferralService(ref_repo, client)
-            
-            await show_referral_status(client, callback_query.message, ref_service)
-            await callback_query.answer()
-            return # show_referral_status sends its own message, we don't edit the menu here
+            try:
+                from app.referral.repository import ReferralRepository
+                from app.referral.service import ReferralService
+                from app.referral.handlers import show_referral_status
+
+                ref_repo = ReferralRepository(DatabaseManager.get_db())
+                ref_service = ReferralService(ref_repo, client)
+
+                await show_referral_status(client, callback_query.message, ref_service)
+                await callback_query.answer()
+                return
+            except Exception as e:
+                logger.warning(
+                    "Referral status unavailable",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+                await callback_query.answer("Referral system temporarily unavailable.", show_alert=True)
+                return
 
         elif action == "queue":
             queue_repo = _get_queue_repo()
@@ -324,12 +377,10 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                     media_type = job.get("media_type", "text").capitalize()
                     created_at = job.get("created_at")
                     date_str = created_at.strftime("%H:%M") if created_at else "??"
-                    
                     icon = "🟢" if status == "Delivering" else "🟡"
                     lines.append(f"{i}. {icon} <b>{media_type}</b> — {status} <code>[{date_str}]</code>")
-                
                 text = "\n".join(lines)
-            
+
             keyboard = KeyboardBuilder.build_back_button()
 
         elif action == "rules":
@@ -337,11 +388,14 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
 
         elif action == "mystatus":
-            # This logic is adapted from the handle_mystatus command for an inline menu context
-            if user_id == settings.OWNER_ID: role = "Owner"
-            elif user_id in settings.SUDO_IDS: role = "Sudo Admin"
-            elif user_id in settings.ADMIN_IDS: role = "Admin"
-            else: role = None
+            if user_id == settings.OWNER_ID:
+                role = "Owner"
+            elif user_id in settings.SUDO_IDS:
+                role = "Sudo Admin"
+            elif user_id in settings.ADMIN_IDS:
+                role = "Admin"
+            else:
+                role = None
 
             if role:
                 text = (
@@ -350,17 +404,18 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                     f"🔑 <b>Role:</b> {role}"
                 )
             else:
-                sub = await _sub_service.get_subscription(user_id)
+                sub_service = _get_sub_service()
+                sub = await sub_service.get_subscription(user_id)
                 text = _format_status(sub, user_id)
-            
+
             back_button = [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]
             buttons = [back_button]
-            
-            sub = await _sub_service.get_subscription(user_id)
+
+            sub_service = _get_sub_service()
+            sub = await sub_service.get_subscription(user_id)
             if sub and (sub.is_expired or sub.is_in_grace):
                 bot_username = await _get_bot_username(client)
                 url = f"https://t.me/{bot_username}?start=resubscribe"
-                # Use insert to put the resubscribe button at the top
                 buttons.insert(0, [InlineKeyboardButton("🔄 Resubscribe", url=url)])
 
             keyboard = InlineKeyboardMarkup(buttons)
@@ -369,9 +424,13 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
         await callback_query.answer()
 
     except MessageNotModified:
-        await callback_query.answer() # User clicked the same button twice
+        await callback_query.answer()
     except Exception as e:
-        logger.error("Error in menu callback", extra={"ctx_user_id": user_id, "ctx_action": action, "ctx_error": str(e)}, exc_info=True)
+        logger.error(
+            "Error in menu callback",
+            extra={"ctx_user_id": user_id, "ctx_action": action, "ctx_error": str(e)},
+            exc_info=True,
+        )
         await callback_query.answer("An error occurred.", show_alert=True)
 
 
@@ -392,10 +451,9 @@ async def handle_rules(client: Client, message: Message) -> None:
         await _ack_in_group(
             client, message,
             ack_text="📩 Rules sent to your DMs!",
-            blocked_text="",  # handled inside _ack_in_group
+            blocked_text="",
             dm_sent=dm_sent,
         )
-    # In private chat DM already delivered above — nothing more to do
 
     logger.info("/rules", extra={"ctx_user_id": user_id, "ctx_chat": message.chat.id})
 
@@ -410,7 +468,6 @@ async def handle_mystatus(client: Client, message: Message) -> None:
     user_id = message.from_user.id
     is_group = message.chat.id != user_id
 
-    # Privileged users get a permanent-access message
     if user_id == settings.OWNER_ID:
         role = "Owner"
     elif user_id in settings.SUDO_IDS:
@@ -431,17 +488,18 @@ async def handle_mystatus(client: Client, message: Message) -> None:
             await _ack_in_group(client, message, "📩 Status sent to your DMs!", "", dm_sent)
         return
 
-    # Regular user — fetch from DB
-    sub = await _sub_service.get_subscription(user_id)
+    sub_service = _get_sub_service()
+    sub = await sub_service.get_subscription(user_id)
     text = _format_status(sub, user_id)
 
     keyboard = None
     if sub is None or sub.is_expired or sub.is_in_grace:
         bot_username = await _get_bot_username(client)
-        url = f"https://t.me/{bot_username}?start=resubscribe" if bot_username else f"https://t.me/{bot_username}"
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Resubscribe", url=url),
-        ]])
+        url = f"https://t.me/{bot_username}?start=resubscribe" if bot_username else ""
+        if url:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Resubscribe", url=url),
+            ]])
 
     dm_sent = await _send_private(client, user_id, text, reply_markup=keyboard)
 
@@ -455,6 +513,8 @@ async def handle_mystatus(client: Client, message: Message) -> None:
 
     logger.info("/mystatus", extra={"ctx_user_id": user_id})
 
+
+# ── /ping ─────────────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.command("ping") & filters.private)
 async def handle_ping_test(client: Client, message: Message) -> None:
