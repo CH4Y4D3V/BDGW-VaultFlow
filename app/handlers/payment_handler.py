@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError, UserIsBlocked, PeerIdInvalid
 from pyrogram.types import (
@@ -369,8 +369,20 @@ async def handle_payment_proof_capture(client: Client, message: Message) -> None
         return
 
     if not state:
-        # User is not in a payment flow — silent exit, this is the normal path.
-        return
+        # User is not in a payment flow.
+        # HANDLER CONFLICT FIX: raise ContinuePropagation instead of returning.
+        #
+        # This handler uses filters.text & filters.private which matches ALL
+        # private text messages including /start commands and media captions.
+        # Because payment_handler.py is registered before user_handler.py and
+        # submission_handler.py (alphabetical plugin load order), a plain `return`
+        # here causes Pyrogram to stop processing this update in group 0 — so
+        # /start, /rules and every other command handler, as well as media
+        # submission handlers, would never fire for non-payment users.
+        #
+        # ContinuePropagation signals Pyrogram to continue trying the next
+        # matching handler in the same group, so /start and submissions work.
+        raise ContinuePropagation
 
     logger.info(
         "HANDLER: handle_payment_proof_capture — payment proof received",

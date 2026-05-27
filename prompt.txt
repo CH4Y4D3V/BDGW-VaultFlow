@@ -1,0 +1,136 @@
+@'
+You are a senior Python/Telegram bot engineer doing a final production handover fix. This is a Pyrogram-based bot (Python 3.12, MongoDB, APScheduler, Redis). The bot boots and reaches idle but has 14 confirmed bugs. Fix ALL of them now, surgically. Read every file before touching it.
+
+---
+
+CRITICAL RULES — never violate:
+- Logger is stdlib logging.Logger. ONLY valid calls: logger.info("msg") or logger.info("msg", extra={"key": val}). NEVER logger.info("msg", key=val) — that crashes the process.
+- Never use structlog. Never add new dependencies.
+- Python 3.12 native types only: list[dict] not List[dict]
+- All async paths must be truly async — no blocking calls
+- Never rewrite a file wholesale — surgical edits only
+- Never reverse dependency direction: config → database → repositories → services → workers → handlers
+- All DB access through repositories only
+- Business logic in services only — handlers must be thin
+- Never bare except: — always catch specific exceptions
+- MongoDB: atomic updates only ($set, find_one_and_update), never collection scan hot paths
+
+---
+
+BUG LIST — fix every single one:
+
+BUG 1 — main_bot.py line 35
+  logger.info("boot_stage", stage="idle_entered")
+  Fix: logger.info("boot_stage", extra={"stage": "idle_entered"})
+  Read main_bot.py fully, find ALL logger calls with bare kwargs, fix every one.
+
+BUG 2 — app/core/lifecycle.py
+  The Telegram client startup block is inside an except block that follows sys.exit(1).
+  Code after sys.exit() inside except is unreachable — Pyrogram never starts.
+  Fix: Move the Pyrogram startup block OUTSIDE and AFTER the try/except that contains sys.exit(1).
+  Read lifecycle.py fully. Map the entire try/except structure before touching anything.
+
+BUG 3 — app/core/lifecycle.py (same file, fix after BUG 2)
+  Inside the previously-dead Pyrogram block there are structlog-style logger calls:
+  e.g. logger.info("event", key=value) or logger.bind(...) or log.with_fields(...)
+  Fix: Convert every one to logger.info("event", extra={"key": value})
+
+BUG 4 — app/core/lifecycle.py
+  self._subscription_worker is referenced but never instantiated anywhere in lifecycle.py.
+  Fix: Instantiate it in the correct startup phase, the same way other workers are instantiated.
+
+BUG 5 — app/scheduler/scheduler.py
+  Missing imports: asyncio, DuplicateKeyError, WatermarkState
+  Fix: Add at top:
+      import asyncio
+      from pymongo.errors import DuplicateKeyError
+  For WatermarkState: grep the codebase for where WatermarkState is defined, then import from that exact module path.
+
+BUG 6 — app/scheduler/scheduler.py
+  setup_jobs() is called but the method does not exist by that name.
+  Fix: Read the file, find what the scheduling method is actually called, then either rename the call to match the definition OR rename the definition to setup_jobs(). Do not create a duplicate method.
+
+BUG 7 — app/scheduler/scheduler.py
+  On restart after a crash, the singleton lock in MongoDB is still held by the dead process.
+  Fix: In the lock-acquisition logic, after detecting a held lock, force-release the stale lock with findOneAndUpdate or delete, then re-acquire. Must be idempotent and safe for concurrent restarts.
+
+BUG 8 — app/scheduler/scheduler.py + app/repositories/queue_repository.py
+  scheduler.py calls repo.get_channel_pending_count(channel_id) and repo.get_deadline_exceeded_jobs(cutoff) but neither method exists on QueueRepository.
+  Fix: Add both methods to QueueRepository:
+
+  async def get_channel_pending_count(self, channel_id: int) -> int:
+      return await self._collection.count_documents(
+          {"destination_channel_id": channel_id, "status": "pending"}
+      )
+
+  async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
+      cursor = self._collection.find({
+          "status": {"$in": ["pending", "processing"]},
+          "deadline": {"$lt": cutoff},
+      })
+      return await cursor.to_list(length=500)
+
+BUG 9 — app/distribution/dispatcher.py
+  Missing: import asyncio
+  Fix: Add import asyncio at the top after reading the file to confirm.
+
+BUG 10 — app/handlers/submission_handler.py
+  _redis NameError — variable is named redis not _redis.
+  Fix: Replace every occurrence of _redis with redis in this file only.
+
+BUG 11 — app/handlers/support_handler.py
+  Same as BUG 10.
+  Fix: Replace every occurrence of _redis with redis in this file only.
+
+BUG 12 — app/watermark/worker_pool.py
+  a) Missing imports — read the file, find every unimported symbol, add correct imports.
+  b) _resolve_media_path() is called but not defined anywhere.
+  Fix for b: Add at module level before the class that calls it:
+
+  def _resolve_media_path(filename: str) -> str:
+      from pathlib import Path
+      return str(Path(__file__).parent / "assets" / filename)
+
+BUG 13 — app/repositories/queue_repository.py
+  a) get_recently_posted_content_ids() is called but not defined.
+  b) One method has a duplicate return statement — second one is dead code.
+  Fix for a: Add:
+
+  async def get_recently_posted_content_ids(
+      self,
+      channel_id: int,
+      lookback_seconds: int = 3600
+  ) -> list[str]:
+      from datetime import datetime, timedelta
+      cutoff = datetime.utcnow() - timedelta(seconds=lookback_seconds)
+      cursor = self._collection.find(
+          {
+              "destination_channel_id": channel_id,
+              "status": "delivered",
+              "delivered_at": {"$gte": cutoff},
+          },
+          {"content_id": 1, "_id": 0},
+      )
+      docs = await cursor.to_list(length=1000)
+      return [d["content_id"] for d in docs if "content_id" in d]
+
+  Fix for b: Read the file, find the method with two return statements, remove the unreachable second one.
+
+BUG 14 — app/core/database.py
+  Vault collection indexed twice in _ensure_indexes() causing DEGRADED error on every boot.
+  Fix: Read _ensure_indexes() fully. Find the duplicate vault index call. Remove the second occurrence only. Do not touch any other collection indexes.
+
+---
+
+EXECUTION ORDER: 14, 9, 10, 11, 5, 13, 8, 12, 6, 7, 4, 3, 2, 1
+
+VERIFICATION — after all fixes run these checks:
+1. grep -rn "logger\." app/ main_bot.py | grep -v "extra=" to find remaining bare-kwarg logger calls. Fix every result.
+2. python -m py_compile on every changed file — all must pass clean.
+3. Confirm _ensure_indexes() has zero duplicate index specs.
+4. Confirm Pyrogram startup is reachable — not inside an except block after sys.exit.
+5. Confirm self._subscription_worker is instantiated before it is referenced.
+
+Do not stop until all 14 bugs are fixed and all 5 checks pass.
+Report each fix as: FILE | BUG# | what was wrong | what you changed.
+'@ | Out-File -FilePath prompt.txt -Encoding UTF8
