@@ -608,5 +608,3 @@ async def handle_approve_payment(client: Client, message: Message) -> None:
             )
         except Exception:
             pass
-t Exception:
-            pass
