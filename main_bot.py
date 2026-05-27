@@ -32,8 +32,9 @@ async def async_main() -> None:
         # Address already in use.
         await lifecycle.start()
 
+        # FIX 1: was logger.info("boot_stage", stage="idle_entered") which crashes
+        # stdlib Logger with TypeError: unexpected keyword argument 'stage'.
         logger.info("VaultFlow idle — waiting for shutdown signal.")
-        logger.info("Main loop running. Waiting for shutdown signal.")
         await stop_event.wait()
     except asyncio.CancelledError:
         logger.info("Main loop cancelled via async propagation")

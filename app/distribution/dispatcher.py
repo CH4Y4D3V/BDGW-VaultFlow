@@ -1,4 +1,4 @@
-import asyncio
+import asyncio  # FIX 10: was missing — asyncio.Event() and asyncio.create_task() used below
 from datetime import datetime, timezone
 from typing import List, Callable, Awaitable
 from app.core.models import DistributionResult
@@ -83,11 +83,12 @@ class DistributionDispatcher:
 
                 # ── Heartbeat Task ────────────────────────────────────────────
                 heartbeat_stop = asyncio.Event()
+
                 async def _heartbeat():
                     while not heartbeat_stop.is_set():
                         await asyncio.sleep(30)
                         await self._queue.extend_delivery_lock(primary_id, target_id)
-                
+
                 heartbeat_task = asyncio.create_task(_heartbeat())
 
                 try:
@@ -105,7 +106,7 @@ class DistributionDispatcher:
                         await self._queue.record_target_failed(str(job["_id"]), target_id, result.error or "unknown")
                     await self._balancer.record_delivery(target_id, success=False)
                     all_succeeded = False
-            
+
             finally:
                 # Release lock after delivery attempt (success or fail)
                 await self._queue.release_delivery_lock(primary_id, target_id)

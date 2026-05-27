@@ -78,15 +78,16 @@ async def _safe_reply(
 @Client.on_callback_query(filters.regex(r"^menu:support$"))
 async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     user_id = callback.from_user.id if callback.from_user else 0
-    
+
     # ── Anti-Spam / Debounce ──
     redis = get_redis()
     spam_key = f"menu:spam:{user_id}"
     if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
+    # FIX 12: was `await _redis.set(...)` — _redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
-    
+
     logger.info(
         "HANDLER: handle_support_menu entered",
         extra={

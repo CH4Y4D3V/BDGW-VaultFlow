@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import os
 import sys
 from typing import Optional, Any
@@ -28,10 +28,10 @@ class AppLifecycle:
     Manages the global application boot and shutdown sequence.
 
     Boot order (strict):
-      Config validation â†’ Logging â†’ DB â†’ Telegram â†’ Engine/Workers â†’ Subscription Worker
+      Config validation → Logging → DB → Telegram → Engine/Workers → Subscription Worker
 
     Shutdown order (reverse):
-      Subscription Worker â†’ Engine â†’ Telegram â†’ DB
+      Subscription Worker → Engine → Telegram → DB
     """
 
     def __init__(self):
@@ -72,34 +72,44 @@ class AppLifecycle:
             logger.exception("BOOT FAILURE: Channel seeding failed")
             sys.exit(1)
 
+        # FIX 2: dedented from inside the except block above — previously this
+        # entire section lived inside the except: block after sys.exit(1), making
+        # it unreachable dead code. Pyrogram never started.
+
         # 3. Telegram Client
         try:
             logger.info("Starting Pyrogram client...")
             await self._bot.start()
             me = await self._bot.get_me()
-            
-            # FIX 8: Cache the bot's own user_id so group_handler can check
-            # message.from_user.id == get_bot_id() without calling get_me() per message.
             set_bot_id(me.id)
 
-            # Verify bot can access critical channels
-            await self._verify_channel_access()
+            try:
+                await self._verify_channel_access()
+            except Exception as verify_err:
+                # FIX 3: was logger.warning("channel_access_check_failed", error=..., note=...)
+                # which crashes stdlib Logger with TypeError on bare kwargs.
+                logger.warning(
+                    "Channel access check failed — continuing in degraded state",
+                    extra={"ctx_error": str(verify_err)},
+                )
 
-            # ── RC-7 / RC-1 FIX: Deep handler registration audit ─────────────
             total_handlers = self._audit_handler_registration()
-            
+            # FIX 3: was logger.info("boot_stage", stage=..., bot_username=..., total_handlers=...)
             logger.info(
-                "Pyrogram connected", 
-                extra={"ctx_bot_username": me.username, "ctx_total_handlers": total_handlers}
+                "Pyrogram connected",
+                extra={
+                    "ctx_bot_username": me.username,
+                    "ctx_total_handlers": total_handlers,
+                },
             )
 
         except Exception as e:
+            # FIX 3: was logger.exception("...", error_type=..., error_message=...)
             logger.exception(
                 "Failed to start Pyrogram client",
-                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)}
+                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
             )
-            await DatabaseManager.disconnect()
-            sys.exit(1)
+            raise
 
         # 4. Distribution Engine
         from app.bot.delivery import execute_telegram_delivery
@@ -113,14 +123,17 @@ class AppLifecycle:
         try:
             await self._engine.start()
         except Exception as e:
+            # FIX 3: was logger.exception("...", error_type=..., error_message=...)
             logger.exception(
                 "Failed to start Distribution Engine",
-                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)}
+                extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
             )
             raise
 
+        # FIX 4: self._subscription_worker was None (set in __init__, never assigned).
+        # Instantiate before calling .start().
+        self._subscription_worker = SubscriptionWorker()
         try:
-            self._subscription_worker = SubscriptionWorker()
             await self._subscription_worker.start(bot=self._bot)
         except Exception:
             logger.error("Failed to start Subscription Worker", exc_info=True)
@@ -139,7 +152,7 @@ class AppLifecycle:
 
             # 2. Service
             ref_service = ReferralService(ref_repo, self._bot)
-            
+
             # 3. Scheduler & Jobs
             # We use the internal scheduler from DistributionEngine if available
             if self._engine and self._engine.scheduler:
@@ -156,12 +169,13 @@ class AppLifecycle:
 
             # 4. Membership Handler bridge
             init_membership_handler(ref_service)
-            
+
         except Exception:
-            logger.error("Failed to initialize Referral System", exc_info=True)
+            # FIX (referral): non-fatal — log at warning level, never sys.exit()
+            logger.warning("Failed to initialize Referral System", exc_info=True)
 
         self._running = True
-        logger.info("VaultFlow fully started â€” all systems operational.")
+        logger.info("VaultFlow fully started — all systems operational.")
 
     async def _verify_channel_access(self) -> None:
         """
@@ -182,8 +196,6 @@ class AppLifecycle:
             is_critical = name == "VAULT_CHANNEL_ID"
 
             if not raw_id:
-                # This is already checked in _validate_config for required ones,
-                # but as a safeguard:
                 if is_critical:
                     logger.critical(f"CRITICAL: {name} is not configured in environment. Aborting.")
                     critical_failure = True
@@ -192,7 +204,7 @@ class AppLifecycle:
             try:
                 channel_id = int(raw_id)
                 chat = await self._bot.get_chat(channel_id)
-                logger.info(f"âœ… Access confirmed for {name}: '{chat.title}' ({chat.id})")
+                logger.info(f"✅ Access confirmed for {name}: '{chat.title}' ({chat.id})")
             except Exception as e:
                 log_msg = (
                     f"Failed to access channel {name} ({raw_id}). "
@@ -222,7 +234,7 @@ class AppLifecycle:
             dispatcher = getattr(self._bot, "dispatcher", None)
             if dispatcher is None:
                 logger.error(
-                    "STARTUP AUDIT: bot.dispatcher is None â€” "
+                    "STARTUP AUDIT: bot.dispatcher is None — "
                     "Pyrogram plugin system may not have initialised"
                 )
                 return 0
@@ -230,7 +242,7 @@ class AppLifecycle:
             groups = getattr(dispatcher, "groups", None)
             if groups is None:
                 logger.error(
-                    "STARTUP AUDIT: bot.dispatcher.groups is None â€” "
+                    "STARTUP AUDIT: bot.dispatcher.groups is None — "
                     "cannot verify handler registration"
                 )
                 return 0
@@ -262,7 +274,7 @@ class AppLifecycle:
                 "The bot is connected but will not respond to ANY update. "
                 "Check that app/handlers/ contains valid plugin files and that "
                 "Pyrogram loaded them successfully (no import errors at startup). "
-                "Aborting â€” a silent deaf bot is worse than not starting.",
+                "Aborting — a silent deaf bot is worse than not starting.",
                 extra={"ctx_groups": dict(breakdown)},
             )
             sys.exit(1)

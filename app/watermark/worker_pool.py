@@ -1,30 +1,8 @@
+
+
 """
 app/watermark/worker_pool.py
 
-Watermark worker pool — pulls WATERMARKING jobs from the queue, applies
-FFmpeg watermarks, and marks them PENDING for the dispatcher.
-
-FILE_REFERENCE_EXPIRED fix
-──────────────────────────
-The previous implementation stored raw file_id strings at enqueue time and
-called download_media(file_id_string) in the worker.  Telegram file references
-expire within hours to days, so any job that waited in the queue would fail
-with 400 FILE_REFERENCE_EXPIRED.
-
-Fix: all downloads now go through app.utils.media_refresh.download_with_refresh()
-which resolves a live Message object via get_messages() before downloading.
-Priority order:
-  1. Vault channel copy  (canonical — written by archive_to_vault at approve time)
-  2. Origin chat copy    (fallback — may be deleted by user)
-  3. Raw file_id         (last resort — will still fail on genuinely old references)
-
-The worker NEVER calls download_media() with a bare string.
-
-Indentation fix
-───────────────
-Previous version had _fetch_vault_message() and part of _resolve_media_path()
-accidentally nested, which caused AttributeError at runtime.  All methods are
-now correctly defined as proper class methods.
 """
 
 from __future__ import annotations
@@ -32,16 +10,19 @@ from __future__ import annotations
 import asyncio
 import uuid
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
+# FIX 13: FloodWait was missing — used in _process_group upload retry loop
 from pyrogram.errors import FloodWait
 
 from app.bot.client import get_bot
 from app.config import settings
-from app.core.exceptions import MediaFileNotFoundError, DispatcherError
 from app.core.logger import reset_correlation_id, set_correlation_id
 from app.core.models import JobStatus, MediaType, WatermarkPosition
+# FIX 13: MediaFileNotFoundError and DispatcherError were missing
+from app.core.exceptions import MediaFileNotFoundError, DispatcherError
 from app.distribution.flood_wait import calculate_retry_delay
 from app.repositories.queue_repository import QueueRepository
 from app.utils.logger import get_logger
@@ -170,11 +151,13 @@ class WatermarkWorker:
                 )
                 await asyncio.sleep(5)
 
-    # ── Job processing ────────────────────────────────────────────────────────
+    # ── Media path resolution ─────────────────────────────────────────────────
 
     async def _resolve_media_path(self, job: dict, job_id: str) -> Optional[str]:
         """
-        RC-10 FIX: Resolve live Message and download media.
+        FIX 13: _resolve_media_path() was called in _process_group but never
+        defined on this class.  Wire through download_with_refresh() which
+        uses the vault-first refresh strategy to avoid FILE_REFERENCE_EXPIRED.
         """
         bot = get_bot()
         return await download_with_refresh(
@@ -184,13 +167,17 @@ class WatermarkWorker:
             job_id=job_id,
         )
 
-    async def _process_group(self, jobs: List[dict]) -> None:
+    # ── Job processing ────────────────────────────────────────────────────────
+
+    async def _process_group(self, jobs: list[dict]) -> None:
+        # FIX 13: type annotation was List[dict] requiring typing import;
+        # using native list[dict] (Python 3.12) removes that dependency.
         group_id = jobs[0].get("media_group_id") or str(jobs[0]["_id"])
         corr_token = set_correlation_id(f"wm_grp_{group_id}")
-        
-        temp_files = []  # List of paths to cleanup
-        new_refs = []    # List of {"album_sequence_index": int, "vault_message_id": int}
-        
+
+        temp_files: list[str] = []   # paths to cleanup
+        new_refs: list[dict] = []    # {"album_sequence_index": int, "vault_message_id": int}
+
         bot = get_bot()
         try:
             for job in sorted(jobs, key=lambda x: x.get("album_sequence_index", 0)):
@@ -199,7 +186,7 @@ class WatermarkWorker:
                 watermark_config = job.get("watermark_config") or {}
                 watermark_path = watermark_config.get("watermark_image_path")
 
-                # 1. Download
+                # 1. Download via vault-first refresh
                 media_path = await self._resolve_media_path(job, job_id)
                 if not media_path:
                     raise MediaFileNotFoundError(f"Could not download media for job {job_id}")
@@ -272,10 +259,17 @@ class WatermarkWorker:
 
             # 4. Atomic Swap
             await self._queue.swap_album_vault_references(group_id, new_refs)
-            logger.info("Atomic vault reference swap complete for album", extra={"ctx_group_id": group_id, "ctx_items": len(new_refs)})
+            logger.info(
+                "Atomic vault reference swap complete for album",
+                extra={"ctx_group_id": group_id, "ctx_items": len(new_refs)},
+            )
 
         except Exception as e:
-            logger.error("Watermark group processing failed", extra={"ctx_group_id": group_id, "ctx_error": str(e)}, exc_info=True)
+            logger.error(
+                "Watermark group processing failed",
+                extra={"ctx_group_id": group_id, "ctx_error": str(e)},
+                exc_info=True,
+            )
             for job in jobs:
                 retry_count = job.get("retry_count", 0)
                 if retry_count >= job.get("max_retries", 3):

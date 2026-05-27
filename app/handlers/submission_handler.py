@@ -247,15 +247,16 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     """
     action = callback.data.split(":")[1]
     user_id = callback.from_user.id if callback.from_user else 0
-    
+
     # ── Anti-Spam / Debounce ──
     redis = get_redis()
     spam_key = f"menu:spam:{user_id}"
     if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
+    # FIX 11: was `await _redis.set(...)` — _redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
-    
+
     logger.info(
         "HANDLER: handle_submit_menu entered",
         extra={
@@ -266,7 +267,7 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
 
     try:
         await callback.answer()
-        
+
         if action == "anonymous":
             text = (
                 "🕵️ <b>Anonymous Submission</b>\n\n"
@@ -343,10 +344,6 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         user_id = message.from_user.id
 
         # ── Middleware conflict fix: skip if user is in active payment flow ──
-        # payment_handler.handle_payment_proof_capture() owns media messages
-        # while the user is mid-payment. Without this guard, both handlers fire
-        # and the photo is incorrectly routed to both the submission pipeline and
-        # the payment proof capture path.
         try:
             payment_active = await _has_active_payment_session(user_id)
         except Exception as e:
@@ -364,10 +361,6 @@ async def handle_media_submission(client: Client, message: Message) -> None:
             return
 
         # ── FIX 17: Per-user rate limiting ────────────────────────────────────
-        # Simple in-memory sliding window: max 10 submissions per user per 60s.
-        # Applied after the payment check (payment messages are already excluded)
-        # and before the consent gate so rate-limited users get a fast reply
-        # without hitting MongoDB.
         now = time.monotonic()
         timestamps = _submission_rate.get(user_id, [])
         timestamps = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]

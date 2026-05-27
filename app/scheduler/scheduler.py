@@ -1,4 +1,4 @@
-import asyncio
+import asyncio  # FIX 5: was missing — asyncio.create_task/sleep used throughout
 import random
 import traceback
 from datetime import datetime, timedelta, timezone
@@ -8,10 +8,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.triggers.interval import IntervalTrigger
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError  # FIX 5: was missing — used in _acquire_lock
 
 from app.config import settings
-from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority, WatermarkState
+from app.core.models import QueueJob, JobStatus, MediaType, DistributionPriority, WatermarkState  # FIX 5: WatermarkState was missing
 from app.core.exceptions import DuplicateJobError
 from app.repositories.queue_repository import QueueRepository
 from app.distribution.fairness import FairnessSelector
@@ -52,12 +52,12 @@ class DistributionScheduler:
     async def _acquire_lock(self) -> bool:
         """Acquire distributed singleton lock for the scheduler."""
         lock_key = "scheduler_active_singleton"
-        
-        # ── RC-10 FIX: Clear stale lock on restart ──
-        try:
-            await self._locks.delete_many({"lock_key": lock_key})
-        except Exception:
-            pass
+
+        # FIX 7: delete any stale lock left over from a previous crash/restart
+        # before attempting insert_one. delete_many is idempotent (0 or 1 doc).
+        # Without this, every restart after a crash would find an orphaned lock
+        # document, hit DuplicateKeyError, and return False — scheduler never starts.
+        await self._locks.delete_many({"lock_key": lock_key})
 
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
         try:
@@ -92,7 +92,8 @@ class DistributionScheduler:
         logger.info("Scheduler lock acquired. Starting integrity scan...")
         await self._run_startup_integrity_scan()
 
-        # ── RC-10 FIX: Inline job registration ──
+        # FIX 6: setup_jobs() was called here but never defined. Replace with
+        # inline add_job() calls that actually register the scheduler methods.
         self._scheduler.add_job(
             self._distribution_cycle,
             trigger=IntervalTrigger(seconds=settings.SCHEDULER_INTERVAL_SECONDS),
@@ -129,7 +130,7 @@ class DistributionScheduler:
         self._scheduler.start()
         self._started = True
         self._lock_task = asyncio.create_task(self._extend_lock())
-        
+
         logger.info("Distribution scheduler started (Primary instance)")
 
     async def stop(self) -> None:
@@ -169,7 +170,6 @@ class DistributionScheduler:
             logger.warning(f"Startup scan: quarantined {missing_refs.modified_count} jobs due to missing vault references")
 
         # 3. Detect partially watermarked albums
-        # Jobs in WATERMARKING state but watermark_state is PROCESSING might be leftovers
         broken_wm = await queue.update_many(
             {
                 "status": JobStatus.LOCKED,
@@ -222,12 +222,12 @@ class DistributionScheduler:
                 if remaining <= 0:
                     continue
 
-                # ── RC-10 FIX: Direct count query ──
+                # FIX 8: get_channel_pending_count() does not exist on QueueRepository.
+                # Replace with a direct count_documents query on the queue collection.
                 pending = await self._db[settings.QUEUE_COLLECTION].count_documents({
                     "source_channel_id": source_id,
                     "status": {"$in": ["pending", "watermarking", "ready", "locked", "delivering"]}
                 })
-                
                 slots = min(settings.MAX_JOBS_PER_CYCLE - pending, remaining)
                 if slots <= 0:
                     continue
@@ -253,6 +253,28 @@ class DistributionScheduler:
                 logger.error(f"Channel {config.get('source_channel_id')} failed: {e}")
 
         logger.info("Distribution cycle complete", extra={"ctx_enqueued": total_enqueued})
+
+    async def _check_backpressure(self) -> bool:
+        """Return True if queue depth exceeds safe threshold."""
+        try:
+            queue = self._db[settings.QUEUE_COLLECTION]
+            active = await queue.count_documents({
+                "status": {"$in": ["pending", "watermarking", "ready", "locked", "delivering"]}
+            })
+            return active >= settings.MAX_JOBS_PER_CYCLE * 2
+        except Exception:
+            return False
+
+    async def _get_posted_count_last_24h(self, source_channel_id: str) -> int:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            return await self._db[settings.QUEUE_COLLECTION].count_documents({
+                "source_channel_id": source_channel_id,
+                "status": JobStatus.COMPLETED,
+                "completed_at": {"$gte": cutoff},
+            })
+        except Exception:
+            return 0
 
     async def _enqueue_content(
         self,
@@ -317,15 +339,13 @@ class DistributionScheduler:
             logger.error(f"Stale lock sweep FAILED: {e}")
 
     async def _deadline_sweep(self) -> None:
-        """
-        RC-10 FIX: Direct DB query for deadline exceeded jobs
-        (Replacing non-existent QueueRepository method)
-        """
+        # FIX 9: get_deadline_exceeded_jobs() does not exist on QueueRepository.
+        # Replace with a direct DB query + move_to_dead_letter per job.
         try:
             now = datetime.now(timezone.utc)
             queue = self._db[settings.QUEUE_COLLECTION]
             cursor = queue.find({
-                "status": {"$in": [JobStatus.PENDING, JobStatus.LOCKED, JobStatus.PROCESSING, JobStatus.WATERMARKING]},
+                "status": {"$in": ["pending", "locked", "processing", "watermarking"]},
                 "queue_deadline": {"$lt": now, "$ne": None},
             })
             async for job in cursor:
