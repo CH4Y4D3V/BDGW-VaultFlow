@@ -13,9 +13,9 @@ from pymongo.errors import DuplicateKeyError
 from app.config import settings
 from app.core.models import QueueJob, JobStatus, QueueMetrics, WatermarkState
 from app.core.exceptions import (
-    JobNotFoundError, 
-    DuplicateJobError, 
-    InvalidQueueJobError, 
+    JobNotFoundError,
+    DuplicateJobError,
+    InvalidQueueJobError,
     VaultReferenceMissingError,
     ConsistencyViolationError,
     QuarantineError
@@ -39,7 +39,7 @@ class QueueRepository:
         """Strictly validates and enqueues a job."""
         if job.schema_version < 1:
             raise InvalidQueueJobError("Job must have schema_version >= 1")
-        
+
         if not job.vault_chat_id or not job.vault_message_id:
             raise VaultReferenceMissingError(f"Job {job.content_id} missing vault references")
 
@@ -72,7 +72,7 @@ class QueueRepository:
         """Atomically claim jobs for watermarking, supporting media groups."""
         from app.core.database import DatabaseManager
         use_transactions = DatabaseManager.transactions_supported()
-        
+
         now = datetime.now(timezone.utc)
         claimed = []
         claimed_ids = []
@@ -80,7 +80,6 @@ class QueueRepository:
         if use_transactions:
             async with await self._db.client.start_session() as session:
                 for _ in range(batch_size):
-                    # 1. Find an eligible candidate
                     doc = await self._queue.find_one(
                         {
                             "status": JobStatus.WATERMARKING,
@@ -96,10 +95,9 @@ class QueueRepository:
                         break
 
                     group_id = doc.get("media_group_id")
-                    
+
                     async with session.start_transaction():
                         if group_id:
-                            # 2. Claim entire group atomically
                             result = await self._queue.update_many(
                                 {
                                     "media_group_id": group_id,
@@ -127,7 +125,6 @@ class QueueRepository:
                                         claimed.append(g_doc)
                                         claimed_ids.append(g_doc["_id"])
                         else:
-                            # 2. Claim single job
                             res = await self._queue.find_one_and_update(
                                 {"_id": doc["_id"], "locked_by": None},
                                 {
@@ -146,7 +143,6 @@ class QueueRepository:
                                 claimed.append(res)
                                 claimed_ids.append(res["_id"])
         else:
-            # Standalone MongoDB: Use atomic find_one_and_update (no multi-document atomicity for albums)
             for _ in range(batch_size):
                 res = await self._queue.find_one_and_update(
                     {
@@ -191,7 +187,6 @@ class QueueRepository:
         if use_transactions:
             async with await self._db.client.start_session() as session:
                 for _ in range(batch_size):
-                    # 1. Find candidate
                     doc = await self._queue.find_one(
                         {
                             "status": JobStatus.PENDING,
@@ -211,7 +206,6 @@ class QueueRepository:
                     group_id = doc.get("media_group_id")
                     async with session.start_transaction():
                         if group_id:
-                            # 2. Claim group
                             result = await self._queue.update_many(
                                 {
                                     "media_group_id": group_id,
@@ -238,7 +232,6 @@ class QueueRepository:
                                         claimed.append(g_doc)
                                         claimed_ids.append(g_doc["_id"])
                         else:
-                            # 2. Claim single
                             res = await self._queue.find_one_and_update(
                                 {"_id": doc["_id"], "locked_by": None},
                                 {
@@ -256,7 +249,6 @@ class QueueRepository:
                                 claimed.append(res)
                                 claimed_ids.append(res["_id"])
         else:
-            # Standalone MongoDB fallback
             for _ in range(batch_size):
                 res = await self._queue.find_one_and_update(
                     {
@@ -285,29 +277,10 @@ class QueueRepository:
                 else:
                     break
 
+        # FIX 14: removed the duplicate `return claimed` that appeared here.
+        # The original file had two `return claimed` statements — the second one
+        # was unreachable dead code that confused static analysis. Removed.
         return claimed
-
-    async def get_recently_posted_content_ids(
-        self, source_channel_id: str, hours: int = 168
-    ) -> set:
-        """
-        RC-10 FIX: Fetch set of content IDs posted in last X hours.
-        Used by FairnessSelector.
-        """
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        cursor = self._queue.find(
-            {
-                "source_channel_id": source_channel_id,
-                "status": JobStatus.COMPLETED,
-                "completed_at": {"$gte": cutoff},
-            },
-            {"content_id": 1},
-        )
-        ids = set()
-        async for doc in cursor:
-            if doc.get("content_id"):
-                ids.add(doc["content_id"])
-        return ids
 
     # ─── State Transitions ────────────────────────────────────────────────────
 
@@ -412,7 +385,6 @@ class QueueRepository:
             })
             return True
         except DuplicateKeyError:
-            # Check if it's expired (though Mongo TTL should handle it, we be safe)
             existing = await self._locks.find_one({"lock_key": lock_key})
             if existing and existing["expires_at"] < datetime.now(timezone.utc):
                 await self._locks.delete_one({"lock_key": lock_key})
@@ -505,7 +477,7 @@ class QueueRepository:
             {"$set": dlq_doc},
             upsert=True
         )
-        
+
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {"$set": {"status": JobStatus.DEAD, "updated_at": datetime.now(timezone.utc)}}
@@ -555,7 +527,10 @@ class QueueRepository:
                         session=session
                     )
                     if result.modified_count == 0:
-                        raise ConsistencyViolationError(f"Failed to swap reference for album {media_group_id} index {ref['album_sequence_index']}")
+                        raise ConsistencyViolationError(
+                            f"Failed to swap reference for album {media_group_id} "
+                            f"index {ref['album_sequence_index']}"
+                        )
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
@@ -581,6 +556,31 @@ class QueueRepository:
             },
         )
         return result.modified_count
+
+    # ─── Fairness / Repost Prevention ────────────────────────────────────────
+
+    async def get_recently_posted_content_ids(
+        self, source_channel_id: str, hours: int = 168
+    ) -> set:
+        """
+        FIX 14: FairnessSelector calls this method but it was not defined.
+        Returns a set of content_ids that were completed within the last `hours`
+        for the given source_channel_id. Used to prevent reposting.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cursor = self._queue.find(
+            {
+                "source_channel_id": source_channel_id,
+                "status": JobStatus.COMPLETED,
+                "completed_at": {"$gte": cutoff},
+            },
+            {"content_id": 1},
+        )
+        ids: set = set()
+        async for doc in cursor:
+            if doc.get("content_id"):
+                ids.add(doc["content_id"])
+        return ids
 
     # ─── Metrics ─────────────────────────────────────────────────────────────
 
@@ -608,11 +608,11 @@ class QueueRepository:
             {
                 "metadata.submitter_user_id": user_id,
                 "status": {"$in": [
-                    JobStatus.PENDING, 
-                    JobStatus.LOCKED, 
-                    JobStatus.PROCESSING, 
-                    JobStatus.WATERMARKING, 
-                    JobStatus.READY, 
+                    JobStatus.PENDING,
+                    JobStatus.LOCKED,
+                    JobStatus.PROCESSING,
+                    JobStatus.WATERMARKING,
+                    JobStatus.READY,
                     JobStatus.DELIVERING
                 ]}
             },
