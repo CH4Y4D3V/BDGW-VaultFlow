@@ -13,19 +13,19 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Topic types ───────────────────────────────────────────────────────────────
+# â”€â”€ Topic types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 TOPIC_CONTENT = "content"
 TOPIC_SUPPORT = "support"
 TOPIC_PAYMENT = "payment"
 
 _TOPIC_ICONS = {
-    TOPIC_CONTENT: "📤",
-    TOPIC_SUPPORT: "🆘",
-    TOPIC_PAYMENT: "💎",
+    TOPIC_CONTENT: "ðŸ“¤",
+    TOPIC_SUPPORT: "ðŸ†˜",
+    TOPIC_PAYMENT: "ðŸ’Ž",
 }
 
-# Singleton — shared across all callers in-process
+# Singleton â€” shared across all callers in-process
 _instance: Optional["TopicService"] = None
 
 
@@ -41,7 +41,7 @@ class TopicService:
     Manages per-user Telegram Forum Topics in the Verification Hub.
 
     Topic model:
-      - One topic per (user_id, topic_type) pair — reused across sessions
+      - One topic per (user_id, topic_type) pair â€” reused across sessions
       - Shared "Rejected Content" topic for all rejections (prevents topic explosion)
       - Topics are created lazily on first use
 
@@ -57,7 +57,7 @@ class TopicService:
         self._rejected_topic_id: Optional[int] = None
         self._lock = asyncio.Lock()
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    # â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def get_or_create_user_topic(
         self,
@@ -91,7 +91,7 @@ class TopicService:
     async def get_or_create_rejected_topic(self, client: Client) -> int:
         """
         Return the single shared 'Rejected Content' topic ID.
-        All rejections go here — never create per-user topics for rejections.
+        All rejections go here â€” never create per-user topics for rejections.
 
         WARNING fix (TOCTOU race): the previous implementation used a plain
         upsert after creating the Telegram topic, which had a race window where
@@ -120,11 +120,11 @@ class TopicService:
                 return self._rejected_topic_id
 
             # Create the Telegram forum topic first (outside DB transaction scope)
-            new_topic_id = await self._create_named_topic(client, "❌ Rejected Content")
+            new_topic_id = await self._create_named_topic(client, "âŒ Rejected Content")
 
             # WARNING fix: atomic findOneAndUpdate with $setOnInsert.
             # return_document=False returns the PRE-UPDATE document.
-            # If pre-update doc is not None → the key already existed (race lost),
+            # If pre-update doc is not None â†’ the key already existed (race lost),
             # so use the existing value and delete our newly created duplicate.
             existing_doc = await db["bot_config"].find_one_and_update(
                 {"key": "rejected_topic_id"},
@@ -138,7 +138,7 @@ class TopicService:
                 # Use the existing one and clean up the duplicate we just created.
                 existing_topic_id = int(existing_doc["value"])
                 logger.warning(
-                    "get_or_create_rejected_topic: race lost — existing topic found, "
+                    "get_or_create_rejected_topic: race lost â€” existing topic found, "
                     "deleting duplicate Telegram topic",
                     extra={
                         "ctx_existing_topic_id": existing_topic_id,
@@ -158,7 +158,7 @@ class TopicService:
                 self._rejected_topic_id = existing_topic_id
                 return existing_topic_id
 
-            # We won the race — new_topic_id is now the canonical value in DB
+            # We won the race â€” new_topic_id is now the canonical value in DB
             self._rejected_topic_id = new_topic_id
             logger.info(
                 "Rejected content topic created",
@@ -167,11 +167,11 @@ class TopicService:
             return new_topic_id
 
     async def get_user_topic_id(self, user_id: int, topic_type: str) -> Optional[int]:
-        """Read-only check — does NOT create the topic if missing."""
+        """Read-only check â€” does NOT create the topic if missing."""
         doc = await self._fetch_topic(user_id, topic_type)
         return doc["topic_id"] if doc else None
 
-    # ── Internal ──────────────────────────────────────────────────────────────
+    # â”€â”€ Internal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _fetch_topic(self, user_id: int, topic_type: str) -> Optional[dict]:
         db = DatabaseManager.get_db()
@@ -196,25 +196,44 @@ class TopicService:
         )
 
     async def _create_topic(self, client: Client, user_id: int, topic_type: str) -> int:
-        icon = _TOPIC_ICONS.get(topic_type, "💬")
+        icon = _TOPIC_ICONS.get(topic_type, "ðŸ’¬")
         title = f"{icon} User {user_id}"
         return await self._create_named_topic(client, title)
 
     async def _create_named_topic(self, client: Client, title: str) -> int:
+        import random
+        from pyrogram import raw
+
         for attempt in range(3):
             try:
-                topic = await client.create_forum_topic(
-                    chat_id=settings.VERIFICATION_GROUP_ID,
-                    title=title,
+                peer = await client.resolve_peer(settings.VERIFICATION_GROUP_ID)
+                result = await client.invoke(
+                    raw.functions.channels.CreateForumTopic(
+                        channel=peer,
+                        title=title,
+                        random_id=random.randint(1, 2**31 - 1),
+                    )
                 )
-                logger.info("Forum topic created", extra={"ctx_title": title, "ctx_topic_id": topic.id})
-                return topic.id
+                # Extract topic_id from the Updates response
+                topic_id = None
+                for update in result.updates:
+                    if hasattr(update, "id"):
+                        topic_id = update.id
+                        break
+                if topic_id is None:
+                    raise RuntimeError("CreateForumTopic returned no topic id")
+                logger.info(
+                    "Forum topic created",
+                    extra={"ctx_title": title, "ctx_topic_id": topic_id},
+                )
+                return topic_id
             except FloodWait as e:
                 await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
-            except RPCError as e:
+            except Exception as e:
                 logger.error(
                     "Failed to create forum topic",
                     extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                    exc_info=True,
                 )
                 if attempt == 2:
                     raise

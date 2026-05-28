@@ -157,37 +157,37 @@ class DatabaseManager:
             cls._client = client
             cls._db = client[settings.MONGO_DB_NAME]
 
-            # ── Connection Test (FATAL if fails) ───────────────────────────────
+            # â”€â”€ Connection Test (FATAL if fails) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             logger.debug("Pinging MongoDB admin database...")
             await client.admin.command("ping")
             logger.info("MongoDB socket connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
 
-            # ── Capabilities Audit ───────────────────────────────────────────
+            # â”€â”€ Capabilities Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             try:
                 # Check for replica set status (needed for transactions)
                 status = await client.admin.command("replSetGetStatus")
                 logger.info("MongoDB replica set detected", extra={"ctx_set_name": status.get("set")})
                 cls._transactions_supported = True
             except Exception:
-                logger.warning("MongoDB replica set NOT detected — transactions will be disabled/unavailable")
+                logger.warning("MongoDB replica set NOT detected â€” transactions will be disabled/unavailable")
                 cls._transactions_supported = False
 
         except Exception as e:
             logger.exception("FATAL: MongoDB connection or authentication failed")
             raise e
 
-        # ── MIGRATION STABILIZATION (Non-FATAL) ──────────────────────────────
+        # â”€â”€ MIGRATION STABILIZATION (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
         try:
             await DataMigrationManager.stabilize_queue(cls._db)
             await DataMigrationManager.stabilize_vault(cls._db)
         except Exception as e:
             logger.error(
-                "MIGRATION: Data stabilization audit failed — attempting to proceed to index creation",
+                "MIGRATION: Data stabilization audit failed â€” attempting to proceed to index creation",
                 extra={"ctx_error": str(e)}
             )
 
-        # ── Schema Verification (Non-FATAL) ──────────────────────────────────
+        # â”€â”€ Schema Verification (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         logger.debug("Initiating index verification/creation phase...")
         try:
             await cls._ensure_indexes()
@@ -198,10 +198,10 @@ class DatabaseManager:
                 extra={"ctx_error": str(e)}
             )
 
-        # ── Referral System Indexes (Non-FATAL) ──────────────────────────────
+        # â”€â”€ Referral System Indexes (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         try:
-            from app.referral.db import ReferralRepository
-            ref_repo = ReferralRepository()
+            from app.referral.repository import ReferralRepository
+            ref_repo = ReferralRepository(cls._db)
             await ref_repo.create_indexes()
             logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
@@ -237,7 +237,7 @@ class DatabaseManager:
         async def _safe_create(collection_name: str, indexes: list[IndexModel]) -> None:
             logger.debug(f"Verifying indexes for collection: {collection_name}")
             
-            # ── RC-11: Surgical Index Reconciliation ──────────────────────────
+            # â”€â”€ RC-11: Surgical Index Reconciliation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             # Specifically for unique indexes which often change definitions
             target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique"]
             
@@ -302,7 +302,7 @@ class DatabaseManager:
                 )
                 raise e
 
-        # ── Queue ─────────────────────────────────────────────────────────────
+        # â”€â”€ Queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create(settings.QUEUE_COLLECTION, [
             IndexModel(
                 [("content_id", ASCENDING)],
@@ -386,7 +386,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Vault ─────────────────────────────────────────────────────────────
+        # â”€â”€ Vault â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
             IndexModel(
@@ -434,7 +434,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Pending submissions ───────────────────────────────────────────────
+        # â”€â”€ Pending submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create(settings.PENDING_COLLECTION, [
             IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
             IndexModel(
@@ -449,7 +449,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Subscriptions ─────────────────────────────────────────────────────
+        # â”€â”€ Subscriptions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("subscriptions", [
             IndexModel([("user_id", ASCENDING)], name="sub_user_unique", unique=True),
             IndexModel(
@@ -474,7 +474,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Memberships ───────────────────────────────────────────────────────
+        # â”€â”€ Memberships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("memberships", [
             IndexModel(
                 [("user_id", ASCENDING), ("chat_id", ASCENDING)],
@@ -498,7 +498,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Invites ───────────────────────────────────────────────────────────
+        # â”€â”€ Invites â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("invites", [
             IndexModel([("token", ASCENDING)], name="invite_token_unique", unique=True),
             IndexModel(
@@ -524,7 +524,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Activity ──────────────────────────────────────────────────────────
+        # â”€â”€ Activity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("activity", [
             IndexModel(
                 [("user_id", ASCENDING), ("timestamp", DESCENDING)],
@@ -550,12 +550,12 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Bot config ────────────────────────────────────────────────────────
+        # â”€â”€ Bot config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("bot_config", [
             IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
         ])
 
-        # ── User topics ───────────────────────────────────────────────────────
+        # â”€â”€ User topics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("user_topics", [
             IndexModel(
                 [("user_id", ASCENDING), ("topic_type", ASCENDING)],
@@ -570,7 +570,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Support messages ──────────────────────────────────────────────────
+        # â”€â”€ Support messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("support_messages", [
             IndexModel(
                 [("topic_id", ASCENDING)],
@@ -595,7 +595,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Moderation audit ──────────────────────────────────────────────────
+        # â”€â”€ Moderation audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("moderation_audit", [
             IndexModel(
                 [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
@@ -616,7 +616,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Consent records ───────────────────────────────────────────────────
+        # â”€â”€ Consent records â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("consent_records", [
             IndexModel(
                 [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
@@ -625,7 +625,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Creator profiles ──────────────────────────────────────────────────
+        # â”€â”€ Creator profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("creator_profiles", [
             IndexModel(
                 [("user_id", ASCENDING)],
@@ -639,7 +639,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: submissions ───────────────────────────────────────────────────
+        # â”€â”€ M3: submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("submissions", [
             IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
@@ -649,7 +649,7 @@ class DatabaseManager:
             IndexModel([("user_id", ASCENDING)], name="submissions_user", background=True),
         ])
 
-        # ── M3: takedown_requests ─────────────────────────────────────────────
+        # â”€â”€ M3: takedown_requests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("takedown_requests", [
             IndexModel(
                 [("content_id", ASCENDING), ("status", ASCENDING)],
@@ -665,7 +665,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: floodwait_tracking ────────────────────────────────────────────
+        # â”€â”€ M3: floodwait_tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("floodwait_tracking", [
             IndexModel(
                 [("target_id", ASCENDING), ("recorded_at", DESCENDING)],
@@ -680,7 +680,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: distribution_jobs ─────────────────────────────────────────────
+        # â”€â”€ M3: distribution_jobs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         await _safe_create("distribution_jobs", [
             IndexModel([("content_id", ASCENDING)], name="distjob_content", background=True),
             IndexModel(
@@ -695,3 +695,4 @@ class DatabaseManager:
 
 async def get_database() -> AsyncIOMotorDatabase:
     return DatabaseManager.get_db()
+

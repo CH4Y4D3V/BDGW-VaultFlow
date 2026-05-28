@@ -86,7 +86,7 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
-    # FIX 12: was `await _redis.set(...)` — _redis is not defined; local var is `redis`
+    # FIX 12: was `await redis.set(...)` — redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
 
     logger.info(
