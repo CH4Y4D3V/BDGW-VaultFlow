@@ -54,50 +54,15 @@ class OnboardingService:
         return text, keyboard
 
     def _get_template(self, state: UserState, first_name: str) -> str:
-        header = "✨ <b>VAULTFLOW PREMIER</b>\n\n"
-        
-        if state == UserState.NEW:
-            body = (
-                f"Welcome, <b>{first_name}</b>.\n"
-                "You've entered the premier automation ecosystem for content creators and distributors.\n\n"
-                "🚀 <b>Getting Started</b>\n"
-                "VaultFlow streamlines your workflow, offering high-speed delivery, "
-                "automated watermarking, and cross-channel distribution.\n\n"
-                "<i>Tap below to explore our features.</i>"
-            )
-        elif state == UserState.PREMIUM:
-            body = (
-                f"Welcome back, <b>{first_name}</b>.\n"
-                "Your <b>Premium Access</b> is active. You have full priority "
-                "on all distribution pipelines.\n\n"
-                "💎 <b>Member Benefits</b>\n"
-                "• Instant delivery\n"
-                "• Custom watermarking\n"
-                "• Extended storage\n"
-                "• Priority support\n\n"
-                "What would you like to manage today?"
-            )
-        elif state == UserState.ADMIN:
-            body = (
-                f"Greetings, <b>{first_name}</b>.\n"
-                "System console active. All infrastructure modules are nominal.\n\n"
-                "🛠 <b>Management</b>\n"
-                "Access administrative tools and moderation queues via the menu below."
-            )
-        elif state == UserState.BANNED:
-            body = (
+        if state == UserState.BANNED:
+            return (
                 "🚫 <b>Access Restricted</b>\n\n"
-                "Your account has been suspended for violating our terms of service.\n\n"
-                "If you believe this is a mistake, contact support."
+                "Your account has been suspended.\n"
+                "Contact support if you believe this is a mistake."
             )
-        else:  # RETURNING or Default
-            body = (
-                f"Welcome back, <b>{first_name}</b>.\n"
-                "Ready to resume your content operations?\n\n"
-                "⚡️ <b>Quick Actions</b>\n"
-                "Submit new content or check your existing queue status below.\n\n"
-                "⭐️ <i>Upgrade to Premium for 10x faster delivery.</i>"
-            )
-            
-        footer = "\n\n━━━━━━━━━━━━━━━━━━━━━━"
-        return f"{header}{body}{footer}"
+
+        return (
+            "Welcome to BDGW.\n\n"
+            "Send content, stay anonymous, access premium — all in one place.\n\n"
+            "Use the menu below."
+        )

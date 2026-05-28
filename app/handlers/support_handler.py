@@ -112,7 +112,7 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
                 client, user_id, TOPIC_SUPPORT
             )
         except Exception as e:
-            logger.warning(
+            logger.exception(
                 "handle_support_menu: pre-create topic failed — will retry on first message",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )

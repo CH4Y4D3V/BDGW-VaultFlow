@@ -1,203 +1,185 @@
-You are a senior backend engineer. You have 1 hour to make this Telegram bot 
-fully deployable. Fix ALL 14 known issues below in order. Do not rewrite files 
-wholesale — surgical fixes only. Read each file before touching it.
+You have completed an 8-phase implementation. Now perform a FULL pre-deploy audit.
+Do not skip any step. Do not report done until every check passes.
 
-LOGGER RULE (CRITICAL — applies to every file you touch):
-  logger.info("msg")                          ✅
-  logger.info("msg", extra={"ctx_k": v})      ✅
-  logger.info("msg", key=value)               ❌ CRASHES PROCESS
-Never use bare keyword arguments on any logger call.
+## STEP 1 — Syntax audit of ALL new and modified files
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 1 — main_bot.py:35
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: logger.info("boot_stage", stage="idle_entered") — bare kwarg crashes process.
-FIX: Change to logger.info("boot_stage", extra={"ctx_stage": "idle_entered"})
-Scan the entire file for any other bare-kwarg logger calls and fix them all.
+Run:
+  python preflight.py
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 2 — app/core/lifecycle.py — Pyrogram never starts
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: The Telegram client startup block sits inside an except block that 
-follows sys.exit(1), making it unreachable. Pyrogram never starts.
-FIX: Move the client startup block OUT of the except block so it executes 
-unconditionally after the DB/seed phase succeeds. Fix execution order:
-  1. MongoDB connects
-  2. Channels seed
-  3. Pyrogram client starts (THIS WAS MISSING)
-  4. Workers/scheduler start
-  5. Idle
-Also scan lifecycle.py for ALL structlog-style logger calls 
-(logger.info("msg", key=value)) and convert every one to 
-logger.info("msg", extra={"ctx_key": value}).
+Must show: "All checks passed — safe to deploy."
+If any file fails: fix it before continuing.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 3 — lifecycle.py — _subscription_worker never instantiated
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: self._subscription_worker is referenced but never assigned. 
-AttributeError on shutdown.
-FIX: Instantiate the subscription worker at the correct point in startup 
-(after Pyrogram starts, before idle). Assign to self._subscription_worker. 
-Ensure shutdown calls worker.stop() only if self._subscription_worker is not None.
+Then run py_compile on every new payments module:
+  python -m py_compile app\payments\models.py; Write-Host "models OK"
+  python -m py_compile app\payments\repository.py; Write-Host "repository OK"
+  python -m py_compile app\payments\service.py; Write-Host "service OK"
+  python -m py_compile app\payments\handlers.py; Write-Host "handlers OK"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 4 — app/scheduler/scheduler.py — missing imports
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: Missing imports: asyncio, DuplicateKeyError, WatermarkState.
-FIX: Add at top of file:
-  import asyncio
-  from pymongo.errors import DuplicateKeyError
-  from app.models.watermark import WatermarkState   # adjust path if needed
+All must print OK.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 5 — scheduler.py — setup_jobs() does not exist
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: setup_jobs() is called but the method is not defined on the scheduler class.
-FIX: Read the scheduler class. Rename the existing job-registration method to 
-setup_jobs() OR fix the call site to use the correct existing method name. 
-Do not add a new empty method — wire it to the real job registration logic.
+## STEP 2 — Import chain audit (most critical)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 6 — scheduler.py — stale singleton lock on restart
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: If the process crashed, a stale singleton lock prevents the scheduler 
-from ever starting again.
-FIX: In the scheduler's startup/init path, before acquiring the singleton lock, 
-attempt to delete any existing lock document for this scheduler instance from 
-MongoDB. Wrap in try/except — failure is non-fatal. Only then acquire the lock.
+Run this EXACTLY and report every line:
+  python -c "
+import sys
+sys.path.insert(0, '.')
+import app.handlers, pkgutil
+errors = []
+for f, name, _ in pkgutil.walk_packages(app.handlers.__path__, 'app.handlers.'):
+    try:
+        __import__(name)
+        print(f'OK: {name}')
+    except Exception as e:
+        print(f'FAIL: {name} -> {type(e).__name__}: {e}')
+        errors.append(name)
+print(f'Total errors: {len(errors)}')
+print(f'All handlers importable: {len(errors) == 0}')
+"
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 7 — scheduler.py — undefined repository methods
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: get_channel_pending_count() and get_deadline_exceeded_jobs() are called 
-on QueueRepository but are not defined there.
-FIX: Open app/repositories/queue_repository.py. Add both methods:
+Expected: Total errors: 0
+If ANY line shows FAIL: fix that module immediately. Do not deploy.
 
-  async def get_channel_pending_count(self, channel_id: str) -> int:
-      """Return count of PENDING jobs for a given channel_id."""
-      return await self._col.count_documents(
-          {"channel_id": channel_id, "status": "pending"}
-      )
+Then verify payments module imports cleanly:
+  python -c "
+import sys
+sys.path.insert(0, '.')
+modules = [
+    'app.payments.models',
+    'app.payments.repository',
+    'app.payments.service',
+    'app.payments.handlers',
+]
+for m in modules:
+    try:
+        __import__(m)
+        print(f'OK: {m}')
+    except Exception as e:
+        print(f'FAIL: {m} -> {type(e).__name__}: {e}')
+"
 
-  async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
-      """Return jobs whose deadline has passed and are still pending."""
-      return await self._col.find(
-          {"deadline": {"$lt": cutoff}, "status": "pending"}
-      ).to_list(length=500)
+All must print OK.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 8 — app/distribution/dispatcher.py — missing import asyncio
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: asyncio is used but not imported.
-FIX: Add "import asyncio" at the top of dispatcher.py.
+## STEP 3 — Module-level infrastructure call scan
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 9 — app/handlers/submission_handler.py — _redis NameError
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: Variable named _redis used but should be redis (from get_redis()).
-FIX: Find every occurrence of _redis in submission_handler.py. 
-Replace with the correct variable name returned by get_redis(). 
-Ensure get_redis() is imported from app.core.redis_client.
+Run:
+  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
+    -Pattern "^get_redis\(\)|^get_db\(\)|^_redis\s*=\s*get_redis|^_db\s*=\s*get_db" `
+    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 10 — app/handlers/support_handler.py — _redis NameError
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Same as Fix 9 but in support_handler.py.
-FIX: Replace all _redis references with the variable returned by get_redis().
+Any match at column 0 or module level is a critical bug.
+Every match must be INSIDE a function body.
+Report every line found.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 11 — app/watermark/worker_pool.py — missing imports + undefined method
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: Missing imports at top of file. _resolve_media_path() is called but 
-never defined.
-FIX:
-  Step 1: Read the file. Identify every NameError — add missing imports.
-  Step 2: Add _resolve_media_path() as a private method or module-level function:
+## STEP 4 — Verify payments module is registered as Pyrogram plugin
 
-  async def _resolve_media_path(self, file_id: str) -> str:
-      """Download media from Telegram and return local temp path."""
-      path = f"/tmp/wm_{file_id}.tmp"
-      await self._client.download_media(file_id, file_name=path)
-      return path
+Run:
+  Get-Content app\bot\client.py | ForEach-Object -Begin {$i=1} -Process {"$i`t$_"; $i++}
 
-  Adjust signature to match how it is called in the file.
+Confirm plugins= dict includes app.payments OR app.payments.handlers.
+If payments handlers are NOT in the plugin path: Pyrogram will never load them.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 12 — app/repositories/queue_repository.py — two bugs
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM A: get_recently_posted_content_ids() is called elsewhere but not defined.
-FIX A: Add this method:
+If missing, the plugins dict must be updated to include the payments package:
+  plugins=dict(root="app.handlers")  # handlers only — BAD if payments is separate
+  plugins=dict(root="app")           # too broad — BAD
 
-  async def get_recently_posted_content_ids(
-      self, channel_id: str, limit: int = 100
-  ) -> list[str]:
-      """Return content_ids of the most recently posted jobs for a channel."""
-      docs = await self._col.find(
-          {"channel_id": channel_id, "status": "posted"},
-          {"content_id": 1}
-      ).sort("posted_at", -1).limit(limit).to_list(length=limit)
-      return [d["content_id"] for d in docs if "content_id" in d]
+Correct approach: payments handlers must either be:
+  A) Inside app\handlers\payment_handler.py (already in plugin path), OR
+  B) The plugins root must be broadened to include app\payments\
 
-PROBLEM B: There is a duplicate return statement in one of the existing methods 
-causing unreachable code (the second return shadows the first).
-FIX B: Read the file, find the method with two return statements, remove the 
-duplicate (keep the one that returns the correct value).
+Report what currently exists and whether handlers will be loaded.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 13 — app/core/database.py — vault collection indexed twice
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: _ensure_indexes() calls ensure_index() on the vault collection twice 
-with the same index spec. MongoDB raises a warning/error, boot reports DEGRADED.
-FIX: Read _ensure_indexes(). Find the duplicate vault index call. 
-Remove exactly one of the two duplicate calls. Do not remove both. 
-Do not touch any other index definitions.
+## STEP 5 — Verify CallbackQuery bug fix
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FIX 14 — update_logger.py — syntax error in function signature
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROBLEM: trace_member_update() has a misaligned closing parenthesis on the 
-parameter list (line 97 in the file shown). The ) -> None: is on the wrong line, 
-breaking the function signature.
-FIX: Correct the signature to:
+Run:
+  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
+    -Pattern "query\.chat|callback\.chat" `
+    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
 
-  async def trace_member_update(
-      client: Client, update: ChatMemberUpdated
-  ) -> None:
+Any match is a bug. Must return zero results.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FINAL VERIFICATION CHECKLIST
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+## STEP 6 — Verify no sys.exit() in handlers or payments
 
-After all fixes, verify:
+Run:
+  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
+    -Pattern "sys\.exit" `
+    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
 
-1. main_bot.py — zero bare-kwarg logger calls
-2. lifecycle.py — Pyrogram client.start() is reachable and called after DB init
-3. lifecycle.py — _subscription_worker is instantiated, not None
-4. lifecycle.py — zero structlog-style logger calls
-5. scheduler.py — imports asyncio, DuplicateKeyError, WatermarkState
-6. scheduler.py — setup_jobs() exists and registers real jobs
-7. scheduler.py — stale lock cleared on startup
-8. queue_repository.py — get_channel_pending_count(), get_deadline_exceeded_jobs(), 
-   get_recently_posted_content_ids() all defined, no duplicate return
-9. dispatcher.py — import asyncio present
-10. submission_handler.py — no _redis NameError
-11. support_handler.py — no _redis NameError
-12. worker_pool.py — all imports present, _resolve_media_path() defined
-13. database.py — vault collection indexed exactly once
-14. update_logger.py — trace_member_update signature is valid Python
+Must return zero results.
 
-Boot sequence must complete in this order without exception:
-  MongoDB connects → indexes created (no DEGRADED) → channels seed → 
-  Pyrogram starts → handlers registered → scheduler starts → 
-  subscription worker starts → bot enters idle → receives updates → 
-  routes private media to submission handler
+## STEP 7 — Verify atomic lock implementation exists
 
-For every file changed, state:
-  - FILE: <path>
-  - LINES CHANGED: <exact lines>
-  - REASON: <one sentence>
+Run:
+  Select-String -Path "app\payments\repository.py" `
+    -Pattern "acquire_processing_lock|find_one_and_update|processing" `
+    | Select-Object LineNumber, Line | Format-Table -AutoSize
 
-Do not change any file not listed above.
-Do not add new dependencies.
-Do not use structlog.
-Do not use bare except.
+Must show the atomic lock function exists.
+If missing: implement it before deploying.
+
+## STEP 8 — Verify payment states are defined
+
+Run:
+  Select-String -Path "app\payments\models.py" `
+    -Pattern "waiting_payment_details|waiting_txid|under_review|approved|rejected|expired" `
+    | Select-Object LineNumber, Line | Format-Table -AutoSize
+
+Must show all required states.
+
+## STEP 9 — Verify UX changes
+
+Run:
+  Select-String -Path "app\services\onboarding_service.py","app\bot\keyboards.py" `
+    -Pattern "premier|automation ecosystem|unlock amazing|upgrade your experience|SaaS" `
+    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
+
+Must return ZERO matches. If any marketing language remains: remove it.
+
+Run:
+  Select-String -Path "app\bot\keyboards.py" `
+    -Pattern "Premium|Submit|Anonymous|Referral|Status|Support" `
+    | Select-Object LineNumber, Line | Format-Table -AutoSize
+
+Must show all 5 menu buttons exist.
+
+## STEP 10 — Verify timeout logic starts AFTER delivery
+
+Read app\payments\service.py or app\payments\timeouts.py.
+Find where timeout timer starts.
+Confirm it is called AFTER:
+  await bot.send_message(...)  # delivery confirmed
+
+NOT before.
+
+Report the exact function and line where timeout starts.
+If timeout starts before delivery: fix it.
+
+## STEP 11 — Check for bare except patterns
+
+Run:
+  Select-String -Path "app\payments\*.py" `
+    -Pattern "except:\s*$|except Exception:\s*$" `
+    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
+
+Any match that has no variable (except Exception as e:) is a silent swallower.
+Fix every match to use: except Exception as e: with logger.exception()
+
+## FINAL REPORT FORMAT
+
+Report in this exact order:
+1. preflight.py output (must show "All checks passed")
+2. Handler import audit result (must show "Total errors: 0")
+3. Payments import audit result (all OK)
+4. Plugin registration status (are payment handlers reachable by Pyrogram?)
+5. CallbackQuery bug check (must be zero matches)
+6. sys.exit check (must be zero matches)
+7. Atomic lock exists (yes/no + line number)
+8. Payment states defined (yes/no + list found)
+9. Marketing language removed (yes/no)
+10. Timeout placement (after delivery: yes/no + line reference)
+11. Bare except count (must be zero)
+
+THEN:
+If all 11 checks pass: output exactly "SAFE TO DEPLOY"
+If any check fails: list every failure and fix before outputting anything.
+
+Do NOT output "SAFE TO DEPLOY" until all 11 checks pass.

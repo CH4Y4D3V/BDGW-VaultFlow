@@ -12,47 +12,35 @@ class KeyboardBuilder:
     @staticmethod
     def build_main_menu(state: str) -> InlineKeyboardMarkup:
         """
-        Builds a premium, hierarchy-optimized keyboard based on user state.
-        Using string for state to avoid circular imports.
+        Builds the streamlined vertical button layout.
+        
+        Row 1: [ 💎 Premium Access ]
+        Row 2: [ 📨 Submit Content ]
+        Row 3: [ 👥 Referral ]  [ 📊 My Status ]
+        Row 4: [ 🆘 Support ]
         """
-        buttons = []
-
-        # Row 1: Primary Actions
+        # Banned users only get support
         if state == "banned":
-            buttons.append([
-                InlineKeyboardButton("🆘 Appeal / Support", callback_data="menu:support")
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("🆘 Support", callback_data="menu:support")]
             ])
-            return InlineKeyboardMarkup(buttons)
 
-        # Row 1: High-value CTAs
+        # Streamlined layout
+        buttons = [
+            [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
+            [InlineKeyboardButton("📨 Submit Content", callback_data="menu:submit")],
+            [
+                InlineKeyboardButton("👥 Referral", callback_data="menu:referrals"),
+                InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")
+            ],
+            [InlineKeyboardButton("🆘 Support", callback_data="menu:support")]
+        ]
+
+        # Admins get an extra row at the top
         if state == "admin":
-            buttons.append([
+            buttons.insert(0, [
                 InlineKeyboardButton("🛡 Admin Panel", callback_data="admin:dashboard"),
                 InlineKeyboardButton("📥 Moderation", callback_data="admin:moderation")
-            ])
-        else:
-            buttons.append([
-                InlineKeyboardButton("📤 Submit Content", callback_data="menu:submit"),
-                InlineKeyboardButton("💎 Premium", callback_data="menu:premium")
-            ])
-
-        # Row 2: Management & Info
-        buttons.append([
-            InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus"),
-            InlineKeyboardButton("⏳ Queue", callback_data="menu:queue")
-        ])
-
-        # Row 3: Support & Rules
-        buttons.append([
-            InlineKeyboardButton("📜 Rules", callback_data="menu:rules"),
-            InlineKeyboardButton("🆘 Support", callback_data="menu:support")
-        ])
-
-        # Row 4: Secondary Growth & Privacy
-        if state != "admin":
-            buttons.append([
-                InlineKeyboardButton("👥 Referrals", callback_data="menu:referrals"),
-                InlineKeyboardButton("🕵️ Anonymous", callback_data="menu:anonymous")
             ])
 
         return InlineKeyboardMarkup(buttons)

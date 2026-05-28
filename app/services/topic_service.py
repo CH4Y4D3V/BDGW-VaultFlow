@@ -231,7 +231,7 @@ class TopicService:
                 await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
             except Exception as e:
                 logger.error(
-                    "Failed to create forum topic",
+                    "forum_topic_creation_failed",
                     extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
                     exc_info=True,
                 )

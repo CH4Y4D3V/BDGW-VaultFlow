@@ -426,10 +426,9 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
     except MessageNotModified:
         await callback_query.answer()
     except Exception as e:
-        logger.error(
-            "Error in menu callback",
+        logger.exception(
+            "menu_callback_failed",
             extra={"ctx_user_id": user_id, "ctx_action": action, "ctx_error": str(e)},
-            exc_info=True,
         )
         await callback_query.answer("An error occurred.", show_alert=True)
 

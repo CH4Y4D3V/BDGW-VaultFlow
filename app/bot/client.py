@@ -30,8 +30,7 @@ def get_bot() -> Client:
             bot_token=settings.BOT_TOKEN,
             api_id=settings.API_ID,
             api_hash=settings.API_HASH,
-            plugins=dict(root="app.handlers"),
-            workers=min(
+            plugins=dict(root="app"),            workers=min(
                 32,
                 getattr(settings, "DISPATCHER_WORKER_COUNT", 4) * 4,
             ),
