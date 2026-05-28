@@ -176,6 +176,45 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
     await callback.answer()
 
 
+@Client.on_message(filters.private & ~filters.regex(r"^/"))
+async def handle_payment_inputs(client: Client, message: Message) -> None:
+    """Captures TXID and Screenshot in sequence."""
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    service = get_payment_service()
+    
+    session = await service.get_active_session(user_id)
+    if not session:
+        raise ContinuePropagation
+
+    if session.status == PaymentStatus.AWAITING_PAYMENT:
+        if not message.text:
+            await message.reply_text("Please send your Transaction ID (TXID) as text.")
+            return
+        
+        await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
+        await message.reply_text("✅ TXID received. Now please send a screenshot of the payment proof.")
+        
+    elif session.status == PaymentStatus.WAITING_SCREENSHOT:
+        if not (message.photo or message.document):
+            await message.reply_text("Please send a photo or document as proof.")
+            return
+        
+        file_id = message.photo.file_id if message.photo else message.document.file_id
+        session.txid = session.txid or message.text
+        await service.update_status(session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id)
+        
+        await message.reply_text(
+            "✅ Proof submitted! Our admins will review it shortly.\n"
+            f"<b>Session ID:</b> <code>{session.id}</code>",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Notify Admins
+        await _notify_admins_of_submission(client, session, session.txid or "", file_id)
+
+
 async def _notify_admins_of_request(client: Client, session: PaymentSession, method: str) -> None:
     from app.services.topic_service import get_topic_service
     topic_service = get_topic_service()
@@ -209,6 +248,173 @@ async def _notify_admins_of_request(client: Client, session: PaymentSession, met
         parse_mode=ParseMode.HTML,
         message_thread_id=topic_id
     )
+
+
+@Client.on_callback_query(filters.regex(r"^pay:admin:send:(?P<sid>.+)$"))
+async def handle_admin_send_details(client: Client, callback: CallbackQuery) -> None:
+    session_id = callback.matches[0].group("sid")
+    admin_id = callback.from_user.id
+    
+    if not is_support_admin(admin_id):
+        await callback.answer("Unauthorized.", show_alert=True)
+        return
+        
+    service = get_payment_service()
+    updated = await service.update_status(session_id, PaymentStatus.PENDING_DETAILS)
+    
+    if not updated:
+        await callback.answer("Could not update session. Already handled?", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        callback.message.text + "\n\n⏳ <b>Waiting for Admin Input</b>\n"
+        f"Please <b>Reply</b> to this message with the payment instructions (bKash number, QR code, etc.).",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel Send", callback_data=f"pay:admin:cancel_send:{session_id}")]
+        ]),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer("Ready to receive payment details.")
+
+
+@Client.on_callback_query(filters.regex(r"^pay:admin:cancel_send:(?P<sid>.+)$"))
+async def handle_admin_cancel_send(client: Client, callback: CallbackQuery) -> None:
+    session_id = callback.matches[0].group("sid")
+    admin_id = callback.from_user.id
+    
+    if not is_support_admin(admin_id):
+        await callback.answer("Unauthorized.", show_alert=True)
+        return
+        
+    service = get_payment_service()
+    # Revert back to REQUESTED
+    updated = await service.update_status(session_id, PaymentStatus.REQUESTED)
+    
+    if not updated:
+        await callback.answer("Could not revert session.", show_alert=True)
+        return
+
+    # Restore original markup
+    buttons = [
+        [
+            InlineKeyboardButton("📩 Send Payment Details", callback_data=f"pay:admin:send:{session_id}"),
+            InlineKeyboardButton("❌ Reject Request", callback_data=f"pay:admin:rej_req:{session_id}")
+        ]
+    ]
+    # Remove the "Waiting for admin input" text
+    original_text = callback.message.text.split("\n\n⏳")[0]
+    await callback.message.edit_text(
+        original_text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer("Cancelled sending details.")
+
+
+@Client.on_callback_query(filters.regex(r"^pay:admin:rej_req:(?P<sid>.+)$"))
+async def handle_admin_reject_request(client: Client, callback: CallbackQuery) -> None:
+    session_id = callback.matches[0].group("sid")
+    admin_id = callback.from_user.id
+    
+    if not is_support_admin(admin_id):
+        await callback.answer("Unauthorized.", show_alert=True)
+        return
+        
+    service = get_payment_service()
+    success = await service.reject_payment(session_id, "Payment request rejected by admin", admin_id)
+    
+    if success:
+        session = await service.get_session(session_id)
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n❌ Request Rejected by {callback.from_user.first_name}",
+            reply_markup=None
+        )
+        try:
+            await client.send_message(
+                session.user_id,
+                "❌ <b>Your payment request was rejected.</b>\n\n"
+                "Please try again or contact support.",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        await callback.answer("Request rejected.")
+    else:
+        await callback.answer("Could not reject request.", show_alert=True)
+
+
+@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID) & filters.reply)
+async def handle_admin_manual_details_reply(client: Client, message: Message) -> None:
+    if not message.from_user or not is_support_admin(message.from_user.id):
+        return
+
+    replied_to = message.reply_to_message
+    if not replied_to or not replied_to.from_user or not replied_to.from_user.is_bot:
+        return
+
+    if not replied_to.reply_markup:
+        return
+
+    session_id = None
+    for row in replied_to.reply_markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data and btn.callback_data.startswith("pay:admin:cancel_send:"):
+                session_id = btn.callback_data.split(":")[-1]
+                break
+        if session_id:
+            break
+
+    if not session_id:
+        return
+
+    service = get_payment_service()
+    session = await service.get_session(session_id)
+    if not session or session.status != PaymentStatus.PENDING_DETAILS:
+        return
+
+    try:
+        await client.copy_message(
+            chat_id=session.user_id,
+            from_chat_id=message.chat.id,
+            message_id=message.id,
+        )
+    except Exception as e:
+        logger.error("Failed to forward payment details to user", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
+        await message.reply_text("❌ Failed to deliver payment details to user. They may have blocked the bot.")
+        return
+
+    updated = await service.update_status(session_id, PaymentStatus.AWAITING_PAYMENT)
+    if not updated:
+        return
+
+    timeout_started = await service.start_timeout(session_id)
+    if not timeout_started:
+        logger.warning(
+            "Payment timeout was not started after manual details delivery",
+            extra={"ctx_payment_id": session_id, "ctx_user_id": session.user_id},
+        )
+
+    await message.reply_text("✅ Payment details delivered to user. Timeout started.")
+
+    try:
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"pay:admin:approve:{session.id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"pay:admin:reject:{session.id}")
+            ]
+        ]
+        original_text = (replied_to.text or replied_to.caption or "").split("\n\n⏳")[0]
+        
+        if replied_to.text:
+            await client.edit_message_text(
+                chat_id=replied_to.chat.id,
+                message_id=replied_to.id,
+                text=original_text + "\n\n✅ <b>Payment Details Delivered</b>\nWaiting for user to submit proof...",
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode=ParseMode.HTML
+            )
+    except Exception as e:
+        logger.warning("Failed to edit moderation card after delivery", extra={"ctx_error": str(e)})
 
 
 async def _notify_admins_of_submission(client: Client, session: PaymentSession, txid: str, file_id: str) -> None:
