@@ -47,9 +47,17 @@ class ReferralService:
             try:
                 member = await self._bot.get_chat_member(channel_id, user_id)
                 return member.status in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-            except Exception:
+            except Exception as e:
+                logger.exception(
+                    "referral_membership_retry_failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
                 return False
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "referral_membership_check_failed",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
             return False
 
     async def qualify_pending_referrals(self, channel_id: int) -> int:

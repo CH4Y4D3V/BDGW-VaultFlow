@@ -1,187 +1,341 @@
-Set-Content -Path "prompt.txt" -Value @'
-You have completed an 8-phase implementation. Now perform a FULL pre-deploy audit.
-Do not skip any step. Do not report done until every check passes.
+You are a senior Telegram bot architect working on BDGW VaultFlow.
+This is a PRIVATE COMMUNITY BOT — not a public product or SaaS platform.
 
-## STEP 1 — Syntax audit of ALL new and modified files
+## CURRENT STATUS — WHAT IS WORKING (DO NOT TOUCH)
+- MongoDB connection and migration: WORKING
+- Pyrogram client startup: WORKING
+- Handler registration (13 modules): WORKING
+- Distribution engine: WORKING
+- Worker pools: WORKING
+- Health server: WORKING
+- Update routing: WORKING (UPDATE_TRACE logs confirmed)
+
+## ACTIVE BUGS TO FIX FIRST (before any UX work)
+
+### BUG 1 — CallbackQuery has no attribute 'chat'
+Log evidence:
+  [err] 'CallbackQuery' object has no attribute 'chat'
+
+Find every location where callback handlers access message.chat or query.chat directly.
+CallbackQuery uses query.message.chat — not query.chat.
 
 Run:
+  Select-String -Path "app\handlers\*.py" -Pattern "\.chat" | Format-Table Path, LineNumber, Line -AutoSize
+
+Fix every instance where a CallbackQuery handler incorrectly accesses .chat instead of .message.chat.
+
+### BUG 2 — Failed to create forum topic
+Log evidence:
+  [err] Failed to create forum topic (repeated 3 times)
+  [wrn] handle_support_menu: pre-create topic failed — will retry on first message
+
+Read app\handlers\support_handler.py in full.
+Identify why forum topic creation fails.
+Check:
+  - Is VERIFICATION_GROUP_ID a supergroup with topics enabled?
+  - Is the bot an admin in that group?
+  - Is create_forum_topic being called with correct parameters?
+  - Is there a FloodWait being swallowed?
+
+Fix the exception handling to log the actual Telegram error instead of "Failed to create forum topic".
+Change bare except to:
+  except Exception as e:
+      logger.exception("forum_topic_creation_failed", extra={"ctx_error": str(e)})
+
+### BUG 3 — Error in menu callback
+Log evidence:
+  [err] Error in menu callback
+
+Read app\handlers\callback_handler.py in full.
+Find the menu callback handler.
+Add logger.exception() to expose the real error.
+Do not fix blindly — expose the error first, report what it is.
+
+### BUG 4 — Failed to initialize Referral System
+Log evidence:
+  [err] Failed to initialize Referral System
+
+Read app\referral\ directory in full.
+Find where ReferralSystem initializes.
+Expose the real exception with logger.exception().
+Check if required MongoDB collections or indexes are missing.
+
+---
+
+## PHASE 1 — UX REDESIGN (after bugs are fixed)
+
+### IDENTITY DIRECTION
+This bot is: private, internal, community-only, minimal, operational.
+This bot is NOT: a SaaS product, a storefront, a public service.
+
+### WELCOME MESSAGE REDESIGN
+File: app\handlers\user_handler.py (handle_start function)
+File: app\handlers\welcome_handler.py
+
+Current problem: over-engineered, marketing language, feature showcase.
+
+New welcome message must be:
+- Under 5 lines of text
+- No emojis except functional ones
+- No "premier automation ecosystem" language
+- No feature lists
+- Community-native tone
+
+Target tone — write EXACTLY this style:
+
+  Welcome to BDGW.
+
+  Send content, stay anonymous, access premium — all in one place.
+
+  Use the menu below.
+
+That is the ceiling for complexity. Do not exceed it.
+
+### MAIN MENU BUTTON LAYOUT REDESIGN
+Current problem: too many buttons, dashboard overload.
+
+New layout — EXACTLY these buttons, in this order:
+
+Row 1: [ 💎 Premium Access ]
+Row 2: [ 📨 Submit Content ]  [ 👤 Anonymous ]
+Row 3: [ 👥 Referral ]  [ 📊 My Status ]
+Row 4: [ 🆘 Support ]
+
+Maximum 5 buttons total. No more.
+No "automation", no "ecosystem", no feature descriptions on buttons.
+
+### COPYWRITING RULES (apply everywhere)
+- Replace "premier automation ecosystem" → remove entirely
+- Replace "unlock amazing features" → remove entirely  
+- Replace "upgrade your experience" → remove entirely
+- Replace any marketing/SaaS language → plain operational language
+- Tone: trusted internal tool, not commercial product
+- If a message is longer than 3 sentences, it is too long
+
+---
+
+## PHASE 2 — PREMIUM SYSTEM REDESIGN
+
+### ARCHITECTURE REQUIREMENT
+Build premium as a fully isolated module. Do NOT couple with:
+- support_handler.py
+- submission_handler.py  
+- vault workflow
+- distribution engine
+
+Create these new files if they don't exist:
+  app\payments\__init__.py
+  app\payments\models.py       — payment session dataclass/states
+  app\payments\repository.py   — all DB operations for payments
+  app\payments\service.py      — business logic
+  app\payments\handlers.py     — Pyrogram handlers
+  app\payments\topics.py       — forum topic management
+  app\payments\timeouts.py     — timeout monitoring
+
+### PAYMENT STATES (implement as string constants)
+  WAITING_PAYMENT_DETAILS = "waiting_payment_details"
+  WAITING_TXID = "waiting_txid"
+  WAITING_SCREENSHOT = "waiting_screenshot"
+  SUBMITTED = "submitted"
+  UNDER_REVIEW = "under_review"
+  APPROVED = "approved"
+  REJECTED = "rejected"
+  EXPIRED = "expired"
+  CANCELLED = "cancelled"
+
+### PREMIUM PLANS (exact pricing)
+  PLANS = {
+      "1month":  {"label": "1 Month",  "price": 499,  "days": 30},
+      "3months": {"label": "3 Months", "price": 1299, "days": 90},
+      "6months": {"label": "6 Months", "price": 2499, "days": 180},
+  }
+  Currency: BDT (৳)
+
+### PAYMENT METHODS
+  - bKash
+  - Nagad  
+  - Crypto
+
+### PREMIUM MENU UX
+When user taps 💎 Premium Access:
+
+  Message:
+  "Premium gives you access to exclusive BDGW content channels.
+
+  Select a plan:"
+
+  Buttons:
+  [ 1 Month — ৳499 ]
+  [ 3 Months — ৳1299 ]
+  [ 6 Months — ৳2499 ]
+  [ 📊 Check Status ]  [ 🔄 Renew ]
+  [ ← Back ]
+
+No marketing language. No "unlock amazing features". Pure operational.
+
+### REFERRAL DISCOUNT LOGIC
+  1 referral point = ৳1 discount
+  
+  Rules:
+  - Check user referral balance before showing final price
+  - If balance > 0: show discounted price option
+  - Snapshot final locked amount at session creation
+  - NEVER recalculate price after session is created
+  - Store locked_amount in payment session document
+
+### CRITICAL TIMEOUT RULE
+Timeout monitoring must ONLY start after:
+  await bot.send_message(user_id, payment_details)  # succeeds
+  ↓
+  session.status = WAITING_TXID  # set in DB
+  ↓
+  timeout timer starts
+
+NEVER start timeout before delivery confirmation.
+
+### DUPLICATE APPROVAL PROTECTION (atomic lock)
+In payments\repository.py implement:
+
+  async def acquire_processing_lock(self, payment_id: str) -> bool:
+      result = await self._collection.find_one_and_update(
+          {
+              "_id": payment_id,
+              "status": "under_review"  # only if still under_review
+          },
+          {"$set": {"status": "processing", "locked_at": datetime.utcnow()}},
+          return_document=True
+      )
+      return result is not None  # False = another admin got there first
+
+Only call approve logic if this returns True.
+
+### REQUIRED MONGODB COLLECTIONS
+  payments           — payment sessions
+  payment_topics     — topic_id → payment_id mapping
+  payment_audit      — immutable event log
+  payment_timeouts   — scheduled expiry tracking
+  subscription_history — completed subscriptions
+
+### ADMIN MODERATION CARD FORMAT
+When payment proof submitted, admin receives:
+
+  💰 Payment Proof Received
+
+  👤 [username or ID]
+  📦 [plan name]
+  💰 ৳[locked_amount]
+  📱 [payment method]
+  🔑 TXID: [txid]
+  🆔 Session: [payment_id]
+
+  Buttons:
+  [ ✅ Approve ]  [ ❌ Reject ]
+
+### REJECTION FLOW
+Rejection buttons:
+  [ Invalid TXID ]
+  [ Wrong Amount ]
+  [ Duplicate TX ]
+  [ Screenshot Unclear ]
+  [ ✏️ Custom Reason ]
+
+On rejection:
+- Persist: rejected_by, rejection_reason, rejected_at
+- Notify user with reason + retry option + support option
+
+### TIMEOUT WARNINGS
+  5 minutes remaining:  send reminder
+  10 minutes remaining: send warning
+  20 minutes:           expire session, clear state, notify user
+
+### APPROVAL SEQUENCE (exact order)
+  1. validate session exists and is under_review
+  2. call acquire_processing_lock() → if False: reply "Already processed"
+  3. activate subscription in DB
+  4. generate invite link: await bot.create_chat_invite_link(channel_id, member_limit=1)
+  5. send invite to user
+  6. persist approval metadata
+  7. schedule expiry lifecycle
+  8. update audit log
+
+---
+
+## MANDATORY RULES FOR ALL CODE
+
+### Forbidden patterns
+- No bare except: pass
+- No bare except: (with no variable)
+- No sys.exit() inside handlers or services
+- No blocking calls in async functions
+- No module-level infrastructure calls (get_db(), get_redis() at import time)
+- No tight coupling between payment module and other modules
+
+### Required patterns
+- All DB calls: async/await with Motor
+- All exceptions: logger.exception() with structured extra={}
+- All state transitions: validated against allowed previous states
+- All admin actions: verify admin permission before executing
+- All callback handlers: use query.message.chat not query.chat
+
+### Logging format (use everywhere)
+  logger.info("event_name", extra={"ctx_key": value})
+  logger.exception("event_name", extra={"ctx_error": str(e)})
+
+### File size limit
+No single file may exceed 300 lines.
+If a service grows beyond 300 lines: split into sub-modules.
+
+---
+
+## EXECUTION ORDER (strict)
+
+Do these in exact order. Do not skip steps.
+Report completion of each phase before starting the next.
+
+PHASE 0 — Read current state:
+  Get-ChildItem -Recurse -Filter "*.py" app\ | Measure-Object | Select-Object Count
+  Get-ChildItem app\handlers\ -Filter "*.py" | Select-Object Name
+  Get-ChildItem app\payments\ -Filter "*.py" -ErrorAction SilentlyContinue | Select-Object Name
+
+PHASE 1 — Fix Bug 1 (CallbackQuery .chat):
+  Find, fix, verify with py_compile
+
+PHASE 2 — Fix Bug 2 (forum topic logging):
+  Expose real error, report what it is
+
+PHASE 3 — Fix Bug 3 (menu callback error):
+  Expose real error, report what it is
+
+PHASE 4 — Fix Bug 4 (referral init):
+  Expose real error, report what it is
+
+PHASE 5 — UX redesign:
+  welcome message + button layout only
+  verify with py_compile
+
+PHASE 6 — Premium module scaffold:
+  Create app\payments\ structure
+  Implement models, repository, service
+  No handlers yet
+
+PHASE 7 — Premium handlers:
+  Implement user-facing flow
+  Implement admin moderation flow
+  Register in Pyrogram plugin system
+
+PHASE 8 — Final verification:
   python preflight.py
+  Must show: All checks passed — safe to deploy.
 
-Must show: "All checks passed — safe to deploy."
-If any file fails: fix it before continuing.
+---
 
-Then run py_compile on every new payments module:
-  python -m py_compile app\payments\models.py; Write-Host "models OK"
-  python -m py_compile app\payments\repository.py; Write-Host "repository OK"
-  python -m py_compile app\payments\service.py; Write-Host "service OK"
-  python -m py_compile app\payments\handlers.py; Write-Host "handlers OK"
+## OUTPUT FORMAT FOR EACH PHASE
 
-All must print OK.
+1. What you read (relevant file sections)
+2. What is broken (one sentence root cause)  
+3. Exact code change (file path + complete function)
+4. Verification command output
+5. Confirm phase complete before next phase
 
-## STEP 2 — Import chain audit (most critical)
-
-Run this EXACTLY and report every line:
-  python -c "
-import sys
-sys.path.insert(0, '.')
-import app.handlers, pkgutil
-errors = []
-for f, name, _ in pkgutil.walk_packages(app.handlers.__path__, 'app.handlers.'):
-    try:
-        __import__(name)
-        print(f'OK: {name}')
-    except Exception as e:
-        print(f'FAIL: {name} -> {type(e).__name__}: {e}')
-        errors.append(name)
-print(f'Total errors: {len(errors)}')
-print(f'All handlers importable: {len(errors) == 0}')
-"
-
-Expected: Total errors: 0
-If ANY line shows FAIL: fix that module immediately. Do not deploy.
-
-Then verify payments module imports cleanly:
-  python -c "
-import sys
-sys.path.insert(0, '.')
-modules = [
-    'app.payments.models',
-    'app.payments.repository',
-    'app.payments.service',
-    'app.payments.handlers',
-]
-for m in modules:
-    try:
-        __import__(m)
-        print(f'OK: {m}')
-    except Exception as e:
-        print(f'FAIL: {m} -> {type(e).__name__}: {e}')
-"
-
-All must print OK.
-
-## STEP 3 — Module-level infrastructure call scan
-
-Run:
-  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
-    -Pattern "^get_redis\(\)|^get_db\(\)|^_redis\s*=\s*get_redis|^_db\s*=\s*get_db" `
-    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
-
-Any match at column 0 or module level is a critical bug.
-Every match must be INSIDE a function body.
-Report every line found.
-
-## STEP 4 — Verify payments module is registered as Pyrogram plugin
-
-Run:
-  Get-Content app\bot\client.py | ForEach-Object -Begin {$i=1} -Process {"$i`t$_"; $i++}
-
-Confirm plugins= dict includes app.payments OR app.payments.handlers.
-If payments handlers are NOT in the plugin path: Pyrogram will never load them.
-
-If missing, the plugins dict must be updated to include the payments package:
-  plugins=dict(root="app.handlers")  # handlers only — BAD if payments is separate
-  plugins=dict(root="app")           # too broad — BAD
-
-Correct approach: payments handlers must either be:
-  A) Inside app\handlers\payment_handler.py (already in plugin path), OR
-  B) The plugins root must be broadened to include app\payments\
-
-Report what currently exists and whether handlers will be loaded.
-
-## STEP 5 — Verify CallbackQuery bug fix
-
-Run:
-  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
-    -Pattern "query\.chat|callback\.chat" `
-    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
-
-Any match is a bug. Must return zero results.
-
-## STEP 6 — Verify no sys.exit() in handlers or payments
-
-Run:
-  Select-String -Path "app\handlers\*.py","app\payments\*.py" `
-    -Pattern "sys\.exit" `
-    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
-
-Must return zero results.
-
-## STEP 7 — Verify atomic lock implementation exists
-
-Run:
-  Select-String -Path "app\payments\repository.py" `
-    -Pattern "acquire_processing_lock|find_one_and_update|processing" `
-    | Select-Object LineNumber, Line | Format-Table -AutoSize
-
-Must show the atomic lock function exists.
-If missing: implement it before deploying.
-
-## STEP 8 — Verify payment states are defined
-
-Run:
-  Select-String -Path "app\payments\models.py" `
-    -Pattern "waiting_payment_details|waiting_txid|under_review|approved|rejected|expired" `
-    | Select-Object LineNumber, Line | Format-Table -AutoSize
-
-Must show all required states.
-
-## STEP 9 — Verify UX changes
-
-Run:
-  Select-String -Path "app\services\onboarding_service.py","app\bot\keyboards.py" `
-    -Pattern "premier|automation ecosystem|unlock amazing|upgrade your experience|SaaS" `
-    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
-
-Must return ZERO matches. If any marketing language remains: remove it.
-
-Run:
-  Select-String -Path "app\bot\keyboards.py" `
-    -Pattern "Premium|Submit|Anonymous|Referral|Status|Support" `
-    | Select-Object LineNumber, Line | Format-Table -AutoSize
-
-Must show all 5 menu buttons exist.
-
-## STEP 10 — Verify timeout logic starts AFTER delivery
-
-Read app\payments\service.py or app\payments\timeouts.py.
-Find where timeout timer starts.
-Confirm it is called AFTER:
-  await bot.send_message(...)  # delivery confirmed
-
-NOT before.
-
-Report the exact function and line where timeout starts.
-If timeout starts before delivery: fix it.
-
-## STEP 11 — Check for bare except patterns
-
-Run:
-  Select-String -Path "app\payments\*.py" `
-    -Pattern "except:\s*$|except Exception:\s*$" `
-    | Select-Object Path, LineNumber, Line | Format-Table -AutoSize
-
-Any match that has no variable (except Exception as e:) is a silent swallower.
-Fix every match to use: except Exception as e: with logger.exception()
-
-## FINAL REPORT FORMAT
-
-Report in this exact order:
-1. preflight.py output (must show "All checks passed")
-2. Handler import audit result (must show "Total errors: 0")
-3. Payments import audit result (all OK)
-4. Plugin registration status (are payment handlers reachable by Pyrogram?)
-5. CallbackQuery bug check (must be zero matches)
-6. sys.exit check (must be zero matches)
-7. Atomic lock exists (yes/no + line number)
-8. Payment states defined (yes/no + list found)
-9. Marketing language removed (yes/no)
-10. Timeout placement (after delivery: yes/no + line reference)
-11. Bare except count (must be zero)
-
-THEN:
-If all 11 checks pass: output exactly "SAFE TO DEPLOY"
-If any check fails: list every failure and fix before outputting anything.
-
-Do NOT output "SAFE TO DEPLOY" until all 11 checks pass.
-'@ -Encoding UTF8
+Do NOT proceed to next phase if current phase has a failing py_compile.
+Do NOT report done until preflight.py passes all checks.

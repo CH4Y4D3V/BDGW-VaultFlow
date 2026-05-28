@@ -203,9 +203,15 @@ class DatabaseManager:
             from app.referral.repository import ReferralRepository
             ref_repo = ReferralRepository(cls._db)
             await ref_repo.create_indexes()
+            from app.payments.repository import PaymentRepository
+            payment_repo = PaymentRepository(cls._db)
+            await payment_repo.create_indexes()
             logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
-            logger.warning("Referral index setup failed (non-fatal)", extra={"ctx_error": str(e)})
+            logger.exception(
+                "non_core_index_setup_failed",
+                extra={"ctx_error": str(e)},
+            )
             
         cls._initialized = True
 

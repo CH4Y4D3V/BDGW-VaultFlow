@@ -308,7 +308,11 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
         )
         try:
             await callback.answer("⚠️ Error. Please try again.", show_alert=True)
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "submit_menu_error_answer_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 

@@ -54,7 +54,11 @@ async def _get_bot_username(client: Client) -> str:
         try:
             me = await client.get_me()
             _bot_username = me.username or ""
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "bot_username_lookup_failed",
+                extra={"ctx_error": str(e)},
+            )
             _bot_username = ""
     return _bot_username
 
@@ -135,7 +139,11 @@ async def _cleanup_messages(*messages: Optional[Message], delay: float = 10.0) -
             continue
         try:
             await msg.delete()
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "cleanup_message_delete_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 
@@ -154,7 +162,11 @@ async def _ack_in_group(
         try:
             ack = await message.reply_text(ack_text, parse_mode=ParseMode.HTML)
             asyncio.create_task(_cleanup_messages(ack, message, delay=10.0))
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "group_ack_send_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
     else:
         try:
@@ -165,7 +177,11 @@ async def _ack_in_group(
                 f"<a href='{link}'>start the bot</a> first, then try again.",
                 parse_mode=ParseMode.HTML,
             )
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "group_blocked_notice_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 
@@ -181,7 +197,11 @@ async def _get_rules_text() -> str:
         doc = await db["bot_config"].find_one({"key": "rules"})
         if doc and doc.get("value"):
             return doc["value"]
-    except Exception:
+    except Exception as e:
+        logger.exception(
+            "rules_text_lookup_failed",
+            extra={"ctx_error": str(e)},
+        )
         pass
 
     return (
@@ -298,13 +318,17 @@ async def handle_start(client: Client, message: Message) -> None:
         )
         try:
             await message.reply_text("❌ System busy. Please try again in a moment.")
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "start_error_reply_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 
 # ── Menu Callbacks ────────────────────────────────────────────────────────────
 
-@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|premium|queue|referrals)$"))
+@Client.on_callback_query(filters.regex(r"^menu:(mystatus|rules|home|queue|referrals)$"))
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
     """Handles main menu callbacks, editing the message in-place."""
     action = callback_query.data.split(":")[1]
@@ -327,20 +351,6 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 callback_query.from_user.first_name or "Creator"
             )
 
-        elif action == "premium":
-            text = (
-                "💎 <b>PREMIUM ACCESS</b>\n\n"
-                "Unlock the full power of VaultFlow with our Premium tier.\n\n"
-                "✨ <b>Exclusive Features:</b>\n"
-                "• <b>Priority Delivery:</b> Jump to the front of the queue.\n"
-                "• <b>Custom Watermarks:</b> Your brand on every piece of content.\n"
-                "• <b>Multi-Channel Sync:</b> Distribute to unlimited targets.\n"
-                "• <b>Advanced Analytics:</b> Track your content's performance.\n"
-                "• <b>24/7 Priority Support:</b> Direct line to our engineers.\n\n"
-                "<i>Join the elite circle of creators today.</i>"
-            )
-            keyboard = KeyboardBuilder.build_premium_conversion()
-
         elif action == "referrals":
             try:
                 from app.referral.repository import ReferralRepository
@@ -354,7 +364,7 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 await callback_query.answer()
                 return
             except Exception as e:
-                logger.warning(
+                logger.exception(
                     "Referral status unavailable",
                     extra={"ctx_user_id": user_id, "ctx_error": str(e)},
                 )

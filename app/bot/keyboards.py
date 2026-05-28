@@ -15,7 +15,7 @@ class KeyboardBuilder:
         Builds the streamlined vertical button layout.
         
         Row 1: [ 💎 Premium Access ]
-        Row 2: [ 📨 Submit Content ]
+        Row 2: [ 📨 Submit Content ]  [ 👤 Anonymous ]
         Row 3: [ 👥 Referral ]  [ 📊 My Status ]
         Row 4: [ 🆘 Support ]
         """
@@ -28,20 +28,16 @@ class KeyboardBuilder:
         # Streamlined layout
         buttons = [
             [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
-            [InlineKeyboardButton("📨 Submit Content", callback_data="menu:submit")],
+            [
+                InlineKeyboardButton("📨 Submit Content", callback_data="menu:submit"),
+                InlineKeyboardButton("👤 Anonymous", callback_data="menu:anonymous"),
+            ],
             [
                 InlineKeyboardButton("👥 Referral", callback_data="menu:referrals"),
                 InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")
             ],
             [InlineKeyboardButton("🆘 Support", callback_data="menu:support")]
         ]
-
-        # Admins get an extra row at the top
-        if state == "admin":
-            buttons.insert(0, [
-                InlineKeyboardButton("🛡 Admin Panel", callback_data="admin:dashboard"),
-                InlineKeyboardButton("📥 Moderation", callback_data="admin:moderation")
-            ])
 
         return InlineKeyboardMarkup(buttons)
 

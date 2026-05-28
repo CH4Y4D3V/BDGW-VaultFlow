@@ -44,7 +44,11 @@ async def _delete_after(message: Message, delay: float = _WELCOME_DELETE_SECONDS
     await asyncio.sleep(delay)
     try:
         await message.delete()
-    except Exception:
+    except Exception as e:
+        logger.exception(
+            "welcome_delete_failed",
+            extra={"ctx_error": str(e)},
+        )
         pass
 
 

@@ -284,7 +284,11 @@ async def handle_consent_agree(client: Client, callback: CallbackQuery) -> None:
                     "✅ You are already verified. Go ahead and submit your content.",
                     parse_mode=ParseMode.HTML,
                 )
-            except Exception:
+            except Exception as e:
+                logger.exception(
+                    "creator_verified_message_edit_failed",
+                    extra={"ctx_error": str(e)},
+                )
                 pass
             return
 
@@ -367,7 +371,11 @@ async def handle_consent_agree(client: Client, callback: CallbackQuery) -> None:
                 "⚠️ An error occurred. Please try again.",
                 show_alert=True,
             )
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "creator_consent_error_answer_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 
@@ -400,7 +408,11 @@ async def handle_consent_decline(client: Client, callback: CallbackQuery) -> Non
         )
         try:
             await callback.answer()
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "creator_consent_decline_answer_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import (
     CallbackQuery,
@@ -20,9 +20,6 @@ from app.payments.service import PLANS
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-# ── User Handlers ─────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
@@ -43,7 +40,7 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
     
     buttons.append([
         InlineKeyboardButton("📊 Check Status", callback_data="pay:status"),
-        InlineKeyboardButton("🔄 Renew", callback_data="pay:renew")
+        InlineKeyboardButton("🔄 Renew", callback_data="menu:premium")
     ])
     buttons.append([InlineKeyboardButton("← Back", callback_data="menu:home")])
     
@@ -98,6 +95,47 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
         await callback.answer("Could not initiate payment. Please try again.", show_alert=True)
 
 
+@Client.on_callback_query(filters.regex(r"^pay:status$"))
+async def handle_payment_status(client: Client, callback: CallbackQuery) -> None:
+    user_id = callback.from_user.id
+    service = get_payment_service()
+    session = await service.get_active_session(user_id)
+    if not session:
+        await callback.answer("No active payment session.", show_alert=True)
+        return
+
+    text = (
+        f"<b>Payment Status</b>\n\n"
+        f"Plan: {PLANS[session.plan_id]['label']}\n"
+        f"Amount: ৳{session.locked_amount}\n"
+        f"Status: {session.status.value}"
+    )
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session.id}")],
+            [InlineKeyboardButton("← Back", callback_data="menu:premium")],
+        ]),
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@Client.on_callback_query(filters.regex(r"^pay:cancel:(?P<sid>.+)$"))
+async def handle_payment_cancel(client: Client, callback: CallbackQuery) -> None:
+    session_id = callback.matches[0].group("sid")
+    service = get_payment_service()
+    cancelled = await service.update_status(session_id, PaymentStatus.CANCELLED)
+    if not cancelled:
+        await callback.answer("Could not cancel this session.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        "Payment session cancelled.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data="menu:premium")]]),
+    )
+    await callback.answer()
+
+
 @Client.on_callback_query(filters.regex(r"^pay:method:(?P<method>\w+):(?P<sid>.+)$"))
 async def handle_payment_method(client: Client, callback: CallbackQuery) -> None:
     method = callback.matches[0].group("method")
@@ -149,12 +187,14 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 @Client.on_message(filters.private & ~filters.regex(r"^/"))
 async def handle_payment_inputs(client: Client, message: Message) -> None:
     """Captures TXID and Screenshot in sequence."""
+    if not message.from_user:
+        return
     user_id = message.from_user.id
     service = get_payment_service()
     
     session = await service.get_active_session(user_id)
     if not session:
-        return # Not in payment flow, might be support (handled elsewhere)
+        raise ContinuePropagation
 
     if session.status == PaymentStatus.WAITING_TXID:
         if not message.text:
@@ -170,6 +210,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             return
         
         file_id = message.photo.file_id if message.photo else message.document.file_id
+        session.txid = session.txid or message.text
         await service.update_status(session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id)
         
         await message.reply_text(
@@ -179,7 +220,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         )
         
         # Notify Admins
-        await _notify_admins_of_submission(client, session, message.text or session.txid, file_id)
+        await _notify_admins_of_submission(client, session, session.txid or "", file_id)
 
 
 # ── Admin Handlers ────────────────────────────────────────────────────────────

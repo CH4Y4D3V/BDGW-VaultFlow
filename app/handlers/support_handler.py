@@ -113,7 +113,7 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
             )
         except Exception as e:
             logger.exception(
-                "handle_support_menu: pre-create topic failed — will retry on first message",
+                "forum_topic_creation_failed",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
 
@@ -132,7 +132,11 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
             await callback.answer(
                 "⚠️ Could not open support. Please try again.", show_alert=True
             )
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "support_menu_error_answer_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
 
 
@@ -244,7 +248,11 @@ async def handle_hub_support_message_persist(
                     for btn in row:
                         if getattr(btn, "callback_data", "").startswith("mod_"):
                             return
-            except Exception:
+            except Exception as e:
+                logger.exception(
+                    "support_reply_markup_scan_failed",
+                    extra={"ctx_error": str(e)},
+                )
                 pass
 
         topic_service = get_topic_service()

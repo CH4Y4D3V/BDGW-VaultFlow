@@ -63,7 +63,11 @@ def _is_moderation_card(message: Message) -> bool:
                 data = getattr(btn, "callback_data", "") or ""
                 if data.startswith("mod_"):
                     return True
-    except Exception:
+    except Exception as e:
+        logger.exception(
+            "moderation_card_detection_failed",
+            extra={"ctx_error": str(e)},
+        )
         pass
     return False
 

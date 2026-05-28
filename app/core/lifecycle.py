@@ -170,9 +170,12 @@ class AppLifecycle:
             # 4. Membership Handler bridge
             init_membership_handler(ref_service)
 
-        except Exception:
+        except Exception as e:
             # FIX (referral): non-fatal — log at exception level, never sys.exit()
-            logger.exception("Failed to initialize Referral System", exc_info=True)
+            logger.exception(
+                "referral_system_initialization_failed",
+                extra={"ctx_error": str(e)},
+            )
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")

@@ -296,7 +296,7 @@ async def handle_moderation_callback(
                 )
                 await callback.answer()
             except Exception as e:
-                logger.warning(
+                logger.exception(
                     "Could not edit card to destination picker",
                     extra={"ctx_error": str(e)},
                 )
@@ -407,7 +407,7 @@ async def handle_moderation_callback(
 
     except Exception as e:
         # RC-3 fix: catch everything — moderation errors must never time out silently
-        logger.error(
+        logger.exception(
             "HANDLER: handle_moderation_callback unhandled exception",
             extra={
                 "ctx_data": callback.data,
@@ -424,5 +424,9 @@ async def handle_moderation_callback(
                 "Please try again or check logs.",
                 show_alert=True,
             )
-        except Exception:
+        except Exception as e:
+            logger.exception(
+                "moderation_callback_answer_failed",
+                extra={"ctx_error": str(e)},
+            )
             pass
