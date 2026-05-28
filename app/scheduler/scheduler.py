@@ -53,12 +53,6 @@ class DistributionScheduler:
         """Acquire distributed singleton lock for the scheduler."""
         lock_key = "scheduler_active_singleton"
 
-        # FIX 7: delete any stale lock left over from a previous crash/restart
-        # before attempting insert_one. delete_many is idempotent (0 or 1 doc).
-        # Without this, every restart after a crash would find an orphaned lock
-        # document, hit DuplicateKeyError, and return False — scheduler never starts.
-        await self._locks.delete_many({"lock_key": lock_key})
-
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=60)
         try:
             await self._locks.insert_one({
@@ -83,6 +77,10 @@ class DistributionScheduler:
     async def start(self) -> None:
         if self._started:
             return
+
+        # Unconditionally clear any existing lock owned by this instance
+        await self._locks.delete_many({"lock_key": "scheduler_active_singleton"})
+        logger.info("scheduler lock cleared on startup")
 
         # Attempt to acquire singleton lock
         if not await self._acquire_lock():
@@ -222,12 +220,7 @@ class DistributionScheduler:
                 if remaining <= 0:
                     continue
 
-                # FIX 8: get_channel_pending_count() does not exist on QueueRepository.
-                # Replace with a direct count_documents query on the queue collection.
-                pending = await self._db[settings.QUEUE_COLLECTION].count_documents({
-                    "source_channel_id": source_id,
-                    "status": {"$in": ["pending", "watermarking", "ready", "locked", "delivering"]}
-                })
+                pending = await self._queue_repo.get_channel_pending_count(int(dest))
                 slots = min(settings.MAX_JOBS_PER_CYCLE - pending, remaining)
                 if slots <= 0:
                     continue
@@ -339,19 +332,13 @@ class DistributionScheduler:
             logger.error(f"Stale lock sweep FAILED: {e}")
 
     async def _deadline_sweep(self) -> None:
-        # FIX 9: get_deadline_exceeded_jobs() does not exist on QueueRepository.
-        # Replace with a direct DB query + move_to_dead_letter per job.
         try:
             now = datetime.now(timezone.utc)
-            queue = self._db[settings.QUEUE_COLLECTION]
-            cursor = queue.find({
-                "status": {"$in": ["pending", "locked", "processing", "watermarking"]},
-                "queue_deadline": {"$lt": now, "$ne": None},
-            })
-            async for job in cursor:
+            jobs = await self._queue_repo.get_deadline_exceeded_jobs(now)
+            for job in jobs:
                 await self._queue_repo.move_to_dead_letter(str(job["_id"]), "deadline_exceeded")
         except Exception as e:
-            logger.error(f"Deadline sweep FAILED: {e}")
+            logger.error("Deadline sweep FAILED", extra={"ctx_error": str(e)})
 
     async def _collect_metrics(self) -> None:
         try:

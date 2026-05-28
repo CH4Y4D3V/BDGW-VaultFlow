@@ -1,173 +1,241 @@
+# CODEBASE AUDIT REQUEST — BDGW VaultFlow
 
-# BDGW VAULTFLOW — PRODUCTION DEPLOY FIX
-# MASTER PROMPT — READ EVERY WORD BEFORE WRITING A SINGLE LINE
-
-You are a senior Python backend engineer doing a surgical production fix on BDGW VaultFlow.
-This bot is LIVE. Users are testing it RIGHT NOW. You have one job: fix the four confirmed
-crashes listed below and nothing else. Do not refactor. Do not improve. Do not touch anything
-that is not directly causing a crash. Every file you touch must be output in full, complete,
-copy-paste ready form with no truncation and no placeholder comments.
+You are a senior production reliability engineer and Telegram bot architect.
+Your job is to perform a full deployment readiness audit on this codebase.
+Do NOT ask clarifying questions. Read the files, trace every path, and report findings.
 
 ---
 
-## ABSOLUTE RULES — VIOLATING ANY OF THESE ENDS THE TASK
+## AUDIT SCOPE
 
-1. NEVER use logger.info("msg", key=value) — stdlib Logger crashes on bare kwargs.
-   ONLY valid: logger.info("msg") or logger.info("msg", extra={"key": value})
+Read every file in the following paths before forming any opinion:
 
-2. NEVER output a file with "..." truncation. Every file must be 100% complete.
-
-3. NEVER touch files not listed in SCOPE below.
-
-4. NEVER move business logic. NEVER change architecture. NEVER refactor.
-
-5. READ the PaymentStatus definition before touching any file that uses it.
-   Do not assume attribute names. Read first. Fix second.
-
-6. READ app/payments/handlers.py before fixing app/handlers/payment_handler.py.
-   The import must match the actual exported function name exactly.
-
-7. If you cannot determine the correct fix from the files provided, say:
-   "I need the content of <filepath> to complete this fix."
-   Do not guess. Do not invent attribute names or function names.
-
-8. Do not add any new dependencies, imports, collections, or services.
-
-9. Do not add new exception types or custom exception classes.
-
-10. Output format is strict — see OUTPUT FORMAT section below. No deviations.
+- main_bot.py
+- app/core/lifecycle.py
+- app/core/database.py
+- app/core/logger.py
+- app/core/permissions.py
+- app/bot/client.py
+- app/config/settings.py
+- app/handlers/ (every file)
+- app/services/ (every file)
+- app/repositories/ (every file)
+- app/scheduler/scheduler.py
+- app/distribution/ (every file)
+- app/watermark/worker_pool.py
+- app/watermark/dispatcher_worker.py
+- app/health.py
 
 ---
 
-## CONFIRMED CRASHES FROM PRODUCTION LOGS
+## AUDIT CHECKLIST
 
-### CRASH 1 — ImportError blocks Pyrogram startup entirely
-File "/app/app/handlers/payment_handler.py", line 10
-ImportError: cannot import name 'handle_payment_inputs' from 'app.payments.handlers'
-Did you mean: 'handle_payment_status'?
-The Pyrogram plugin loader imports every file in app/handlers/ at startup.
-This import error kills the entire bot before a single handler registers.
-
-Fix: Open app/payments/handlers.py. Find the actual exported function names at
-the module level (decorated with @Client.on_callback_query or @Client.on_message).
-Open app/handlers/payment_handler.py. Change the import list to match exactly
-what is exported. Nothing else.
-
-### CRASH 2 — PaymentStatus attribute error kills payment callbacks
-Unhandled exception: type object 'PaymentStatus' has no attribute 'WAITING_TXID'
-Something references PaymentStatus.WAITING_TXID but that attribute does not exist
-on the enum. It appears in app/payments/repository.py in the get_active_session method.
-
-Fix: Open app/payments/models.py. Read the PaymentStatus enum definition.
-Find the correct attribute name for the "waiting for TXID" state.
-Open app/payments/repository.py. Find every reference to PaymentStatus.WAITING_TXID.
-Replace with the correct attribute name. Nothing else.
-
-### CRASH 3 — CallbackQuery.chat AttributeError kills moderation callbacks
-'CallbackQuery' object has no attribute 'chat'
-In Pyrogram, CallbackQuery has no .chat attribute. The correct path is
-callback.message.chat (when the callback originated from an inline keyboard on a message).
-
-Fix: Search app/handlers/ for any handler function that receives a CallbackQuery
-argument and accesses .chat directly on it (i.e. callback.chat or query.chat).
-Change every instance to callback.message.chat or callback.message.chat.id as appropriate.
-Guard with: if not callback.message or not callback.message.chat: return
-Do not touch handlers that already correctly use callback.message.chat.
-
-### CRASH 4 — Forum topic creation crashes support flow
-forum_topic_creation_unexpected_error (repeated 3 times, then forum_topic_creation_failed)
-HANDLER: handle_support_menu entered
-The topic creation is retrying 3 times then failing silently. The user sees no error.
-
-Fix: Open app/services/topic_service.py. Find _create_named_topic.
-The method calls client.invoke(raw.functions.channels.CreateForumTopic(...)).
-This requires the bot to be admin with manage_topics permission in the group.
-The unexpected_error suggests a non-FloodWait, non-Forbidden exception is being
-raised — likely a Pyrogram version incompatibility with raw API.
-
-Add a fallback: if raw API fails with any Exception that is not FloodWait or Forbidden,
-catch it, log it with full exc_info=True, then try the high-level API instead:
-  result = await client.create_forum_topic(
-      chat_id=settings.VERIFICATION_GROUP_ID,
-      title=title
-  )
-  return result.id
-
-If that also fails, raise the exception so the caller can send the user a fallback message.
-In app/handlers/support_handler.py in handle_support_menu, wrap the topic creation call
-in try/except and if it fails, edit the message to say:
-"Support is temporarily unavailable. Please try again in a few minutes."
-Do not crash. Do not leave the user with a broken state.
+For each file you read, check and report on every item below.
+Mark each finding as one of:
+  ✅ PASS       — confirmed working, no action needed
+  ⚠️ WARNING    — works but has risk or tech debt
+  ❌ FATAL      — will crash or silently corrupt data in production
+  🔍 UNVERIFIED — could not confirm without runtime data
 
 ---
 
-## SCOPE — ONLY THESE FILES MAY BE MODIFIED
-
-1. app/handlers/payment_handler.py     — fix CRASH 1 (wrong import name)
-2. app/payments/repository.py          — fix CRASH 2 (WAITING_TXID attribute)
-3. app/handlers/support_handler.py     — fix CRASH 3 (callback.chat) + CRASH 4 (fallback)
-4. app/services/topic_service.py       — fix CRASH 4 (raw API fallback)
-
-You may read any file to understand context. You may only write to the four files above.
-
-If CRASH 2 requires a change to app/payments/models.py (e.g. the attribute is genuinely
-missing from the enum), you may add that file to scope and output it as well. State clearly
-that you are adding it and why.
-
-If CRASH 3 also appears in app/payments/handlers.py or app/handlers/callback_handler.py,
-add those files to scope and output them. State clearly that you are adding them and why.
+### 1. BOOT SEQUENCE
+- Does main_bot.py complete without crashing?
+- Does lifecycle.py start Pyrogram successfully?
+- Is every startup step reachable (not inside dead code blocks)?
+- Does MongoDB connect before any repository is used?
+- Are indexes created without duplication errors?
+- Does the scheduler start and register jobs correctly?
+- Are all workers instantiated and started?
+- Does the health server bind correctly?
 
 ---
 
-## OUTPUT FORMAT — STRICTLY ENFORCED
+### 2. LOGGER USAGE (CRITICAL)
+Scan every single logger call in every file.
+The logger is stdlib logging.Logger.
+The ONLY valid calling conventions are:
+  logger.info("message")
+  logger.info("message", extra={"key": value})
+  logger.error("message", exc_info=True)
 
-For each file you modify, output this exact structure:
+Flag every instance of:
+  logger.info("msg", key=value)      ← TypeError, crashes process
+  logger.info("msg", stage=value)    ← TypeError, crashes process
+  logger.debug("msg", ctx=value)     ← TypeError, crashes process
+
+Report file name, line number, and exact bad call for every violation.
 
 ---
-### FILE: <exact filepath from repo root>
-**Root cause:** <one sentence, specific, no fluff>
-**Lines changed:** <list each change as "line N: old → new — reason">
 
-```python
-<COMPLETE FILE CONTENT — ZERO TRUNCATION — ZERO PLACEHOLDERS>
-```
----
-
-After all files, output:
+### 3. IMPORT INTEGRITY
+- Are there any missing imports (NameError on first use)?
+- Are there any circular imports?
+- Are there any imports of undefined symbols from internal modules?
+- List every broken import with file and line.
 
 ---
-### DEPLOY CHECKLIST
-- [ ] CRASH 1 fixed: ImportError resolved, Pyrogram loads all plugins
-- [ ] CRASH 2 fixed: PaymentStatus.WAITING_TXID replaced with correct attribute
-- [ ] CRASH 3 fixed: all callback.chat → callback.message.chat with guard
-- [ ] CRASH 4 fixed: topic creation has raw API fallback + user-facing error on failure
-- [ ] Zero new imports added that are not already in requirements.txt
-- [ ] Zero logger calls with bare kwargs in any modified file
-- [ ] All modified files are 100% complete with no truncation
+
+### 4. DEAD CODE & UNREACHABLE BLOCKS
+- Is any critical code placed after sys.exit() or inside an except block that exits first?
+- Are any startup steps silently skipped?
+- Are there any methods called that do not exist on the target class/object?
+- List every unreachable block that contains production logic.
+
 ---
 
-Do not output any other text. No preamble. No summary after the checklist.
-Start immediately with the first ### FILE: block.
+### 5. REPOSITORY CONTRACT VERIFICATION
+For every method called on a repository class anywhere in services, workers, or scheduler:
+- Confirm the method actually exists on that repository class.
+- Confirm the method signature matches the call site.
+- Flag every call to a non-existent repository method.
 
-How to use this:
-After pasting the prompt, immediately append the raw content of these files in this order, each prefixed with its path:
-=== app/payments/models.py ===
-<paste full file>
+---
 
-=== app/payments/handlers.py ===
-<paste full file>
+### 6. WORKER & SCHEDULER INTEGRITY
+- Is every worker instantiated in lifecycle.py?
+- Is every worker started in lifecycle.py?
+- Is every worker stopped gracefully on shutdown?
+- Does the scheduler have all required imports?
+- Does setup_jobs() or equivalent exist and get called?
+- Is stale singleton lock cleaned on restart?
+- Are all APScheduler jobs pointing to existing async methods?
 
-=== app/payments/repository.py ===
-<paste full file>
+---
 
-=== app/handlers/payment_handler.py ===
-<paste full file>
+### 7. QUEUE & VAULT SAFETY
+- Does every enqueue path validate vault_chat_id + vault_message_id before inserting?
+- Are albums processed as atomic units?
+- Is there a dead-letter path for max-retry-exceeded jobs?
+- Is content always delivered via copy_message() / copy_media_group()?
+- Is forward_messages() used anywhere? (FORBIDDEN — leaks identity)
+- Are all queue state transitions atomic ($set / find_one_and_update)?
 
-=== app/handlers/support_handler.py ===
-<paste full file>
+---
 
-=== app/handlers/callback_handler.py ===
-<paste full file>
+### 8. TELEGRAM DELIVERY SAFETY
+- Is FloodWait caught and respected on every Telegram API call?
+- Is there retry logic with backoff on every delivery path?
+- Are flood wait durations persisted (Redis or DB) so workers don't retry too early?
+- Is there any place where a failed Telegram call silently drops a job?
 
-=== app/services/topic_service.py ===
-<paste full file>
+---
+
+### 9. STATE CONSISTENCY
+- Are pending submissions kept in sync between in-memory dict and MongoDB PENDING_COLLECTION?
+- Are payment sessions only activated after confirmed Telegram delivery?
+- Are payment timeouts only started after session activation?
+- Is TXID globally unique and checked before approval?
+- Are duplicate processing scenarios prevented with locks?
+
+---
+
+### 10. REDIS USAGE
+- Is the Redis client correctly named and imported everywhere it is used?
+- Is there any NameError risk on Redis access (_redis vs redis vs client)?
+- Are all Redis operations wrapped with proper error handling?
+
+---
+
+### 11. MONGODB SAFETY
+- Are any collections indexed twice in _ensure_indexes() (causes DEGRADED state)?
+- Are all hot-path queries using indexed fields?
+- Is there any direct collection access from handlers or lifecycle.py?
+- Are all migrations idempotent?
+
+---
+
+### 12. ASYNC SAFETY
+- Is there any blocking I/O (file read, subprocess, sleep) in async handlers or workers?
+- Is asyncio.create_subprocess_exec() used instead of subprocess.run() in async paths?
+- Are all background tasks tracked and cancellable?
+- Is there any fire-and-forget task without error handling?
+
+---
+
+### 13. EXCEPTION HANDLING
+- Is there any bare `except:` without logging?
+- Are exceptions swallowed silently anywhere?
+- Is every critical failure logged with exc_info=True?
+- Are non-fatal errors isolated so they don't crash the entire process?
+
+---
+
+### 14. GRACEFUL SHUTDOWN
+- Does shutdown drain in-flight queue jobs?
+- Does shutdown cancel all background tasks cleanly?
+- Does shutdown close MongoDB connection?
+- Does shutdown stop the Pyrogram client cleanly?
+- Is there any resource that leaks on restart?
+
+---
+
+### 15. HANDLER LAYER CLEANLINESS
+- Do handlers contain any business logic? (They must not — delegates only)
+- Do handlers call repositories directly? (Forbidden — must go through services)
+- Do handlers call get_db() directly? (Forbidden)
+- Are all handlers thin: validate → delegate → respond?
+
+---
+
+### 16. CONFIGURATION & ENV SAFETY
+- Are all required ENV variables validated on startup?
+- Does the system fail fast with a clear error if a required variable is missing?
+- Are secrets (tokens, passwords) never logged?
+
+---
+
+## OUTPUT FORMAT
+
+Structure your output exactly like this:
+
+---
+
+# DEPLOYMENT READINESS AUDIT — BDGW VaultFlow
+
+## VERDICT
+[ NOT DEPLOYABLE / DEPLOYABLE WITH WARNINGS / PRODUCTION READY ]
+One sentence explaining the verdict.
+
+---
+
+## FATAL ISSUES  (must fix before any deployment)
+For each fatal issue:
+  FILE: path/to/file.py
+  LINE: N
+  ISSUE: exact description
+  IMPACT: what breaks at runtime
+  FIX: exact change required
+
+---
+
+## WARNINGS  (should fix before stable production)
+Same format as FATAL ISSUES.
+
+---
+
+## CONFIRMED WORKING
+List every subsystem that passed audit with a one-line confirmation.
+
+---
+
+## DEPLOYMENT BLOCKERS SUMMARY
+Numbered list — fatal issues only, sorted by fix priority.
+Item 1 must be fixed first (blocks all testing).
+Item N is last (can be fixed after first deployment).
+
+---
+
+## ESTIMATED FIX EFFORT
+Breakdown:
+  Critical fixes (boot blockers):     N items, ~X hours
+  Safety fixes (data integrity):      N items, ~X hours
+  Quality fixes (warnings/tech debt): N items, ~X hours
+  Total before safe deployment:       ~X hours
+
+---
+
+Do not skip any file.
+Do not infer — read the actual code before reporting.
+Do not summarize groups of issues — report every individual violation separately.
+If a file is empty or missing, report it as a finding.

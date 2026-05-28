@@ -534,17 +534,19 @@ class QueueRepository:
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
-    async def get_channel_pending_count(self, channel_id: str) -> int:
+    async def get_channel_pending_count(self, channel_id: int) -> int:
         """Return count of PENDING jobs for a given channel_id."""
         return await self._queue.count_documents(
-            {"source_channel_id": channel_id, "status": JobStatus.PENDING}
+            {"target_channel_id": channel_id, "status": "pending"}
         )
 
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
         """Return jobs whose deadline has passed and are still pending."""
-        return await self._queue.find(
-            {"queue_deadline": {"$lt": cutoff}, "status": JobStatus.PENDING}
-        ).to_list(length=500)
+        cursor = self._queue.find(
+            {"status": "pending", "scheduled_at": {"$lte": cutoff}}
+        )
+        result = await cursor.to_list(length=None)
+        return result if result is not None else []
 
     async def recover_stale_jobs(self) -> int:
         """Recover jobs from crashed workers."""

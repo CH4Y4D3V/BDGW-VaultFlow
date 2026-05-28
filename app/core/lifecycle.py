@@ -72,9 +72,6 @@ class AppLifecycle:
             logger.exception("BOOT FAILURE: Channel seeding failed")
             sys.exit(1)
 
-        # FIX 2: dedented from inside the except block above — previously this
-        # entire section lived inside the except: block after sys.exit(1), making
-        # it unreachable dead code. Pyrogram never started.
 
         # 3. Telegram Client
         try:
@@ -86,15 +83,12 @@ class AppLifecycle:
             try:
                 await self._verify_channel_access()
             except Exception as verify_err:
-                # FIX 3: was logger.warning("channel_access_check_failed", error=..., note=...)
-                # which crashes stdlib Logger with TypeError on bare kwargs.
                 logger.warning(
                     "Channel access check failed — continuing in degraded state",
                     extra={"ctx_error": str(verify_err)},
                 )
 
             total_handlers = self._audit_handler_registration()
-            # FIX 3: was logger.info("boot_stage", stage=..., bot_username=..., total_handlers=...)
             logger.info(
                 "Pyrogram connected",
                 extra={
@@ -104,7 +98,6 @@ class AppLifecycle:
             )
 
         except Exception as e:
-            # FIX 3: was logger.exception("...", error_type=..., error_message=...)
             logger.exception(
                 "Failed to start Pyrogram client",
                 extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
@@ -123,15 +116,12 @@ class AppLifecycle:
         try:
             await self._engine.start()
         except Exception as e:
-            # FIX 3: was logger.exception("...", error_type=..., error_message=...)
             logger.exception(
                 "Failed to start Distribution Engine",
                 extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
             )
             raise
 
-        # FIX 4: self._subscription_worker was None (set in __init__, never assigned).
-        # Instantiate before calling .start().
         self._subscription_worker = SubscriptionWorker()
         try:
             await self._subscription_worker.start(bot=self._bot)
@@ -171,7 +161,6 @@ class AppLifecycle:
             init_membership_handler(ref_service)
 
         except Exception as e:
-            # FIX (referral): non-fatal — log at warning level with full detail
             logger.warning(
                 "referral_system_initialization_failed",
                 extra={
