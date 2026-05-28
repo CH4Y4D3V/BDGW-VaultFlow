@@ -543,7 +543,7 @@ class QueueRepository:
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
         """Return jobs whose deadline has passed and are still pending."""
         return await self._queue.find(
-            {"deadline": {"$lt": cutoff}, "status": JobStatus.PENDING}
+            {"queue_deadline": {"$lt": cutoff}, "status": JobStatus.PENDING}
         ).to_list(length=500)
 
     async def recover_stale_jobs(self) -> int:
@@ -572,11 +572,16 @@ class QueueRepository:
     # ─── Fairness / Repost Prevention ────────────────────────────────────────
 
     async def get_recently_posted_content_ids(
-        self, channel_id: str, limit: int = 100
+        self, channel_id: str, hours: int = 168, limit: int = 500
     ) -> list[str]:
-        """Return content_ids of the most recently posted jobs for a channel."""
+        """Return content_ids posted to this channel within the given time window."""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         docs = await self._queue.find(
-            {"source_channel_id": channel_id, "status": JobStatus.COMPLETED},
+            {
+                "source_channel_id": channel_id,
+                "status": JobStatus.COMPLETED,
+                "completed_at": {"$gte": cutoff},
+            },
             {"content_id": 1}
         ).sort("completed_at", -1).limit(limit).to_list(length=limit)
         return [d["content_id"] for d in docs if "content_id" in d]

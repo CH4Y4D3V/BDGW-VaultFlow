@@ -40,7 +40,7 @@ class FairnessSelector:
 
         recently_posted = await queue_repo.get_recently_posted_content_ids(
             source_channel_id,
-            hours=settings.REPOST_PREVENTION_HOURS,
+            settings.REPOST_PREVENTION_HOURS,
         )
 
         eligible = [

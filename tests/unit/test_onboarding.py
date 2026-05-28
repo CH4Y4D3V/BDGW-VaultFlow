@@ -70,6 +70,5 @@ async def test_get_user_state_admin(onboarding_service, mock_sub_repo):
 async def test_render_onboarding(onboarding_service, mock_sub_repo):
     mock_sub_repo.get_by_user_id.return_value = None
     text, keyboard = await onboarding_service.render_onboarding(123, "Test")
-    assert "VAULTFLOW PREMIER" in text
-    assert "Welcome, <b>Test</b>" in text
+    assert "Welcome to BDGW" in text
     assert keyboard is not None

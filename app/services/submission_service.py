@@ -160,6 +160,10 @@ def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
     return entry
 
 
+def _get_pipeline() -> MediaIngestionPipeline:
+    return _pipeline
+
+
 async def ingest_approved(msg_id: int) -> Optional[int]:
     """
     Legacy path kept for any direct callers.
