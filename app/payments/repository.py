@@ -39,7 +39,7 @@ class PaymentRepository:
                 "user_id": user_id,
                 "status": {"$in": [
                     PaymentStatus.WAITING_PAYMENT_DETAILS.value,
-                    PaymentStatus.WAITING_TXID.value,
+                    PaymentStatus.AWAITING_PAYMENT.value,
                     PaymentStatus.WAITING_SCREENSHOT.value,
                     PaymentStatus.SUBMITTED.value,
                     PaymentStatus.UNDER_REVIEW.value,

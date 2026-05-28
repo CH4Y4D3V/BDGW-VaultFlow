@@ -13,7 +13,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# â”€â”€ Topic types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Topic types ───────────────────────────────────────────────────────────────
 
 TOPIC_CONTENT = "content"
 TOPIC_SUPPORT = "support"
@@ -41,7 +41,7 @@ class TopicService:
     Manages per-user Telegram Forum Topics in the Verification Hub.
 
     Topic model:
-      - One topic per (user_id, topic_type) pair â€” reused across sessions
+      - One topic per (user_id, topic_type) pair — reused across sessions
       - Shared "Rejected Content" topic for all rejections (prevents topic explosion)
       - Topics are created lazily on first use
 
@@ -57,7 +57,7 @@ class TopicService:
         self._rejected_topic_id: Optional[int] = None
         self._lock = asyncio.Lock()
 
-    # â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Public API ────────────────────────────────────────────────────────────
 
     async def get_or_create_user_topic(
         self,
@@ -91,7 +91,7 @@ class TopicService:
     async def get_or_create_rejected_topic(self, client: Client) -> int:
         """
         Return the single shared 'Rejected Content' topic ID.
-        All rejections go here â€” never create per-user topics for rejections.
+        All rejections go here — never create per-user topics for rejections.
 
         WARNING fix (TOCTOU race): the previous implementation used a plain
         upsert after creating the Telegram topic, which had a race window where
@@ -120,11 +120,11 @@ class TopicService:
                 return self._rejected_topic_id
 
             # Create the Telegram forum topic first (outside DB transaction scope)
-            new_topic_id = await self._create_named_topic(client, "âŒ Rejected Content")
+            new_topic_id = await self._create_named_topic(client, "❌ Rejected Content")
 
             # WARNING fix: atomic findOneAndUpdate with $setOnInsert.
             # return_document=False returns the PRE-UPDATE document.
-            # If pre-update doc is not None â†’ the key already existed (race lost),
+            # If pre-update doc is not None → the key already existed (race lost),
             # so use the existing value and delete our newly created duplicate.
             existing_doc = await db["bot_config"].find_one_and_update(
                 {"key": "rejected_topic_id"},
@@ -138,7 +138,7 @@ class TopicService:
                 # Use the existing one and clean up the duplicate we just created.
                 existing_topic_id = int(existing_doc["value"])
                 logger.warning(
-                    "get_or_create_rejected_topic: race lost â€” existing topic found, "
+                    "get_or_create_rejected_topic: race lost — existing topic found, "
                     "deleting duplicate Telegram topic",
                     extra={
                         "ctx_existing_topic_id": existing_topic_id,
@@ -158,7 +158,7 @@ class TopicService:
                 self._rejected_topic_id = existing_topic_id
                 return existing_topic_id
 
-            # We won the race â€” new_topic_id is now the canonical value in DB
+            # We won the race — new_topic_id is now the canonical value in DB
             self._rejected_topic_id = new_topic_id
             logger.info(
                 "Rejected content topic created",
@@ -205,11 +205,11 @@ class TopicService:
             return new_topic_id
 
     async def get_user_topic_id(self, user_id: int, topic_type: str) -> Optional[int]:
-        """Read-only check â€” does NOT create the topic if missing."""
+        """Read-only check — does NOT create the topic if missing."""
         doc = await self._fetch_topic(user_id, topic_type)
         return doc["topic_id"] if doc else None
 
-    # â”€â”€ Internal â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Internal ──────────────────────────────────────────────────────────────
 
     async def _fetch_topic(self, user_id: int, topic_type: str) -> Optional[dict]:
         db = DatabaseManager.get_db()
@@ -234,7 +234,7 @@ class TopicService:
         )
 
     async def _create_topic(self, client: Client, user_id: int, topic_type: str) -> int:
-        icon = _TOPIC_ICONS.get(topic_type, "ðŸ’¬")
+        icon = _TOPIC_ICONS.get(topic_type, "💬")
         title = f"{icon} User {user_id}"
         return await self._create_named_topic(client, title)
 
@@ -294,7 +294,8 @@ class TopicService:
                     exc_info=True
                 )
                 if attempt == len(delays) - 1:
-                    raise
+                    # Final attempt — try fallback
+                    break
                 await asyncio.sleep(delay)
 
             except Exception as e:
@@ -304,7 +305,22 @@ class TopicService:
                     exc_info=True,
                 )
                 if attempt == len(delays) - 1:
-                    raise
+                    # Final attempt — try fallback
+                    break
                 await asyncio.sleep(delay)
         
-        raise RuntimeError(f"Failed to create topic after {len(delays)} attempts: {title}")
+        # Fallback to high-level API
+        try:
+            logger.info("Attempting high-level API fallback for topic creation", extra={"ctx_title": title})
+            result = await client.create_forum_topic(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                title=title
+            )
+            return result.id
+        except Exception as e:
+            logger.error(
+                "forum_topic_creation_fallback_failed",
+                extra={"ctx_title": title, "ctx_error": str(e)},
+                exc_info=True
+            )
+            raise

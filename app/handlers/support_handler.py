@@ -78,6 +78,9 @@ async def _safe_reply(
 
 @Client.on_callback_query(filters.regex(r"^menu:support$"))
 async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
+    if not callback.message or not callback.message.chat:
+        return
+
     user_id = callback.from_user.id if callback.from_user else 0
 
     # ── Anti-Spam / Debounce ──
@@ -118,6 +121,12 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
                 "forum_topic_creation_failed",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
+            # Notify user of failure
+            await callback.message.edit_text(
+                "Support is temporarily unavailable. Please try again in a few minutes.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
 
         logger.info(
             "Support ticket flow initiated",
