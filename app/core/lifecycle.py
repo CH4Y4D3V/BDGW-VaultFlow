@@ -171,10 +171,14 @@ class AppLifecycle:
             init_membership_handler(ref_service)
 
         except Exception as e:
-            # FIX (referral): non-fatal — log at exception level, never sys.exit()
-            logger.exception(
+            # FIX (referral): non-fatal — log at warning level with full detail
+            logger.warning(
                 "referral_system_initialization_failed",
-                extra={"ctx_error": str(e)},
+                extra={
+                    "ctx_error": str(e),
+                    "ctx_error_type": type(e).__name__,
+                },
+                exc_info=True
             )
 
         self._running = True
@@ -217,7 +221,13 @@ class AppLifecycle:
                     logger.critical(f"CRITICAL FAILURE: {log_msg}")
                     critical_failure = True
                 else:
-                    logger.warning(f"WARNING: {log_msg}")
+                    if name == "PREMIUM_CHANNEL_ID":
+                        logger.warning(
+                            "PREMIUM_CHANNEL_ID is unreachable — invite link generation will fail until this is resolved.",
+                            extra={"ctx_error": str(e)}
+                        )
+                    else:
+                        logger.warning(f"WARNING: {log_msg}")
 
         if critical_failure:
             logger.critical(

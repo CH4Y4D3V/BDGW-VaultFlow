@@ -89,6 +89,8 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     # FIX 12: was `await redis.set(...)` — redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
 
+    await callback.answer()
+
     logger.info(
         "HANDLER: handle_support_menu entered",
         extra={
@@ -205,96 +207,12 @@ async def handle_private_message_support(client: Client, message: Message) -> No
         )
 
 
-# ── RC-6 FIX: Verification hub — admin replies in support topics ───────────────
+# RC-6 FIX: Verification hub — admin replies in support topics
 #
-# BEFORE (buggy):
-#   This handler called support_service.handle_admin_reply() which internally
-#   calls _copy_message_safe() to deliver the message to the user.
-#   topic_router.py::route_admin_reply_to_user ALSO delivers the message to
-#   the user for ALL topic types (including support).
-#   Result: user received every admin support reply TWICE.
-#
-# FIX:
-#   This handler now ONLY persists the admin reply to the support_messages
-#   collection for audit/history purposes. It does NOT deliver to the user.
-#   Delivery is handled exclusively by topic_router.py::route_admin_reply_to_user.
-
-@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
-async def handle_hub_support_message_persist(
-    client: Client, message: Message
-) -> None:
-    """
-    Persist admin replies in support topics to the support_messages collection.
-
-    RC-6 fix: DOES NOT route the message to the user. That is done by
-    topic_router.py::route_admin_reply_to_user which fires for all topic types.
-    This handler's sole responsibility is the DB persistence audit record.
-    """
-    try:
-        thread_id = (
-            getattr(message, "message_thread_id", None)
-            or getattr(message, "reply_to_top_message_id", None)
-        )
-        if not thread_id:
-            return
-
-        if not message.from_user or message.from_user.is_bot:
-            return
-
-        # Only skip the bot's own moderation cards
-        if message.reply_markup:
-            try:
-                for row in message.reply_markup.inline_keyboard:
-                    for btn in row:
-                        if getattr(btn, "callback_data", "").startswith("mod_"):
-                            return
-            except Exception as e:
-                logger.exception(
-                    "support_reply_markup_scan_failed",
-                    extra={"ctx_error": str(e)},
-                )
-                pass
-
-        topic_service = get_topic_service()
-        topic_doc = await topic_service.get_user_by_topic(thread_id)
-
-        # Only persist for support topics — other topic types don't use this store
-        if not topic_doc or topic_doc.get("topic_type") != TOPIC_SUPPORT:
-            return
-
-        user_id: int = topic_doc["user_id"]
-
-        # RC-6 fix: DB persistence only — NO copy_message / routing here
-        try:
-            await _get_support_repo().save_message({
-                "user_id": user_id,
-                "topic_id": thread_id,
-                "user_message_id": None,
-                "hub_message_id": message.id,
-                "direction": "admin_to_user",
-                "created_at": datetime.now(timezone.utc),
-            })
-            logger.debug(
-                "handle_hub_support_message_persist: saved admin reply record",
-                extra={
-                    "ctx_user_id": user_id,
-                    "ctx_topic_id": thread_id,
-                    "ctx_msg_id": message.id,
-                    "ctx_admin": message.from_user.id,
-                },
-            )
-        except Exception as e:
-            logger.warning(
-                "handle_hub_support_message_persist: DB save failed (non-fatal)",
-                extra={"ctx_error": str(e)},
-            )
-
-    except Exception as e:
-        logger.error(
-            "HANDLER: handle_hub_support_message_persist unhandled exception",
-            extra={"ctx_error": str(e)},
-            exc_info=True,
-        )
+# This handler previously persisted admin replies to the support_messages
+# collection. However, topic_router.py now handles both routing and persistence
+# for all topic types to ensure exactly-once delivery and consistent audit logs.
+# This handler is removed to centralize routing logic.
 
 
 # ── Admin command: /close_ticket ──────────────────────────────────────────────

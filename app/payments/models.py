@@ -24,7 +24,7 @@ class PaymentSession:
     id: str
     user_id: int
     plan_id: str
-    locked_amount: int
+    locked_amount: float
     currency: str = "BDT"
     status: PaymentStatus = PaymentStatus.WAITING_PAYMENT_DETAILS
     payment_method: Optional[str] = None

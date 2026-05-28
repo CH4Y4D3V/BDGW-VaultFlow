@@ -3,6 +3,9 @@ from pyrogram import Client, filters
 from pyrogram.types import ChatMemberUpdated
 from pyrogram.enums import ChatMemberStatus
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # This handler will be initialized by AppLifecycle
 referral_service = None
@@ -13,6 +16,13 @@ def init_membership_handler(service):
 
 @Client.on_chat_member_updated(filters.chat(settings.VAULT_CHANNEL_ID))
 async def on_channel_member_update(client: Client, update: ChatMemberUpdated):
+    logger.info(
+        "HANDLER: on_channel_member_update entered",
+        extra={
+            "ctx_chat_id": update.chat.id if update.chat else None,
+            "ctx_user_id": update.from_user.id if update.from_user else None,
+        },
+    )
     if referral_service is None:
         return
 

@@ -340,6 +340,8 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
         await callback_query.answer("Slow down! Processing...", show_alert=False)
         return
 
+    await callback_query.answer()
+
     text = ""
     keyboard = None
 

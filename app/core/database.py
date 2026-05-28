@@ -199,22 +199,37 @@ class DatabaseManager:
             )
 
         # â”€â”€ Referral System Indexes (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Referral System Indexes (Non-FATAL) ──────────────────────────────
         try:
             from app.referral.repository import ReferralRepository
             ref_repo = ReferralRepository(cls._db)
-            await ref_repo.create_indexes()
+            try:
+                await ref_repo.create_indexes()
+            except Exception as e:
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={"ctx_collection": "referral", "ctx_error": str(e)},
+                    exc_info=True
+                )
+
             from app.payments.repository import PaymentRepository
             payment_repo = PaymentRepository(cls._db)
-            await payment_repo.create_indexes()
+            try:
+                await payment_repo.create_indexes()
+            except Exception as e:
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={"ctx_collection": "payments", "ctx_error": str(e)},
+                    exc_info=True
+                )
             logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
             logger.exception(
                 "non_core_index_setup_failed",
                 extra={"ctx_error": str(e)},
             )
-            
-        cls._initialized = True
 
+        cls._initialized = True
     @classmethod
     def transactions_supported(cls) -> bool:
         return cls._transactions_supported

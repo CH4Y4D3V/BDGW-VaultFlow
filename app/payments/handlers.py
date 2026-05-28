@@ -24,6 +24,7 @@ logger = get_logger(__name__)
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
     """Shows premium plan selection."""
+    await callback.answer()
     text = (
         "Premium gives you access to exclusive BDGW content channels.\n\n"
         "Select a plan:"
@@ -57,6 +58,8 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
     plan_id = callback.matches[0].group("plan_id")
     user_id = callback.from_user.id
     
+    await callback.answer()
+
     service = get_payment_service()
     
     # Check for existing active session
@@ -225,13 +228,22 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
 
 # ── Admin Handlers ────────────────────────────────────────────────────────────
 
-async def _notify_admins_of_submission(client: Client, session, txid: str, file_id: str) -> None:
+async def _notify_admins_of_submission(client: Client, session: PaymentSession, txid: str, file_id: str) -> None:
+    from app.services.topic_service import get_topic_service
+    topic_service = get_topic_service()
+    
+    try:
+        topic_id = await topic_service.get_or_create_payments_topic(client)
+    except Exception as e:
+        logger.error("Failed to get payments topic, falling back to general group", extra={"ctx_error": str(e)})
+        topic_id = None
+
     text = (
-        "💰 <b>Payment Proof Received</b>\n\n"
+        "💎 <b>Payment Proof Received</b>\n\n"
         f"👤 User: <code>{session.user_id}</code>\n"
         f"📦 Plan: {PLANS[session.plan_id]['label']}\n"
-        f"💰 ৳{session.locked_amount}\n"
-        f"📱 {session.payment_method}\n"
+        f"💰 <b>৳{session.locked_amount:.2f}</b>\n"
+        f"📱 Method: {session.payment_method}\n"
         f"🔑 TXID: <code>{txid}</code>\n"
         f"🆔 Session: <code>{session.id}</code>"
     )
@@ -248,7 +260,8 @@ async def _notify_admins_of_submission(client: Client, session, txid: str, file_
         photo=file_id,
         caption=text,
         reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
+        message_thread_id=topic_id
     )
 
 

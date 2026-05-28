@@ -58,6 +58,13 @@ async def _safe_reply(message: Message, text: str) -> None:
 
 @Client.on_message(filters.command("report"))
 async def handle_report(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_report entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     if not message.from_user:
         return
 
@@ -104,6 +111,13 @@ async def handle_report(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("dmca"))
 async def handle_dmca(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_dmca entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     if not message.from_user:
         return
 
@@ -150,6 +164,13 @@ async def handle_dmca(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("content_claim"))
 async def handle_content_claim(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_content_claim entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     if not message.from_user:
         return
 
@@ -200,6 +221,13 @@ async def handle_content_claim(client: Client, message: Message) -> None:
 @Client.on_message(filters.command("execute_takedown"))
 @permission_required(Role.MODERATOR)
 async def handle_execute_takedown(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_execute_takedown entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     if not message.from_user:
         return
 
@@ -250,6 +278,13 @@ async def handle_execute_takedown(client: Client, message: Message) -> None:
 @Client.on_message(filters.command("dismiss_report"))
 @permission_required(Role.MODERATOR)
 async def handle_dismiss_report(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_dismiss_report entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     if not message.from_user:
         return
 
@@ -293,6 +328,13 @@ async def handle_dismiss_report(client: Client, message: Message) -> None:
 @Client.on_message(filters.command("pending_reports"))
 @permission_required(Role.MODERATOR)
 async def handle_pending_reports(client: Client, message: Message) -> None:
+    logger.info(
+        "HANDLER: handle_pending_reports entered",
+        extra={
+            "ctx_from_user": message.from_user.id if message.from_user else None,
+            "ctx_chat_id": message.chat.id if message.chat else None,
+        },
+    )
     try:
         reports = await _get_takedown_service().get_pending_reports()
     except Exception as e:

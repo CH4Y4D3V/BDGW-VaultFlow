@@ -107,6 +107,15 @@ async def _send_welcome(client: Client, update: ChatMemberUpdated) -> None:
 
 @Client.on_chat_member_updated()
 async def handle_new_member_welcome(client: Client, update: ChatMemberUpdated) -> None:
+    logger.info(
+        "HANDLER: handle_new_member_welcome entered",
+        extra={
+            "ctx_chat_id": update.chat.id if update.chat else None,
+            "ctx_user_id": (
+                update.new_chat_member.user.id if update.new_chat_member else None
+            ),
+        },
+    )
     if not update.new_chat_member or not update.old_chat_member:
         return
 

@@ -175,6 +175,15 @@ class WatermarkWorker:
         group_id = jobs[0].get("media_group_id") or str(jobs[0]["_id"])
         corr_token = set_correlation_id(f"wm_grp_{group_id}")
 
+        logger.info(
+            "Watermark group processing started",
+            extra={
+                "ctx_group_id": group_id,
+                "ctx_job_count": len(jobs),
+                "ctx_worker": self._worker_id,
+            },
+        )
+
         temp_files: list[str] = []   # paths to cleanup
         new_refs: list[dict] = []    # {"album_sequence_index": int, "vault_message_id": int}
 

@@ -68,7 +68,12 @@ class PaymentService:
         wallet = await self.referral_repo.get_wallet(user_id)
         points = wallet.get("points_balance", 0) if wallet else 0
         
-        locked_amount = max(0, base_price - points)
+        base_payable = max(0, base_price - points)
+
+        # Unique identifying offset: ৳0.01 to ৳0.50
+        import random
+        offset = round(random.uniform(0.01, 0.50), 2)
+        locked_amount = float(base_payable) + offset
 
         session = PaymentSession(
             id=str(uuid.uuid4()),

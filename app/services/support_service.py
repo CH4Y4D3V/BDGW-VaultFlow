@@ -126,65 +126,6 @@ class SupportService:
             },
         )
 
-    async def handle_admin_reply(self, client: Client, message) -> None:
-        """
-        Called when an admin sends a message in a support topic.
-        Routes the reply back to the user's DM.
-        """
-        thread_id = (
-            getattr(message, "message_thread_id", None)
-            or getattr(message, "reply_to_top_message_id", None)
-        )
-        if not thread_id:
-            return
-
-        topic_service = get_topic_service()
-        topic_doc = await topic_service.get_user_by_topic(thread_id)
-        if not topic_doc:
-            return
-
-        if topic_doc.get("topic_type") != TOPIC_SUPPORT:
-            return
-
-        user_id: int = topic_doc["user_id"]
-
-        hub_message_id = await _copy_message_safe(
-            client,
-            to_chat=user_id,
-            from_chat=message.chat.id,
-            message_id=message.id,
-        )
-
-        await _support_repo.save_message({
-            "user_id": user_id,
-            "topic_id": thread_id,
-            "user_message_id": hub_message_id,
-            "hub_message_id": message.id,
-            "direction": "admin_to_user",
-            "created_at": datetime.now(timezone.utc),
-        })
-
-        if hub_message_id is None:
-            # Notify admin in-topic that user is unreachable
-            try:
-                await client.send_message(
-                    chat_id=message.chat.id,
-                    text=f"⚠️ Could not deliver reply to user <code>{user_id}</code>. They may have blocked the bot.",
-                    parse_mode=ParseMode.HTML,
-                    reply_to_message_id=message.id,
-                )
-            except Exception:
-                pass
-
-        logger.info(
-            "Admin reply routed to user",
-            extra={
-                "ctx_user_id": user_id,
-                "ctx_topic_id": thread_id,
-                "ctx_admin": message.from_user.id if message.from_user else "unknown",
-            },
-        )
-
 
 # Module-level singleton
 _support_service: Optional[SupportService] = None

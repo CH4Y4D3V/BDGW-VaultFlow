@@ -20,12 +20,12 @@ TOPIC_SUPPORT = "support"
 TOPIC_PAYMENT = "payment"
 
 _TOPIC_ICONS = {
-    TOPIC_CONTENT: "ðŸ“¤",
-    TOPIC_SUPPORT: "ðŸ†˜",
-    TOPIC_PAYMENT: "ðŸ’Ž",
+    TOPIC_CONTENT: "📤",
+    TOPIC_SUPPORT: "🆘",
+    TOPIC_PAYMENT: "💎",
 }
 
-# Singleton â€” shared across all callers in-process
+# Singleton — shared across all callers in-process
 _instance: Optional["TopicService"] = None
 
 
@@ -166,6 +166,44 @@ class TopicService:
             )
             return new_topic_id
 
+    async def get_or_create_payments_topic(self, client: Client) -> int:
+        """
+        Return the single shared 'Payments' topic ID.
+        """
+        db = DatabaseManager.get_db()
+        doc = await db["bot_config"].find_one({"key": "payments_topic_id"})
+        if doc:
+            return int(doc["value"])
+
+        async with self._lock:
+            # Re-check inside lock
+            doc = await db["bot_config"].find_one({"key": "payments_topic_id"})
+            if doc:
+                return int(doc["value"])
+
+            new_topic_id = await self._create_named_topic(client, "💎 Payments")
+
+            existing_doc = await db["bot_config"].find_one_and_update(
+                {"key": "payments_topic_id"},
+                {"$setOnInsert": {"key": "payments_topic_id", "value": str(new_topic_id)}},
+                upsert=True,
+                return_document=False,
+            )
+
+            if existing_doc is not None:
+                existing_topic_id = int(existing_doc["value"])
+                try:
+                    await client.delete_forum_topic(
+                        chat_id=settings.VERIFICATION_GROUP_ID,
+                        message_thread_id=new_topic_id,
+                    )
+                except Exception:
+                    pass
+                return existing_topic_id
+
+            logger.info("Payments topic created", extra={"ctx_topic_id": new_topic_id})
+            return new_topic_id
+
     async def get_user_topic_id(self, user_id: int, topic_type: str) -> Optional[int]:
         """Read-only check â€” does NOT create the topic if missing."""
         doc = await self._fetch_topic(user_id, topic_type)
@@ -203,8 +241,10 @@ class TopicService:
     async def _create_named_topic(self, client: Client, title: str) -> int:
         import random
         from pyrogram import raw
+        from pyrogram.errors import RPCError, Forbidden
 
-        for attempt in range(3):
+        delays = [2, 4, 8]
+        for attempt, delay in enumerate(delays):
             try:
                 peer = await client.resolve_peer(settings.VERIFICATION_GROUP_ID)
                 result = await client.invoke(
@@ -227,15 +267,44 @@ class TopicService:
                     extra={"ctx_title": title, "ctx_topic_id": topic_id},
                 )
                 return topic_id
+
             except FloodWait as e:
-                await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                wait_time = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
+                logger.warning(
+                    "forum_topic_creation_floodwait",
+                    extra={"ctx_title": title, "ctx_wait": wait_time, "ctx_attempt": attempt + 1}
+                )
+                await asyncio.sleep(wait_time)
+
+            except Forbidden as e:
+                logger.error(
+                    "forum_topic_creation_forbidden",
+                    extra={
+                        "ctx_title": title,
+                        "ctx_error": str(e),
+                        "ctx_note": "Bot may lack 'manage_topics' permission or forum topics are disabled in group."
+                    }
+                )
+                raise
+
+            except RPCError as e:
+                logger.error(
+                    "forum_topic_creation_rpc_error",
+                    extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                    exc_info=True
+                )
+                if attempt == len(delays) - 1:
+                    raise
+                await asyncio.sleep(delay)
+
             except Exception as e:
                 logger.error(
-                    "forum_topic_creation_failed",
+                    "forum_topic_creation_unexpected_error",
                     extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
                     exc_info=True,
                 )
-                if attempt == 2:
+                if attempt == len(delays) - 1:
                     raise
-                await asyncio.sleep(2 ** attempt)
-        raise RuntimeError(f"Failed to create topic: {title}")
+                await asyncio.sleep(delay)
+        
+        raise RuntimeError(f"Failed to create topic after {len(delays)} attempts: {title}")

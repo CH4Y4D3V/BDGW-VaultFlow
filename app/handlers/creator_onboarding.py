@@ -259,6 +259,8 @@ async def handle_consent_agree(client: Client, callback: CallbackQuery) -> None:
         user_id = clicker_id
         username = callback.from_user.username
 
+        await callback.answer()
+
         # Double-click protection
         try:
             already = await _get_consent_service().is_verified_creator(user_id)

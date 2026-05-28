@@ -24,6 +24,24 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Idempotency Cache ──
+# Prevents duplicate UPDATE_TRACE logs if the plugin is loaded multiple times
+# or if multiple handlers catch the same update.
+_trace_cache: set[str] = set()
+_MAX_CACHE_SIZE = 100
+
+def _is_duplicate(update_id: str) -> bool:
+    if update_id in _trace_cache:
+        return True
+    _trace_cache.add(update_id)
+    if len(_trace_cache) > _MAX_CACHE_SIZE:
+        # Simple FIFO-ish cleanup
+        try:
+            _trace_cache.remove(next(iter(_trace_cache)))
+        except (StopIteration, KeyError):
+            pass
+    return False
+
 
 @Client.on_message(group=-1)
 async def trace_message_update(client: Client, message: Message) -> None:
@@ -31,6 +49,10 @@ async def trace_message_update(client: Client, message: Message) -> None:
     Fires for EVERY incoming Message update before any other handler.
     RC-1 fix: global trace so we always know the bot received the update.
     """
+    update_key = f"msg:{message.id}:{message.chat.id if message.chat else 0}"
+    if _is_duplicate(update_key):
+        return
+
     try:
         chat_id = message.chat.id if message.chat else None
         chat_type = str(message.chat.type) if message.chat else None
@@ -68,6 +90,10 @@ async def trace_callback_update(client: Client, callback: CallbackQuery) -> None
     Fires for EVERY incoming CallbackQuery before any other handler.
     RC-1 fix: confirms callback delivery even when the actual handler crashes.
     """
+    update_key = f"cb:{callback.id}"
+    if _is_duplicate(update_key):
+        return
+
     try:
         logger.info(
             "UPDATE_TRACE: callback_query",
@@ -96,6 +122,11 @@ async def trace_member_update(client: Client, update: ChatMemberUpdated) -> None
     """
     Fires for EVERY ChatMemberUpdated event before other handlers.
     """
+    user_id = update.new_chat_member.user.id if update.new_chat_member else 0
+    update_key = f"member:{update.chat.id}:{user_id}:{update.date}"
+    if _is_duplicate(update_key):
+        return
+
     try:
         logger.info(
             "UPDATE_TRACE: chat_member_updated",

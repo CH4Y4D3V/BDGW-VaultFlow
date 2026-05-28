@@ -257,6 +257,8 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     # FIX 11: was `await redis.set(...)` — redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
 
+    await callback.answer()
+
     logger.info(
         "HANDLER: handle_submit_menu entered",
         extra={
@@ -266,8 +268,6 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
     )
 
     try:
-        await callback.answer()
-
         if action == "anonymous":
             text = (
                 "🕵️ <b>Anonymous Submission</b>\n\n"

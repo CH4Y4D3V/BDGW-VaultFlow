@@ -239,6 +239,8 @@ async def handle_admin_menu_callbacks(client: Client, callback_query: CallbackQu
         await callback_query.answer("⛔ Unauthorised.", show_alert=True)
         return
 
+    await callback_query.answer()
+
     try:
         if action == "dashboard":
             # Repurpose /status logic for dashboard

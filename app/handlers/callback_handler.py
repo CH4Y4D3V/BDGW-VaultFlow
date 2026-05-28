@@ -173,7 +173,18 @@ async def handle_moderation_callback(
     )
 
     try:
+        # ── Gate 0: Early Answer ──
+        # Prevent Telegram timeout on heavy moderation logic
+        try:
+            await callback.answer()
+        except Exception as e:
+            logger.warning("handle_moderation_callback: early answer failed", extra={"ctx_error": str(e)})
+
         # ── Gate 1: correct chat ─────────────────────────────────────────────
+        if not callback.message or not callback.message.chat:
+            logger.warning("Moderation callback missing message or chat context")
+            return
+
         if callback.message.chat.id != settings.VERIFICATION_GROUP_ID:
             await callback.answer(
                 "This action is not available here.", show_alert=True
