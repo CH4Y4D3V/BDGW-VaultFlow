@@ -1,3 +1,4 @@
+Set-Content -Path "prompt.txt" -Value @'
 You have completed an 8-phase implementation. Now perform a FULL pre-deploy audit.
 Do not skip any step. Do not report done until every check passes.
 
@@ -183,3 +184,4 @@ If all 11 checks pass: output exactly "SAFE TO DEPLOY"
 If any check fails: list every failure and fix before outputting anything.
 
 Do NOT output "SAFE TO DEPLOY" until all 11 checks pass.
+'@ -Encoding UTF8

@@ -136,6 +136,12 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
         PaymentStatus.WAITING_TXID,
         payment_method=method
     )
+    timeout_started = await service.start_timeout(session_id)
+    if not timeout_started:
+        logger.warning(
+            "Payment timeout was not started after details delivery",
+            extra={"ctx_payment_id": session_id, "ctx_user_id": session.user_id},
+        )
     
     await callback.answer()
 

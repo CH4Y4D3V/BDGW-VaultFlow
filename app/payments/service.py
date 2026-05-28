@@ -46,7 +46,6 @@ class PaymentService:
             user_id=user_id,
             plan_id=plan_id,
             locked_amount=locked_amount,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=SESSION_TIMEOUT_MINUTES)
         )
 
         await self.repository.save_session(session)
@@ -78,6 +77,25 @@ class PaymentService:
 
         await self.repository.save_session(session)
         await self.repository.log_event(payment_id, f"status_changed_{status.value}", kwargs)
+        return True
+
+    async def start_timeout(self, payment_id: str) -> bool:
+        """Start the payment timeout after payment instructions are delivered."""
+        session = await self.repository.get_session(payment_id)
+        if not session:
+            return False
+
+        session.expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=SESSION_TIMEOUT_MINUTES
+        )
+        session.updated_at = datetime.now(timezone.utc)
+
+        await self.repository.save_session(session)
+        await self.repository.log_event(
+            payment_id,
+            "timeout_started",
+            {"expires_at": session.expires_at},
+        )
         return True
 
     async def approve_payment(self, client: Client, payment_id: str, admin_id: int) -> bool:
