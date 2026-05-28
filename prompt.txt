@@ -1,341 +1,173 @@
-You are a senior Telegram bot architect working on BDGW VaultFlow.
-This is a PRIVATE COMMUNITY BOT — not a public product or SaaS platform.
 
-## CURRENT STATUS — WHAT IS WORKING (DO NOT TOUCH)
-- MongoDB connection and migration: WORKING
-- Pyrogram client startup: WORKING
-- Handler registration (13 modules): WORKING
-- Distribution engine: WORKING
-- Worker pools: WORKING
-- Health server: WORKING
-- Update routing: WORKING (UPDATE_TRACE logs confirmed)
+# BDGW VAULTFLOW — PRODUCTION DEPLOY FIX
+# MASTER PROMPT — READ EVERY WORD BEFORE WRITING A SINGLE LINE
 
-## ACTIVE BUGS TO FIX FIRST (before any UX work)
-
-### BUG 1 — CallbackQuery has no attribute 'chat'
-Log evidence:
-  [err] 'CallbackQuery' object has no attribute 'chat'
-
-Find every location where callback handlers access message.chat or query.chat directly.
-CallbackQuery uses query.message.chat — not query.chat.
-
-Run:
-  Select-String -Path "app\handlers\*.py" -Pattern "\.chat" | Format-Table Path, LineNumber, Line -AutoSize
-
-Fix every instance where a CallbackQuery handler incorrectly accesses .chat instead of .message.chat.
-
-### BUG 2 — Failed to create forum topic
-Log evidence:
-  [err] Failed to create forum topic (repeated 3 times)
-  [wrn] handle_support_menu: pre-create topic failed — will retry on first message
-
-Read app\handlers\support_handler.py in full.
-Identify why forum topic creation fails.
-Check:
-  - Is VERIFICATION_GROUP_ID a supergroup with topics enabled?
-  - Is the bot an admin in that group?
-  - Is create_forum_topic being called with correct parameters?
-  - Is there a FloodWait being swallowed?
-
-Fix the exception handling to log the actual Telegram error instead of "Failed to create forum topic".
-Change bare except to:
-  except Exception as e:
-      logger.exception("forum_topic_creation_failed", extra={"ctx_error": str(e)})
-
-### BUG 3 — Error in menu callback
-Log evidence:
-  [err] Error in menu callback
-
-Read app\handlers\callback_handler.py in full.
-Find the menu callback handler.
-Add logger.exception() to expose the real error.
-Do not fix blindly — expose the error first, report what it is.
-
-### BUG 4 — Failed to initialize Referral System
-Log evidence:
-  [err] Failed to initialize Referral System
-
-Read app\referral\ directory in full.
-Find where ReferralSystem initializes.
-Expose the real exception with logger.exception().
-Check if required MongoDB collections or indexes are missing.
+You are a senior Python backend engineer doing a surgical production fix on BDGW VaultFlow.
+This bot is LIVE. Users are testing it RIGHT NOW. You have one job: fix the four confirmed
+crashes listed below and nothing else. Do not refactor. Do not improve. Do not touch anything
+that is not directly causing a crash. Every file you touch must be output in full, complete,
+copy-paste ready form with no truncation and no placeholder comments.
 
 ---
 
-## PHASE 1 — UX REDESIGN (after bugs are fixed)
+## ABSOLUTE RULES — VIOLATING ANY OF THESE ENDS THE TASK
 
-### IDENTITY DIRECTION
-This bot is: private, internal, community-only, minimal, operational.
-This bot is NOT: a SaaS product, a storefront, a public service.
+1. NEVER use logger.info("msg", key=value) — stdlib Logger crashes on bare kwargs.
+   ONLY valid: logger.info("msg") or logger.info("msg", extra={"key": value})
 
-### WELCOME MESSAGE REDESIGN
-File: app\handlers\user_handler.py (handle_start function)
-File: app\handlers\welcome_handler.py
+2. NEVER output a file with "..." truncation. Every file must be 100% complete.
 
-Current problem: over-engineered, marketing language, feature showcase.
+3. NEVER touch files not listed in SCOPE below.
 
-New welcome message must be:
-- Under 5 lines of text
-- No emojis except functional ones
-- No "premier automation ecosystem" language
-- No feature lists
-- Community-native tone
+4. NEVER move business logic. NEVER change architecture. NEVER refactor.
 
-Target tone — write EXACTLY this style:
+5. READ the PaymentStatus definition before touching any file that uses it.
+   Do not assume attribute names. Read first. Fix second.
 
-  Welcome to BDGW.
+6. READ app/payments/handlers.py before fixing app/handlers/payment_handler.py.
+   The import must match the actual exported function name exactly.
 
-  Send content, stay anonymous, access premium — all in one place.
+7. If you cannot determine the correct fix from the files provided, say:
+   "I need the content of <filepath> to complete this fix."
+   Do not guess. Do not invent attribute names or function names.
 
-  Use the menu below.
+8. Do not add any new dependencies, imports, collections, or services.
 
-That is the ceiling for complexity. Do not exceed it.
+9. Do not add new exception types or custom exception classes.
 
-### MAIN MENU BUTTON LAYOUT REDESIGN
-Current problem: too many buttons, dashboard overload.
-
-New layout — EXACTLY these buttons, in this order:
-
-Row 1: [ 💎 Premium Access ]
-Row 2: [ 📨 Submit Content ]  [ 👤 Anonymous ]
-Row 3: [ 👥 Referral ]  [ 📊 My Status ]
-Row 4: [ 🆘 Support ]
-
-Maximum 5 buttons total. No more.
-No "automation", no "ecosystem", no feature descriptions on buttons.
-
-### COPYWRITING RULES (apply everywhere)
-- Replace "premier automation ecosystem" → remove entirely
-- Replace "unlock amazing features" → remove entirely  
-- Replace "upgrade your experience" → remove entirely
-- Replace any marketing/SaaS language → plain operational language
-- Tone: trusted internal tool, not commercial product
-- If a message is longer than 3 sentences, it is too long
+10. Output format is strict — see OUTPUT FORMAT section below. No deviations.
 
 ---
 
-## PHASE 2 — PREMIUM SYSTEM REDESIGN
+## CONFIRMED CRASHES FROM PRODUCTION LOGS
 
-### ARCHITECTURE REQUIREMENT
-Build premium as a fully isolated module. Do NOT couple with:
-- support_handler.py
-- submission_handler.py  
-- vault workflow
-- distribution engine
+### CRASH 1 — ImportError blocks Pyrogram startup entirely
+File "/app/app/handlers/payment_handler.py", line 10
+ImportError: cannot import name 'handle_payment_inputs' from 'app.payments.handlers'
+Did you mean: 'handle_payment_status'?
+The Pyrogram plugin loader imports every file in app/handlers/ at startup.
+This import error kills the entire bot before a single handler registers.
 
-Create these new files if they don't exist:
-  app\payments\__init__.py
-  app\payments\models.py       — payment session dataclass/states
-  app\payments\repository.py   — all DB operations for payments
-  app\payments\service.py      — business logic
-  app\payments\handlers.py     — Pyrogram handlers
-  app\payments\topics.py       — forum topic management
-  app\payments\timeouts.py     — timeout monitoring
+Fix: Open app/payments/handlers.py. Find the actual exported function names at
+the module level (decorated with @Client.on_callback_query or @Client.on_message).
+Open app/handlers/payment_handler.py. Change the import list to match exactly
+what is exported. Nothing else.
 
-### PAYMENT STATES (implement as string constants)
-  WAITING_PAYMENT_DETAILS = "waiting_payment_details"
-  WAITING_TXID = "waiting_txid"
-  WAITING_SCREENSHOT = "waiting_screenshot"
-  SUBMITTED = "submitted"
-  UNDER_REVIEW = "under_review"
-  APPROVED = "approved"
-  REJECTED = "rejected"
-  EXPIRED = "expired"
-  CANCELLED = "cancelled"
+### CRASH 2 — PaymentStatus attribute error kills payment callbacks
+Unhandled exception: type object 'PaymentStatus' has no attribute 'WAITING_TXID'
+Something references PaymentStatus.WAITING_TXID but that attribute does not exist
+on the enum. It appears in app/payments/repository.py in the get_active_session method.
 
-### PREMIUM PLANS (exact pricing)
-  PLANS = {
-      "1month":  {"label": "1 Month",  "price": 499,  "days": 30},
-      "3months": {"label": "3 Months", "price": 1299, "days": 90},
-      "6months": {"label": "6 Months", "price": 2499, "days": 180},
-  }
-  Currency: BDT (৳)
+Fix: Open app/payments/models.py. Read the PaymentStatus enum definition.
+Find the correct attribute name for the "waiting for TXID" state.
+Open app/payments/repository.py. Find every reference to PaymentStatus.WAITING_TXID.
+Replace with the correct attribute name. Nothing else.
 
-### PAYMENT METHODS
-  - bKash
-  - Nagad  
-  - Crypto
+### CRASH 3 — CallbackQuery.chat AttributeError kills moderation callbacks
+'CallbackQuery' object has no attribute 'chat'
+In Pyrogram, CallbackQuery has no .chat attribute. The correct path is
+callback.message.chat (when the callback originated from an inline keyboard on a message).
 
-### PREMIUM MENU UX
-When user taps 💎 Premium Access:
+Fix: Search app/handlers/ for any handler function that receives a CallbackQuery
+argument and accesses .chat directly on it (i.e. callback.chat or query.chat).
+Change every instance to callback.message.chat or callback.message.chat.id as appropriate.
+Guard with: if not callback.message or not callback.message.chat: return
+Do not touch handlers that already correctly use callback.message.chat.
 
-  Message:
-  "Premium gives you access to exclusive BDGW content channels.
+### CRASH 4 — Forum topic creation crashes support flow
+forum_topic_creation_unexpected_error (repeated 3 times, then forum_topic_creation_failed)
+HANDLER: handle_support_menu entered
+The topic creation is retrying 3 times then failing silently. The user sees no error.
 
-  Select a plan:"
+Fix: Open app/services/topic_service.py. Find _create_named_topic.
+The method calls client.invoke(raw.functions.channels.CreateForumTopic(...)).
+This requires the bot to be admin with manage_topics permission in the group.
+The unexpected_error suggests a non-FloodWait, non-Forbidden exception is being
+raised — likely a Pyrogram version incompatibility with raw API.
 
-  Buttons:
-  [ 1 Month — ৳499 ]
-  [ 3 Months — ৳1299 ]
-  [ 6 Months — ৳2499 ]
-  [ 📊 Check Status ]  [ 🔄 Renew ]
-  [ ← Back ]
+Add a fallback: if raw API fails with any Exception that is not FloodWait or Forbidden,
+catch it, log it with full exc_info=True, then try the high-level API instead:
+  result = await client.create_forum_topic(
+      chat_id=settings.VERIFICATION_GROUP_ID,
+      title=title
+  )
+  return result.id
 
-No marketing language. No "unlock amazing features". Pure operational.
-
-### REFERRAL DISCOUNT LOGIC
-  1 referral point = ৳1 discount
-  
-  Rules:
-  - Check user referral balance before showing final price
-  - If balance > 0: show discounted price option
-  - Snapshot final locked amount at session creation
-  - NEVER recalculate price after session is created
-  - Store locked_amount in payment session document
-
-### CRITICAL TIMEOUT RULE
-Timeout monitoring must ONLY start after:
-  await bot.send_message(user_id, payment_details)  # succeeds
-  ↓
-  session.status = WAITING_TXID  # set in DB
-  ↓
-  timeout timer starts
-
-NEVER start timeout before delivery confirmation.
-
-### DUPLICATE APPROVAL PROTECTION (atomic lock)
-In payments\repository.py implement:
-
-  async def acquire_processing_lock(self, payment_id: str) -> bool:
-      result = await self._collection.find_one_and_update(
-          {
-              "_id": payment_id,
-              "status": "under_review"  # only if still under_review
-          },
-          {"$set": {"status": "processing", "locked_at": datetime.utcnow()}},
-          return_document=True
-      )
-      return result is not None  # False = another admin got there first
-
-Only call approve logic if this returns True.
-
-### REQUIRED MONGODB COLLECTIONS
-  payments           — payment sessions
-  payment_topics     — topic_id → payment_id mapping
-  payment_audit      — immutable event log
-  payment_timeouts   — scheduled expiry tracking
-  subscription_history — completed subscriptions
-
-### ADMIN MODERATION CARD FORMAT
-When payment proof submitted, admin receives:
-
-  💰 Payment Proof Received
-
-  👤 [username or ID]
-  📦 [plan name]
-  💰 ৳[locked_amount]
-  📱 [payment method]
-  🔑 TXID: [txid]
-  🆔 Session: [payment_id]
-
-  Buttons:
-  [ ✅ Approve ]  [ ❌ Reject ]
-
-### REJECTION FLOW
-Rejection buttons:
-  [ Invalid TXID ]
-  [ Wrong Amount ]
-  [ Duplicate TX ]
-  [ Screenshot Unclear ]
-  [ ✏️ Custom Reason ]
-
-On rejection:
-- Persist: rejected_by, rejection_reason, rejected_at
-- Notify user with reason + retry option + support option
-
-### TIMEOUT WARNINGS
-  5 minutes remaining:  send reminder
-  10 minutes remaining: send warning
-  20 minutes:           expire session, clear state, notify user
-
-### APPROVAL SEQUENCE (exact order)
-  1. validate session exists and is under_review
-  2. call acquire_processing_lock() → if False: reply "Already processed"
-  3. activate subscription in DB
-  4. generate invite link: await bot.create_chat_invite_link(channel_id, member_limit=1)
-  5. send invite to user
-  6. persist approval metadata
-  7. schedule expiry lifecycle
-  8. update audit log
+If that also fails, raise the exception so the caller can send the user a fallback message.
+In app/handlers/support_handler.py in handle_support_menu, wrap the topic creation call
+in try/except and if it fails, edit the message to say:
+"Support is temporarily unavailable. Please try again in a few minutes."
+Do not crash. Do not leave the user with a broken state.
 
 ---
 
-## MANDATORY RULES FOR ALL CODE
+## SCOPE — ONLY THESE FILES MAY BE MODIFIED
 
-### Forbidden patterns
-- No bare except: pass
-- No bare except: (with no variable)
-- No sys.exit() inside handlers or services
-- No blocking calls in async functions
-- No module-level infrastructure calls (get_db(), get_redis() at import time)
-- No tight coupling between payment module and other modules
+1. app/handlers/payment_handler.py     — fix CRASH 1 (wrong import name)
+2. app/payments/repository.py          — fix CRASH 2 (WAITING_TXID attribute)
+3. app/handlers/support_handler.py     — fix CRASH 3 (callback.chat) + CRASH 4 (fallback)
+4. app/services/topic_service.py       — fix CRASH 4 (raw API fallback)
 
-### Required patterns
-- All DB calls: async/await with Motor
-- All exceptions: logger.exception() with structured extra={}
-- All state transitions: validated against allowed previous states
-- All admin actions: verify admin permission before executing
-- All callback handlers: use query.message.chat not query.chat
+You may read any file to understand context. You may only write to the four files above.
 
-### Logging format (use everywhere)
-  logger.info("event_name", extra={"ctx_key": value})
-  logger.exception("event_name", extra={"ctx_error": str(e)})
+If CRASH 2 requires a change to app/payments/models.py (e.g. the attribute is genuinely
+missing from the enum), you may add that file to scope and output it as well. State clearly
+that you are adding it and why.
 
-### File size limit
-No single file may exceed 300 lines.
-If a service grows beyond 300 lines: split into sub-modules.
+If CRASH 3 also appears in app/payments/handlers.py or app/handlers/callback_handler.py,
+add those files to scope and output them. State clearly that you are adding them and why.
 
 ---
 
-## EXECUTION ORDER (strict)
+## OUTPUT FORMAT — STRICTLY ENFORCED
 
-Do these in exact order. Do not skip steps.
-Report completion of each phase before starting the next.
-
-PHASE 0 — Read current state:
-  Get-ChildItem -Recurse -Filter "*.py" app\ | Measure-Object | Select-Object Count
-  Get-ChildItem app\handlers\ -Filter "*.py" | Select-Object Name
-  Get-ChildItem app\payments\ -Filter "*.py" -ErrorAction SilentlyContinue | Select-Object Name
-
-PHASE 1 — Fix Bug 1 (CallbackQuery .chat):
-  Find, fix, verify with py_compile
-
-PHASE 2 — Fix Bug 2 (forum topic logging):
-  Expose real error, report what it is
-
-PHASE 3 — Fix Bug 3 (menu callback error):
-  Expose real error, report what it is
-
-PHASE 4 — Fix Bug 4 (referral init):
-  Expose real error, report what it is
-
-PHASE 5 — UX redesign:
-  welcome message + button layout only
-  verify with py_compile
-
-PHASE 6 — Premium module scaffold:
-  Create app\payments\ structure
-  Implement models, repository, service
-  No handlers yet
-
-PHASE 7 — Premium handlers:
-  Implement user-facing flow
-  Implement admin moderation flow
-  Register in Pyrogram plugin system
-
-PHASE 8 — Final verification:
-  python preflight.py
-  Must show: All checks passed — safe to deploy.
+For each file you modify, output this exact structure:
 
 ---
+### FILE: <exact filepath from repo root>
+**Root cause:** <one sentence, specific, no fluff>
+**Lines changed:** <list each change as "line N: old → new — reason">
 
-## OUTPUT FORMAT FOR EACH PHASE
+```python
+<COMPLETE FILE CONTENT — ZERO TRUNCATION — ZERO PLACEHOLDERS>
+```
+---
 
-1. What you read (relevant file sections)
-2. What is broken (one sentence root cause)  
-3. Exact code change (file path + complete function)
-4. Verification command output
-5. Confirm phase complete before next phase
+After all files, output:
 
-Do NOT proceed to next phase if current phase has a failing py_compile.
-Do NOT report done until preflight.py passes all checks.
+---
+### DEPLOY CHECKLIST
+- [ ] CRASH 1 fixed: ImportError resolved, Pyrogram loads all plugins
+- [ ] CRASH 2 fixed: PaymentStatus.WAITING_TXID replaced with correct attribute
+- [ ] CRASH 3 fixed: all callback.chat → callback.message.chat with guard
+- [ ] CRASH 4 fixed: topic creation has raw API fallback + user-facing error on failure
+- [ ] Zero new imports added that are not already in requirements.txt
+- [ ] Zero logger calls with bare kwargs in any modified file
+- [ ] All modified files are 100% complete with no truncation
+---
+
+Do not output any other text. No preamble. No summary after the checklist.
+Start immediately with the first ### FILE: block.
+
+How to use this:
+After pasting the prompt, immediately append the raw content of these files in this order, each prefixed with its path:
+=== app/payments/models.py ===
+<paste full file>
+
+=== app/payments/handlers.py ===
+<paste full file>
+
+=== app/payments/repository.py ===
+<paste full file>
+
+=== app/handlers/payment_handler.py ===
+<paste full file>
+
+=== app/handlers/support_handler.py ===
+<paste full file>
+
+=== app/handlers/callback_handler.py ===
+<paste full file>
+
+=== app/services/topic_service.py ===
+<paste full file>
