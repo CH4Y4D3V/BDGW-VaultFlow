@@ -26,11 +26,22 @@ SESSION_TIMEOUT_MINUTES = 30
 
 ALLOWED_TRANSITIONS = {
     PaymentStatus.WAITING_PAYMENT_DETAILS: {
-        PaymentStatus.WAITING_TXID,
+        PaymentStatus.REQUESTED,
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
     },
-    PaymentStatus.WAITING_TXID: {
+    PaymentStatus.REQUESTED: {
+        PaymentStatus.PENDING_DETAILS,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+    },
+    PaymentStatus.PENDING_DETAILS: {
+        PaymentStatus.AWAITING_PAYMENT,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+        PaymentStatus.REQUESTED,  # Back to requested if admin cancels send?
+    },
+    PaymentStatus.AWAITING_PAYMENT: {
         PaymentStatus.WAITING_SCREENSHOT,
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,

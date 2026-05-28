@@ -8,7 +8,9 @@ from typing import Optional
 
 class PaymentStatus(str, Enum):
     WAITING_PAYMENT_DETAILS = "waiting_payment_details"
-    WAITING_TXID = "waiting_txid"
+    REQUESTED = "requested"
+    PENDING_DETAILS = "pending_details"
+    AWAITING_PAYMENT = "awaiting_payment"
     WAITING_SCREENSHOT = "waiting_screenshot"
     SUBMITTED = "submitted"
     UNDER_REVIEW = "under_review"

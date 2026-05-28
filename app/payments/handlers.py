@@ -151,82 +151,65 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
         await callback.answer("Session expired or invalid.", show_alert=True)
         return
 
-    # In a real bot, we would fetch these from config/DB
-    details = {
-        "bkash": "bKash (Personal): 017XXXXXXXX",
-        "nagad": "Nagad (Personal): 018XXXXXXXX",
-        "crypto": "USDT (TRC20): <code>TX...</code>"
-    }.get(method, "Contact support for details.")
-
-    text = (
-        f"<b>Payment Details ({method.capitalize()})</b>\n\n"
-        f"{details}\n\n"
-        f"Please pay <b>৳{session.locked_amount}</b> and then send your Transaction ID (TXID) here."
+    # Update session to REQUESTED
+    updated = await service.update_status(
+        session_id, 
+        PaymentStatus.REQUESTED,
+        payment_method=method
     )
-    
+    if not updated:
+        await callback.answer("Could not request details. Try again.", show_alert=True)
+        return
+
     await callback.message.edit_text(
-        text,
+        "⏳ <b>Requesting payment details...</b>\n\n"
+        "An admin has been notified. You will receive the payment "
+        "number/QR here shortly. Please keep this chat open.",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session_id}")]
         ]),
         parse_mode=ParseMode.HTML
     )
     
-    await service.update_status(
-        session_id, 
-        PaymentStatus.WAITING_TXID,
-        payment_method=method
-    )
-    timeout_started = await service.start_timeout(session_id)
-    if not timeout_started:
-        logger.warning(
-            "Payment timeout was not started after details delivery",
-            extra={"ctx_payment_id": session_id, "ctx_user_id": session.user_id},
-        )
-    
+    # Notify Admins of the REQUEST
+    await _notify_admins_of_request(client, session, method)
     await callback.answer()
 
 
-@Client.on_message(filters.private & ~filters.regex(r"^/"))
-async def handle_payment_inputs(client: Client, message: Message) -> None:
-    """Captures TXID and Screenshot in sequence."""
-    if not message.from_user:
-        return
-    user_id = message.from_user.id
-    service = get_payment_service()
+async def _notify_admins_of_request(client: Client, session: PaymentSession, method: str) -> None:
+    from app.services.topic_service import get_topic_service
+    topic_service = get_topic_service()
     
-    session = await service.get_active_session(user_id)
-    if not session:
-        raise ContinuePropagation
+    try:
+        topic_id = await topic_service.get_or_create_payments_topic(client)
+    except Exception as e:
+        logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
+        topic_id = None
 
-    if session.status == PaymentStatus.WAITING_TXID:
-        if not message.text:
-            await message.reply_text("Please send your Transaction ID (TXID) as text.")
-            return
-        
-        await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
-        await message.reply_text("✅ TXID received. Now please send a screenshot of the payment proof.")
-        
-    elif session.status == PaymentStatus.WAITING_SCREENSHOT:
-        if not (message.photo or message.document):
-            await message.reply_text("Please send a photo or document as proof.")
-            return
-        
-        file_id = message.photo.file_id if message.photo else message.document.file_id
-        session.txid = session.txid or message.text
-        await service.update_status(session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id)
-        
-        await message.reply_text(
-            "✅ Proof submitted! Our admins will review it shortly.\n"
-            f"<b>Session ID:</b> <code>{session.id}</code>",
-            parse_mode=ParseMode.HTML
-        )
-        
-        # Notify Admins
-        await _notify_admins_of_submission(client, session, session.txid or "", file_id)
+    text = (
+        "💎 <b>New Payment Request</b>\n\n"
+        f"👤 User: <code>{session.user_id}</code>\n"
+        f"📦 Plan: {PLANS[session.plan_id]['label']}\n"
+        f"💰 <b>৳{session.locked_amount:.2f}</b>\n"
+        f"📱 Method: {method.capitalize()}\n"
+        f"🆔 Session: <code>{session.id}</code>"
+    )
+    
+    buttons = [
+        [
+            InlineKeyboardButton("📩 Send Payment Details", callback_data=f"pay:admin:send:{session.id}"),
+            InlineKeyboardButton("❌ Reject Request", callback_data=f"pay:admin:rej_req:{session.id}")
+        ]
+    ]
+    
+    await client.send_message(
+        chat_id=settings.VERIFICATION_GROUP_ID,
+        text=text,
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode=ParseMode.HTML,
+        message_thread_id=topic_id
+    )
 
-
-# ── Admin Handlers ────────────────────────────────────────────────────────────
 
 async def _notify_admins_of_submission(client: Client, session: PaymentSession, txid: str, file_id: str) -> None:
     from app.services.topic_service import get_topic_service
@@ -235,7 +218,7 @@ async def _notify_admins_of_submission(client: Client, session: PaymentSession, 
     try:
         topic_id = await topic_service.get_or_create_payments_topic(client)
     except Exception as e:
-        logger.error("Failed to get payments topic, falling back to general group", extra={"ctx_error": str(e)})
+        logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
         topic_id = None
 
     text = (
