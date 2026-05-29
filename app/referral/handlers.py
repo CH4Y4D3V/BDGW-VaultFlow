@@ -40,14 +40,24 @@ async def show_referral_status(
         points_balance = wallet.get('points_balance', 0)
         active_referrals = wallet.get('active_referrals', 0)
         total_earned = wallet.get('total_earned', 0)
+
     me = await client.get_me()
     user_id = message.from_user.id
     ref_link = f'https://t.me/{me.username}?start=ref_{user_id}'
+
     text = (
-        'Referral Status\n\n'
-        f'Points Balance: {points_balance}\n'
-        f'Active Referrals: {active_referrals}\n'
-        f'Total Earned: {total_earned}\n\n'
-        f'Your Referral Link:\n{ref_link}'
+        "👥 <b>Referral Program</b>\n\n"
+        f"<b>Points Balance:</b> ৳{points_balance}\n"
+        f"<b>Active Referrals:</b> {active_referrals}\n"
+        f"<b>Total Earned:</b> ৳{total_earned}\n\n"
+        "🔗 <b>Your Referral Link:</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        "🎁 <b>Rewards:</b>\n"
+        "• 10 points for each qualified referral.\n"
+        "• 1 point for every 5 approved submissions from your referrals.\n"
+        "<i>(1 point = ৳1 discount on Premium)</i>"
     )
-    await message.reply_text(text)
+
+    from app.bot.keyboards import KeyboardBuilder
+    await message.edit_text(text, reply_markup=KeyboardBuilder.build_back_button(), parse_mode=ParseMode.HTML)
+

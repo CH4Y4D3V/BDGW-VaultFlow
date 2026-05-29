@@ -50,7 +50,6 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode=ParseMode.HTML
     )
-    await callback.answer()
 
 
 @Client.on_callback_query(filters.regex(r"^pay:select:(?P<plan_id>.+)$"))
@@ -91,7 +90,6 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode=ParseMode.HTML
         )
-        await callback.answer()
         
     except Exception as e:
         logger.exception("Failed to start payment session", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
@@ -182,6 +180,17 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     if not message.from_user:
         return
     user_id = message.from_user.id
+    
+    # B-06 FIX: Redis-backed fast check
+    from app.core.redis_client import get_redis
+    redis = get_redis()
+    if redis:
+        try:
+            if not await redis.exists(f"pay_session:{user_id}"):
+                raise ContinuePropagation
+        except Exception as e:
+            logger.warning("Redis fast-path failed in handle_payment_inputs", extra={"ctx_error": str(e)})
+
     service = get_payment_service()
     
     session = await service.get_active_session(user_id)

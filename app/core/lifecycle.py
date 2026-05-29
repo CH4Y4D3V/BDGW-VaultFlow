@@ -160,15 +160,28 @@ class AppLifecycle:
             # 4. Membership Handler bridge
             init_membership_handler(ref_service)
 
+        # 7. Payment Timeout Monitor
+        try:
+            from app.payments.repository import PaymentRepository
+            from app.payments.timeouts import PaymentTimeoutMonitor
+            
+            payment_repo = PaymentRepository(DatabaseManager.get_db())
+            timeout_monitor = PaymentTimeoutMonitor(payment_repo)
+            
+            if self._engine and self._engine.scheduler:
+                raw_scheduler = self._engine.scheduler._scheduler
+                raw_scheduler.add_job(
+                    timeout_monitor.check_timeouts,
+                    "interval",
+                    minutes=1,
+                    args=[self._bot],
+                    id="payment_timeout_monitor",
+                    replace_existing=True,
+                    coalesce=True
+                )
+                logger.info("Payment timeout monitor registered")
         except Exception as e:
-            logger.warning(
-                "referral_system_initialization_failed",
-                extra={
-                    "ctx_error": str(e),
-                    "ctx_error_type": type(e).__name__,
-                },
-                exc_info=True
-            )
+            logger.error("Failed to register payment timeout monitor", exc_info=e)
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")

@@ -200,33 +200,34 @@ class DatabaseManager:
 
         # â”€â”€ Referral System Indexes (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # ── Referral System Indexes (Non-FATAL) ──────────────────────────────
-        try:
-            from app.referral.repository import ReferralRepository
-            ref_repo = ReferralRepository(cls._db)
             try:
-                await ref_repo.create_indexes()
-            except Exception as e:
-                logger.error(
-                    "non_core_index_setup_failed",
-                    extra={"ctx_collection": "referral", "ctx_error": str(e)},
-                    exc_info=True
-                )
+                from app.referral.repository import ReferralRepository
+                ref_repo = ReferralRepository(cls._db)
+                try:
+                    await ref_repo.create_indexes()
+                except Exception as e:
+                    logger.error(
+                        "non_core_index_setup_failed",
+                        extra={"ctx_collection": "referral", "ctx_error": repr(e)},
+                        exc_info=True
+                    )
 
-            from app.payments.repository import PaymentRepository
-            payment_repo = PaymentRepository(cls._db)
-            try:
-                await payment_repo.create_indexes()
-            except Exception as e:
-                logger.error(
-                    "non_core_index_setup_failed",
-                    extra={"ctx_collection": "payments", "ctx_error": str(e)},
-                    exc_info=True
-                )
+                from app.payments.repository import PaymentRepository
+                payment_repo = PaymentRepository(cls._db)
+                try:
+                    await payment_repo.create_indexes()
+                except Exception as e:
+                    logger.error(
+                        "non_core_index_setup_failed",
+                        extra={"ctx_collection": "payments", "ctx_error": repr(e)},
+                        exc_info=True
+                    )
             logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "non_core_index_setup_failed",
-                extra={"ctx_error": str(e)},
+                extra={"ctx_error": repr(e)},
+                exc_info=True
             )
 
         cls._initialized = True

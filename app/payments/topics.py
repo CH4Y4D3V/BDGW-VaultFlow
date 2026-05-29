@@ -14,12 +14,26 @@ class PaymentTopicManager:
         self.repository = repository
 
     async def create_topic(self, client: Client, payment_id: str, user_id: int) -> int:
+        import random
+        from pyrogram import raw
+        from pyrogram.errors import RPCError
         try:
-            topic = await client.create_forum_topic(
-                chat_id=settings.VERIFICATION_GROUP_ID,
-                name=f"payment-{user_id}",
+            peer = await client.resolve_peer(settings.VERIFICATION_GROUP_ID)
+            result = await client.invoke(
+                raw.functions.channels.CreateForumTopic(
+                    channel=peer,
+                    title=f"💎 Payment-{user_id}",
+                    random_id=random.randint(1, 2**31 - 1),
+                )
             )
-            topic_id = topic.id
+            topic_id = None
+            for update in result.updates:
+                if hasattr(update, "id"):
+                    topic_id = update.id
+                    break
+            if topic_id is None:
+                raise RuntimeError("CreateForumTopic returned no topic id")
+
             await self.repository.map_topic(topic_id, payment_id)
             logger.info(
                 "payment_topic_created",
@@ -31,12 +45,13 @@ class PaymentTopicManager:
             )
             return topic_id
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "payment_topic_creation_failed",
                 extra={
                     "ctx_payment_id": payment_id,
                     "ctx_user_id": user_id,
-                    "ctx_error": str(e),
+                    "ctx_error": repr(e),
                 },
+                exc_info=True
             )
             raise

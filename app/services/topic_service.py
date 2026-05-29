@@ -281,46 +281,31 @@ class TopicService:
                     "forum_topic_creation_forbidden",
                     extra={
                         "ctx_title": title,
-                        "ctx_error": str(e),
+                        "ctx_error": repr(e),
                         "ctx_note": "Bot may lack 'manage_topics' permission or forum topics are disabled in group."
-                    }
+                    },
+                    exc_info=True
                 )
                 raise
 
             except RPCError as e:
                 logger.error(
                     "forum_topic_creation_rpc_error",
-                    extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                    extra={"ctx_title": title, "ctx_error": repr(e), "ctx_attempt": attempt + 1},
                     exc_info=True
                 )
                 if attempt == len(delays) - 1:
-                    # Final attempt — try fallback
                     break
                 await asyncio.sleep(delay)
 
             except Exception as e:
                 logger.error(
                     "forum_topic_creation_unexpected_error",
-                    extra={"ctx_title": title, "ctx_error": str(e), "ctx_attempt": attempt + 1},
+                    extra={"ctx_title": title, "ctx_error": repr(e), "ctx_attempt": attempt + 1},
                     exc_info=True,
                 )
                 if attempt == len(delays) - 1:
-                    # Final attempt — try fallback
                     break
                 await asyncio.sleep(delay)
         
-        # Fallback to high-level API
-        try:
-            logger.info("Attempting high-level API fallback for topic creation", extra={"ctx_title": title})
-            result = await client.create_forum_topic(
-                chat_id=settings.VERIFICATION_GROUP_ID,
-                title=title
-            )
-            return result.id
-        except Exception as e:
-            logger.error(
-                "forum_topic_creation_fallback_failed",
-                extra={"ctx_title": title, "ctx_error": str(e)},
-                exc_info=True
-            )
-            raise
+        raise RuntimeError(f"Failed to create forum topic: {title}")

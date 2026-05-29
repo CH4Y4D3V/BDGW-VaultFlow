@@ -1,241 +1,1048 @@
-# CODEBASE AUDIT REQUEST — BDGW VaultFlow
+# CLAUDE CODE — BDGW VaultFlow Production Delivery Mission
 
-You are a senior production reliability engineer and Telegram bot architect.
-Your job is to perform a full deployment readiness audit on this codebase.
-Do NOT ask clarifying questions. Read the files, trace every path, and report findings.
+## YOUR IDENTITY
 
----
-
-## AUDIT SCOPE
-
-Read every file in the following paths before forming any opinion:
-
-- main_bot.py
-- app/core/lifecycle.py
-- app/core/database.py
-- app/core/logger.py
-- app/core/permissions.py
-- app/bot/client.py
-- app/config/settings.py
-- app/handlers/ (every file)
-- app/services/ (every file)
-- app/repositories/ (every file)
-- app/scheduler/scheduler.py
-- app/distribution/ (every file)
-- app/watermark/worker_pool.py
-- app/watermark/dispatcher_worker.py
-- app/health.py
+You are a senior Python backend Telegram bot architect with 10 years of
+production systems experience. You ship complete, working code. You never
+write TODO, never truncate files, never ask questions that can be answered
+by reading the codebase. You read everything first, then fix and build.
 
 ---
 
-## AUDIT CHECKLIST
+## MISSION PARAMETERS
 
-For each file you read, check and report on every item below.
-Mark each finding as one of:
-  ✅ PASS       — confirmed working, no action needed
-  ⚠️ WARNING    — works but has risk or tech debt
-  ❌ FATAL      — will crash or silently corrupt data in production
-  🔍 UNVERIFIED — could not confirm without runtime data
-
----
-
-### 1. BOOT SEQUENCE
-- Does main_bot.py complete without crashing?
-- Does lifecycle.py start Pyrogram successfully?
-- Is every startup step reachable (not inside dead code blocks)?
-- Does MongoDB connect before any repository is used?
-- Are indexes created without duplication errors?
-- Does the scheduler start and register jobs correctly?
-- Are all workers instantiated and started?
-- Does the health server bind correctly?
+**Deadline:** 1 hour to production-ready delivery.
+**Method:** Read every file in the repository completely before touching
+anything. Build a complete mental model. Then fix and build in priority order.
+**Output rule:** Every file you touch or create must be output in FULL.
+Never write `# ... rest unchanged`. Never summarize. Full file, always.
+**Stack:** Python 3.11+, pyrofork (Pyrogram fork), Motor + MongoDB (async),
+APScheduler, Pillow (image), ffmpeg-python (video), python-dotenv, Redis.
 
 ---
 
-### 2. LOGGER USAGE (CRITICAL)
-Scan every single logger call in every file.
-The logger is stdlib logging.Logger.
-The ONLY valid calling conventions are:
-  logger.info("message")
-  logger.info("message", extra={"key": value})
-  logger.error("message", exc_info=True)
+## STEP 0 — READ EVERYTHING FIRST (mandatory, non-skippable)
 
-Flag every instance of:
-  logger.info("msg", key=value)      ← TypeError, crashes process
-  logger.info("msg", stage=value)    ← TypeError, crashes process
-  logger.debug("msg", ctx=value)     ← TypeError, crashes process
+Before writing a single line of code:
 
-Report file name, line number, and exact bad call for every violation.
-
----
-
-### 3. IMPORT INTEGRITY
-- Are there any missing imports (NameError on first use)?
-- Are there any circular imports?
-- Are there any imports of undefined symbols from internal modules?
-- List every broken import with file and line.
+1. Read every `.py` file in the repo
+2. Read `.env.example`
+3. Read every markdown or doc file
+4. Map the full handler registration tree
+5. Map every MongoDB collection and index
+6. Map every service dependency chain
+7. List all bugs found (internal checklist only — do not output the list,
+   just use it to plan your work)
+8. List all missing features against the requirements below
+9. Then start fixing in P0→P1→P2→NEW order
 
 ---
 
-### 4. DEAD CODE & UNREACHABLE BLOCKS
-- Is any critical code placed after sys.exit() or inside an except block that exits first?
-- Are any startup steps silently skipped?
-- Are there any methods called that do not exist on the target class/object?
-- List every unreachable block that contains production logic.
+## STEP 1 — BUGS TO FIX (fix all, no exceptions)
+
+### CRITICAL (P0)
+
+**B-01 · Referral TTL index + partialFilterExpression**
+In `app/referral/repository.py`, the TTL index combines `expireAfterSeconds`
+with `partialFilterExpression`. This fails on MongoDB < 5.0 and even on 5.0+
+the enum object (not `.value`) is passed as the filter value, so it never
+matches. Remove the TTL+partial combination entirely. Replace with a
+`purge_stale_pending(hours=48)` method called from the qualification job.
+
+**B-02 · QueueRepository missing `db` argument**
+In `app/handlers/user_handler.py`, `_get_queue_repo()` calls `QueueRepository()`
+with no arguments. `QueueRepository.__init__` requires `db: AsyncIOMotorDatabase`.
+Fix: `return QueueRepository(DatabaseManager.get_db())`.
+
+**B-03 · Forum topic creation uses non-existent API**
+In `app/payments/topics.py`, `client.create_forum_topic(...)` does not exist in
+pyrofork. Fix: use raw API `client.invoke(raw.functions.channels.CreateForumTopic(...))`
+exactly as `app/services/topic_service.py` does.
+
+**B-04 · Double `callback.answer()` in payment handlers**
+`handle_premium_menu`, `handle_plan_selection`, `handle_payment_method` all
+call `await callback.answer()` twice. Remove every duplicate call. Rule: one
+`callback.answer()` per handler, called immediately at the top.
+
+**B-05 · `non_core_index_setup_failed` silently swallows actual error**
+In `app/core/database.py`, the referral and payment index creation errors are
+caught but the `exc_info=True` may still mask the real message. Ensure every
+index error logs `repr(e)` and the collection name.
+
+**B-06 · `handle_payment_inputs` races with `handle_media_submission`**
+Both are `filters.private & ~filters.regex(r"^/")`. `handle_payment_inputs`
+correctly raises `ContinuePropagation` when no session exists, but it still
+makes a MongoDB call (`get_active_session`) for EVERY private message from
+EVERY user. Add a Redis-backed fast check: if no `pay_session:{user_id}` key
+exists in Redis, raise `ContinuePropagation` immediately without a DB call.
+Set the Redis key when a session is created; clear it on approval/rejection/expiry.
+
+**B-07 · `approve_payment` loads stale session before lock**
+After `acquire_processing_lock` changes DB status to `PROCESSING`, the local
+`session` object still has `status=UNDER_REVIEW`. This is safe for the happy
+path but causes incorrect rollback logging on failure. After acquiring the lock,
+reload: `session = await self.repository.get_session(payment_id)`.
+
+**B-08 · Support handler routes ALL private text to DB even with no topic**
+`handle_private_message_support` calls `get_user_topic_id` for every private
+non-command text message. Add Redis cache: `support_topic:{user_id}` — set on
+topic creation, cleared on close. Check Redis first; only hit MongoDB on miss.
 
 ---
 
-### 5. REPOSITORY CONTRACT VERIFICATION
-For every method called on a repository class anywhere in services, workers, or scheduler:
-- Confirm the method actually exists on that repository class.
-- Confirm the method signature matches the call site.
-- Flag every call to a non-existent repository method.
+### HIGH (P1)
+
+**B-09 · Forum topic creation error hides actual Telegram reason**
+All forum topic creation `except Exception as e:` blocks log `str(e)` which
+can be empty for some Pyrogram exceptions. Change all to `repr(e)` and ensure
+`exc_info=True` is always set.
+
+**B-10 · `PaymentTimeoutMonitor` has no progressive warnings**
+Only implements expiry. Must implement: +5 min warn, +10 min warn, +20 min
+expire. See M-05 below for full spec.
+
+**B-11 · `SubscriptionWorker` missing pre-expiry notifications**
+Only notifies on grace and full expiry. Must add 7-day (once) and 3-day
+(twice, 24h apart) advance warnings. See M-06 below.
+
+**B-12 · `PaymentStatus.SUBMITTED` is defined but never used**
+Either use it as the intermediate state between screenshot submission and admin
+review, or remove it. Per spec: after user submits proof → status = `submitted`
+→ admin sees card → admin clicks Approve/Reject → `processing` → `approved` or
+`rejected`. Implement this correctly.
 
 ---
 
-### 6. WORKER & SCHEDULER INTEGRITY
-- Is every worker instantiated in lifecycle.py?
-- Is every worker started in lifecycle.py?
-- Is every worker stopped gracefully on shutdown?
-- Does the scheduler have all required imports?
-- Does setup_jobs() or equivalent exist and get called?
-- Is stale singleton lock cleaned on restart?
-- Are all APScheduler jobs pointing to existing async methods?
+## STEP 2 — FEATURES TO BUILD (build all, complete, production-ready)
+
+Everything below is REQUIRED. If it exists partially, complete it.
+If it does not exist, build it from scratch. No exceptions.
 
 ---
 
-### 7. QUEUE & VAULT SAFETY
-- Does every enqueue path validate vault_chat_id + vault_message_id before inserting?
-- Are albums processed as atomic units?
-- Is there a dead-letter path for max-retry-exceeded jobs?
-- Is content always delivered via copy_message() / copy_media_group()?
-- Is forward_messages() used anywhere? (FORBIDDEN — leaks identity)
-- Are all queue state transitions atomic ($set / find_one_and_update)?
+### F-01 · `/start` and Main Menu (fix and finalize)
+
+The `/start` message must be clean, professional, and minimal:
+
+```
+Welcome to BDGW VaultFlow.
+
+Access premium content, submit your work for review,
+track your account, and refer friends — all in one place.
+
+Use the buttons below to get started.
+```
+
+Main menu button layout (EXACT — do not add or remove buttons):
+
+```
+Row 1: [ 💎 Premium Access ]
+Row 2: [ 📤 Submit Content ]
+Row 3: [ 👥 Referral ]  [ 📊 My Status ]
+Row 4: [ 🆘 Support ]
+```
+
+No anonymous button. No "Submit Content Anonymously". Only one submit button.
 
 ---
 
-### 8. TELEGRAM DELIVERY SAFETY
-- Is FloodWait caught and respected on every Telegram API call?
-- Is there retry logic with backoff on every delivery path?
-- Are flood wait durations persisted (Redis or DB) so workers don't retry too early?
-- Is there any place where a failed Telegram call silently drops a job?
+### F-02 · Submit Content (complete implementation)
+
+**Trigger:** User clicks "📤 Submit Content" or sends any media directly.
+
+**Supported types (ALL must work):**
+- Photo (single or album)
+- Video
+- Audio
+- Voice
+- Document / File
+- GIF / Animation
+- Sticker (forward to hub, no watermark)
+- Any other Telegram media type
+
+**Flow:**
+1. User sends content to bot private chat
+2. Bot checks if user has completed creator consent attestation
+   (if not → show consent flow, block submission)
+3. Bot creates or retrieves user's topic in VERIFICATION_GROUP_ID
+4. First message in topic (on creation only) = user's full info card
+   (same format as My Status, see F-04)
+5. Bot forwards the content to the topic as a forwarded message
+   (preserves original sender context for admins)
+6. Bot posts moderation card AFTER the content with inline buttons:
+
+```
+📬 New Submission
+
+👤 User: {first_name} (@{username})
+🆔 ID: {user_id}
+📦 Type: {media_type}
+📝 Caption: {caption[:200] if caption else "None"}
+```
+
+Buttons:
+```
+[ ✅ Approve → NSFW ]  [ ✅ Approve → Premium ]
+[ ❌ Reject ]
+```
+
+The button labels must reflect the group names set in env:
+`NSFW_DISPLAY_NAME` and `PREMIUM_DISPLAY_NAME`.
+
+7. When admin clicks Approve → [Group]:
+   - Content is archived to VAULT_CHANNEL_ID (copied, not forwarded)
+   - Photo: apply dual PNG watermark (see F-08)
+   - Video: apply dual text watermark (see F-08)
+   - Audio/voice/document/gif: copy as-is
+   - Entry added to distribution queue for the chosen group
+   - Queue entry has `execute_after = now() + 24h`
+   - Bot DMs user: "✅ Your content has been approved and is queued for posting."
+   - Moderation card in hub updated to show: "✅ Approved → [Group] by [Admin]"
+
+8. When admin clicks Reject:
+   - Content stays in verification hub topic (do NOT delete)
+   - Bot DMs user: "❌ Your submission was not approved."
+   - Moderation card updated: "❌ Rejected by [Admin]"
+   - No content archived to vault
+
+**Daily limits per group:** Read from env:
+- `DAILY_CAP_NSFW` (default 20)
+- `DAILY_CAP_PREMIUM` (default 30)
+
+When queue is empty or daily cap reached → randomly select from vault
+and resend to that group. Never resend the same item within
+`REPOST_PREVENTION_HOURS` (default 168 = 7 days).
+
+**All messages the bot posts to groups must appear in bot's name**
+(use `copy_message`, never `forward_messages`).
+**In verification hub, preserve forward origin** (use `forward_messages`
+so admins can see who sent it).
 
 ---
 
-### 9. STATE CONSISTENCY
-- Are pending submissions kept in sync between in-memory dict and MongoDB PENDING_COLLECTION?
-- Are payment sessions only activated after confirmed Telegram delivery?
-- Are payment timeouts only started after session activation?
-- Is TXID globally unique and checked before approval?
-- Are duplicate processing scenarios prevented with locks?
+### F-03 · Premium Payment Flow (complete, correct implementation)
+
+This is the most critical system. The current implementation is WRONG.
+The bot must NEVER automatically send payment details to the user.
+
+**Correct flow (implement exactly):**
+
+#### Step 1 — Package Selection
+User clicks "💎 Premium Access". Bot shows:
+
+```
+💎 Premium Access
+
+Select your subscription plan:
+```
+
+Buttons:
+```
+[ 1 Month — ৳499 ]
+[ 3 Months — ৳1,299 ]
+[ 6 Months — ৳2,499 ]
+[ 📊 Check Status ]
+[ ← Back ]
+```
+
+Each plan button has 3 benefit bullets under it when selected (show as
+an edited message with plan details + method selection).
+
+#### Step 2 — Payment Method Selection
+Bot shows (after plan selection):
+
+```
+📦 Plan: 1 Month — ৳499
+
+Benefits:
+• Full access to premium content channel
+• Priority content submission
+• Exclusive premium-only posts
+
+Select payment method:
+```
+
+Buttons:
+```
+[ 💳 bKash ]  [ 💳 Nagad ]
+[ 🔐 Crypto (USDT) ]
+[ ← Back ]
+```
+
+#### Step 3 — Payment Request Created
+After method selection, bot:
+1. Checks for existing active payment session — if one exists, show it and
+   stop: "You already have a pending payment. Complete or cancel it first."
+2. Checks referral balance — if > 0:
+   "You have {N} referral points = ৳{N} discount available.
+   Enter discount amount (0 to {min(balance, price)}), or 0 to skip:"
+   - Wait for user text input (integer validation)
+   - `locked_amount = plan_price - discount_applied`
+   - Deduct points atomically at session creation
+   - If session rejected/expired → restore points
+3. Add a unique identifier offset to the amount (৳0.01–৳0.50 random float
+   rounded to 2dp) so the admin can match exact transaction amounts
+4. Create payment session in DB with `status = waiting_payment_details`
+5. Forward payment request to admin in VERIFICATION_GROUP_ID
+   (in payments topic — create it once using `get_or_create_payments_topic`):
+
+```
+💰 New Premium Request
+
+👤 {first_name} (@{username})
+🆔 User ID: {user_id}
+📦 Plan: {plan_label}
+💰 Amount: ৳{locked_amount}
+📱 Method: {method}
+🆔 Request #{request_id}
+
+Waiting for admin to send payment details.
+```
+
+Button: `[ 📩 Send Payment Details ]`
+
+6. Bot confirms to user:
+```
+⏳ Your premium request has been submitted.
+An admin will send you payment details shortly.
+Please wait.
+```
+
+#### Step 4 — Admin Sends Payment Details (MANUAL ONLY)
+When admin clicks "📩 Send Payment Details":
+1. Bot prompts admin in the payments topic:
+   "Send the payment number, QR code, or wallet address for this user."
+2. Admin sends message (text or photo)
+3. Bot delivers that exact message to the user's private chat
+4. **ONLY after confirmed delivery to user:**
+   - Set `payment_details_sent_at = now()`
+   - Set `expires_at = now() + 20 minutes`
+   - Update status → `waiting_txid`
+   - Schedule timeout tasks (see Step 4a)
+5. Confirm to admin: "Payment details delivered. 20-minute timer started."
+
+**CRITICAL RULE: NEVER start the timeout before delivery confirmation.**
+
+#### Step 4a — Timeout System
+Schedule three asyncio tasks keyed on `payment_id`:
+
+- **+10 minutes:** Send user: "⏰ 10 minutes remaining to complete payment."
+  Before firing: check status is still `waiting_txid` or `waiting_screenshot`.
+- **+15 minutes:** Send user: "⚠️ 5 minutes remaining! Submit your TXID now."
+  Same status guard.
+- **+20 minutes:** Expire session:
+  - Restore referral points
+  - Set status → `expired`
+  - DM user: "⌛ Your payment session has expired. Start a new request."
+  - Notify admin payments topic: "Session expired for Request #{request_id}."
+  - Cancel all remaining timeout tasks for this payment
+
+All tasks must:
+- Store references to prevent garbage collection
+- Check status before executing (abort if already processed)
+- Be cancellable when payment is completed before timeout
+
+#### Step 5 — User Submits TXID
+Bot prompts user:
+```
+🔒 Send your Transaction ID (TXID).
+This is the reference number from your payment confirmation.
+```
+- Validate status is `waiting_txid` and session belongs to this user
+- Validate status is not expired
+- **Check TXID uniqueness across ALL payments in DB** — if duplicate:
+  "❌ This Transaction ID has already been used. Contact support."
+- Store TXID, update status → `waiting_screenshot`
+- Prompt: "Optional: Send a screenshot of your payment confirmation,
+  or type `skip` to continue without one."
+
+#### Step 6 — Screenshot or Skip
+- If user sends photo: store `screenshot_file_id`, update status → `submitted`
+- If user sends "skip": update status → `submitted`
+- Bot confirms: "✅ Proof submitted. Waiting for admin review."
+- Post proof card to payments topic (with screenshot if provided):
+
+```
+💰 Payment Proof Received
+
+👤 {first_name} (@{username})
+🆔 User ID: {user_id}
+📦 Plan: {plan_label}
+💰 Amount: ৳{locked_amount}
+📱 Method: {method}
+🔑 TXID: {txid}
+🆔 Payment #{payment_id}
+```
+
+Buttons: `[ ✅ Approve ]  [ ❌ Reject ]`
+
+#### Step 7 — Admin Approval (Atomic, Duplicate-Safe)
+
+When admin clicks "✅ Approve":
+1. **Atomic lock:** `find_one_and_update` with
+   `filter={"_id": payment_id, "status": "submitted"}`,
+   `update={"$set": {"status": "processing", "admin_id": admin_id}}`
+   - If document not returned → reply: "Already being processed." Stop.
+2. Activate subscription in DB
+3. Generate invite link:
+   ```python
+   link = await client.create_chat_invite_link(
+       chat_id=int(PREMIUM_CHANNEL_ID_or_GROUP_ID),
+       member_limit=1,
+       expire_date=datetime.now(timezone.utc) + timedelta(minutes=30),
+       name=f"payment_{payment_id}",
+   )
+   ```
+4. Store invite link in payment and subscription records
+5. Send to user:
+   ```
+   ✅ Payment Approved!
+   
+   📦 Plan: {plan_label}
+   💰 Amount: ৳{locked_amount}
+   
+   Your premium access is ready.
+   
+   👇 Join using your private invite link:
+   {invite_link}
+   
+   ⚠️ This link is single-use and expires in 30 minutes.
+       Do not share it.
+   ```
+6. Mark payment `approved`
+7. Cancel all timeout tasks
+8. Update admin card: "✅ Approved by {admin_name} at {time}."
+
+**Link not used in 30 minutes:** Bot detects via scheduler sweep.
+User is notified: "Your invite link expired. Contact support for a new link."
+Admin must explicitly run `/newlink {user_id}` to generate a replacement.
+
+#### Step 8 — Admin Rejection (Two-Step)
+
+When admin clicks "❌ Reject":
+1. Show reason picker (do NOT process rejection yet):
+   ```
+   [ ❌ Invalid TXID ]
+   [ ❌ Wrong Amount ]
+   [ ❌ Duplicate Transaction ]
+   [ ❌ Screenshot Unclear ]
+   [ ✏️ Custom Reason ]
+   [ ← Back ]
+   ```
+2. On preset: proceed to rejection execution
+3. On "✏️ Custom Reason": prompt admin for text, then execute
+
+Rejection execution:
+1. **Atomic lock** (same as approval — only one admin can process)
+2. Restore referral points atomically
+3. Mark payment `rejected`
+4. DM user:
+   ```
+   ❌ Payment Verification Failed
+   
+   Reason: {reason}
+   
+   Please verify your payment details and try again.
+   ```
+   Buttons: `[ 🔄 Try Again ]  [ 🆘 Contact Support ]`
+5. "Try Again" starts a fresh payment flow (new session — never reuse rejected)
+6. Update admin card: "❌ Rejected by {admin_name}: {reason}"
+
+#### Renewal Flow
+When user clicks "🔄 Renew" (from premium status):
+Bot asks:
+```
+Renew your subscription:
+
+[ Same Plan ({plan_label} — ৳{price}) ]
+[ Upgrade Plan ]
+[ ← Cancel ]
+```
+If upgrade: show full plan picker.
+Then same payment flow from Step 2 onward.
+Referral discount is always offered if balance > 0.
 
 ---
 
-### 10. REDIS USAGE
-- Is the Redis client correctly named and imported everywhere it is used?
-- Is there any NameError risk on Redis access (_redis vs redis vs client)?
-- Are all Redis operations wrapped with proper error handling?
+### F-04 · My Status (complete dashboard)
+
+Show in a single formatted message with these sections:
+
+```
+📋 Account Dashboard
+
+━━━━━━━━━━━━━━━━
+👤 Profile
+━━━━━━━━━━━━━━━━
+Name: {first_name} {last_name}
+Username: @{username}
+User ID: {user_id}
+Bot joined: {join_date formatted as DD MMM YYYY}
+
+━━━━━━━━━━━━━━━━
+💎 Subscription
+━━━━━━━━━━━━━━━━
+Status: Active / Inactive
+Plan: {plan_name}
+Started: {start_date}
+Expires: {expiry_date}
+Days remaining: {N}
+
+━━━━━━━━━━━━━━━━
+📤 Content
+━━━━━━━━━━━━━━━━
+Total submitted: {N}
+Approved: {N}
+Rejected: {N}
+Queued: {N}
+Posted: {N}
+
+━━━━━━━━━━━━━━━━
+🎁 Referral
+━━━━━━━━━━━━━━━━
+Total referrals: {N}
+Active referrals: {N}
+Blocked bot: {N}
+Points balance: {N} = ৳{N}
+
+━━━━━━━━━━━━━━━━
+⚠️ Moderation History
+━━━━━━━━━━━━━━━━
+Warnings: {N}
+Mutes: {N}
+Kicks: {N}
+Bans: {N}
+Recent action: {action} — {reason} — {date}
+(Show last 3 actions. For premium users: show counts only, hide reasons.)
+```
+
+If no subscription: show "Inactive" section with upgrade prompt.
+If admin/owner: show permanent access instead of subscription details.
 
 ---
 
-### 11. MONGODB SAFETY
-- Are any collections indexed twice in _ensure_indexes() (causes DEGRADED state)?
-- Are all hot-path queries using indexed fields?
-- Is there any direct collection access from handlers or lifecycle.py?
-- Are all migrations idempotent?
+### F-05 · Support System (complete, correct implementation)
+
+**The current implementation is wrong. Replace it entirely.**
+
+#### Trigger
+ANY private text message sent to the bot that is NOT:
+- A command (starts with `/`)
+- A media file (photo/video/document/audio/voice/animation)
+- Part of an active payment flow (check Redis `pay_session:{user_id}`)
+- Part of an active FSM conversation state
+
+→ Treated as a support message.
+
+Also triggered by clicking "🆘 Support" button.
+
+#### Support Ticket Lifecycle
+
+**State machine:** `NONE → PENDING → ACTIVE → CLOSED`
+
+**NONE state (no active ticket):**
+1. User sends message → bot creates ticket with `status = PENDING`
+2. Bot creates a forum topic in VERIFICATION_GROUP_ID for this user
+   (reuse existing topic if one exists from before — never create duplicates)
+3. **First message ever posted in this topic** must be the user's full info card
+   (same format as My Status / F-04, but compact — name, ID, join date,
+   subscription status, referral count, submission count, any warnings/bans)
+4. Forward the user's message into the topic
+5. Post acceptance card in topic:
+   ```
+   🆘 New Support Request
+   
+   👤 {first_name} (@{username}) [ID: {user_id}]
+   📅 {timestamp}
+   
+   Ticket pending admin acceptance.
+   ```
+   Button: `[ ✅ Accept Support ]`
+6. Bot replies to user: "Your support request has been submitted.
+   An admin will respond shortly."
+7. Start 3-minute timeout task for this ticket
+
+**3-minute timeout (no admin accepts):**
+- Bot DMs user: "No admin is available right now. Your request has been
+  kept open and will be answered when an admin is available."
+- Ticket remains `PENDING` — it does NOT expire. Admin can still accept.
+- Bot sends reminder to topic: "No admin accepted within 3 minutes.
+  Ticket is still open."
+
+**PENDING state (ticket open, waiting acceptance):**
+- User sends more messages → forward each to the topic (no new ticket created)
+- Bot replies to user: "Your support request is pending. Please wait."
+- User cannot open a new ticket while one is PENDING
+
+**When admin clicks "✅ Accept Support":**
+- Status → `ACTIVE`
+- Bot notifies user: "An admin has joined your support session.
+  You can now chat directly."
+- Remove the "Accept" button from the card, replace with:
+  `[ ✅ Active — Accepted by {admin_name} ] [ Close Ticket ]`
+
+**ACTIVE state (bidirectional chat):**
+- User sends any message → forwarded to the user's topic in verification hub
+- Admin replies in the topic → forwarded to user's private chat
+- This is the ONLY routing: hub→user and user→hub. Nothing else.
+- Admin can send: text, photos, videos, files, voice — anything
+
+**When admin closes ticket** (`/close` command in topic OR "Close Ticket" button):
+1. Status → `CLOSED`
+2. Send user:
+   "Your support session has been closed. Thank you for contacting us.
+   Feel free to reach out again if you need help."
+3. **Delete all messages from the bot's private chat with this user**
+   that were part of this support session (delete by message_id list stored
+   in DB). Use try/except on each deletion individually — never crash if
+   a message is already deleted.
+4. Keep ALL messages in the verification hub topic. Never delete from hub.
+5. Clear Redis cache `support_topic:{user_id}` so user can open new ticket.
+6. Archive topic in hub (close the forum topic).
+
+**User first message in topic** (written once per user, ever):
+Show their full My Status data. Formatted exactly like F-04 but in one
+code block or with clear separation. This is the permanent reference card.
 
 ---
 
-### 12. ASYNC SAFETY
-- Is there any blocking I/O (file read, subprocess, sleep) in async handlers or workers?
-- Is asyncio.create_subprocess_exec() used instead of subprocess.run() in async paths?
-- Are all background tasks tracked and cancellable?
-- Is there any fire-and-forget task without error handling?
+### F-06 · Referral System (complete, correct)
+
+**Individual invite link:** Each user's referral link is:
+`https://t.me/{BOT_USERNAME}?start=ref_{user_id}`
+
+**Qualification rule:** A referral is credited ONLY when the referred user
+sends `/start` to the bot AND is a verified member of `MAIN_CHANNEL_ID`
+(check via `get_chat_member`). If they are not in the channel, the referral
+stays `PENDING` until the next qualification sweep.
+
+**Qualification sweep:** Runs every 1 hour. For each PENDING referral > 24h
+old, check if the referred user is in `MAIN_CHANNEL_ID`. If yes → `QUALIFIED`
+→ credit 1 point to referrer wallet. If no → leave PENDING. Purge PENDING
+referrals > 48h old (they never joined).
+
+**Point value:** 1 point = ৳1 discount on any premium package.
+
+**Blocked bot tracking:** When a DM fails with `UserIsBlocked` → mark that
+user's referral as `invalidated`, decrement referrer's active count.
+If the user later unblocks and interacts → `reactivated`, re-increment.
+
+**Referral dashboard** (shown via "👥 Referral" button):
+```
+🎁 Your Referral Program
+
+Your invite link:
+{referral_link}
+
+📊 Stats:
+Active referrals: {N}
+Pending (joining): {N}
+Invalidated (blocked): {N}
+
+💰 Points: {N} = ৳{N} discount
+Total earned: {N} pts
+Total spent: {N} pts
+```
+Button: `[ 📋 My Status ]  [ ← Back ]`
 
 ---
 
-### 13. EXCEPTION HANDLING
-- Is there any bare `except:` without logging?
-- Are exceptions swallowed silently anywhere?
-- Is every critical failure logged with exc_info=True?
-- Are non-fatal errors isolated so they don't crash the entire process?
+### F-07 · Admin Commands (build all, working, in verification hub)
+
+All commands work in `VERIFICATION_GROUP_ID`. All require admin permission
+check against `ADMIN_IDS`, `SUDO_IDS`, or `OWNER_ID`.
+
+#### `/userinfo {user_id}`
+Show full user dashboard (F-04 format) for any user ID.
+Read from: MongoDB users + subscriptions + referral_wallets + moderation_logs
++ vault (content counts) + support_tickets.
+
+#### `/warn {user_id} {reason}`
+- Add entry to `moderation_log` collection:
+  `{user_id, action: "warn", reason, admin_id, timestamp}`
+- DM user: "⚠️ You have received a warning.\nReason: {reason}"
+- Reply in hub: "✅ Warning issued to user {user_id}."
+
+#### `/mute {user_id} {chat_id} {duration_minutes} {reason}`
+- Call `restrict_chat_member` with `can_send_messages=False`
+  and `until_date=now() + duration_minutes`
+- Log to `moderation_log`
+- DM user: "🔇 You have been muted in {chat_title} for {duration} minutes.\nReason: {reason}"
+- Schedule task to unrestrict after duration
+
+#### `/ban {user_id} {reason}`
+- Ban from all managed groups (`NSFW_GROUP_ID`, `PREMIUM_GROUP_ID`)
+- Set `is_banned=True` in user document
+- Log to `moderation_log`
+- DM user (best-effort, may be blocked): "🚫 You have been banned.\nReason: {reason}"
+- Reply in hub: "✅ User {user_id} banned from all groups."
+
+#### `/kick {user_id} {group_id} {reason}`
+- Ban then immediately unban (Telegram kick pattern)
+- Log to `moderation_log`
+- DM user: "👟 You have been kicked from {group_title}.\nReason: {reason}"
+
+#### `/unban {user_id}`
+- Unban from all managed groups
+- Clear `is_banned` flag
+- Log to `moderation_log`
+- DM user: "✅ Your ban has been lifted."
+
+#### `/newlink {user_id}`
+- Only works if user has an active approved subscription
+- Revoke any existing unused invite links for this user
+- Generate new 30-minute single-use invite link
+- DM user the new link with the same approved message format
+- Reply in hub: "✅ New invite link sent to user {user_id}."
+
+#### `/broadcast`
+Broadcast to ALL bot users. Multi-step flow:
+1. Admin sends `/broadcast`
+2. Bot prompts: "Send the content to broadcast (text, photo, video, album,
+   document, audio, voice, or any file). Send it now:"
+3. Admin sends ANY content type (collect media_group_id if album)
+4. Bot asks: "Send to: [ All Users ]  [ Premium Only ]  [ Free Only ]  [ Cancel ]"
+5. On confirmation: broadcast to selected audience with rate limiting
+6. Bot reports: "✅ Broadcast sent to {N} users. Failed: {M}."
+
+All broadcast sends: use `copy_message`, appear in bot's name.
+Handle `FloodWait` gracefully. Wrap every individual send in try/except.
+Skip users who have blocked the bot (catch `UserIsBlocked` → mark in DB).
+
+#### `/approve {submission_id} {group}`
+Manual approve a specific submission by ID (used for recovery).
+
+#### `/reject {submission_id} {reason}`
+Manual reject a specific submission by ID.
 
 ---
 
-### 14. GRACEFUL SHUTDOWN
-- Does shutdown drain in-flight queue jobs?
-- Does shutdown cancel all background tasks cleanly?
-- Does shutdown close MongoDB connection?
-- Does shutdown stop the Pyrogram client cleanly?
-- Is there any resource that leaks on restart?
+### F-08 · Dual Watermark System (photos AND videos)
+
+#### Photos — Dual PNG Watermark
+Apply the watermark PNG image TWICE at two different random positions.
+
+```python
+def _random_position_expr(img_w, img_h, wm_w, wm_h, margin=20):
+    """Return a random (x, y) that keeps the watermark inside the image."""
+    x = random.randint(margin, max(margin + 1, img_w - wm_w - margin))
+    y = random.randint(margin, max(margin + 1, img_h - wm_h - margin))
+    return x, y
+```
+
+FFmpeg filter for photos (two overlays at two independent random positions):
+```
+[1:v]scale=iw*{scale}:-1,format=rgba,colorchannelmixer=aa={opacity}[wm1];
+[1:v]scale=iw*{scale2}:-1,format=rgba,colorchannelmixer=aa={opacity2}[wm2];
+[0:v][wm1]overlay={x1}:{y1}[tmp];
+[tmp][wm2]overlay={x2}:{y2}[out]
+```
+
+- `scale` and `scale2`: independently random between 0.10 and 0.20
+- `opacity` and `opacity2`: between 0.6 and 0.9
+- `(x1,y1)` and `(x2,y2)`: generated randomly with no positional constraint
+  (they can overlap — that is intentional for watermark protection)
+- The second watermark should use a DIFFERENT random scale than the first
+
+#### Videos — Dual Text Watermark
+Apply the watermark text TWICE using the `drawtext` ffmpeg filter.
+
+Each text watermark has:
+- Independent random `(x, y)` position
+- Independent random start time within the video duration
+- Independent random opacity (0.4–0.8)
+- Font path from `WATERMARK_FONT_PATH` env var (fallback to system font)
+- Text value from `WATERMARK_TEXT_NSFW` or `WATERMARK_TEXT_PREMIUM`
+
+FFmpeg filter for videos:
+```
+drawtext=text='{text}':x={x1}:y={y1}:fontsize=24:fontcolor=white@{a1}:
+fontfile={font}:enable='between(t,{t1},{end1})',
+drawtext=text='{text}':x={x2}:y={y2}:fontsize=28:fontcolor=white@{a2}:
+fontfile={font}:enable='between(t,{t2},{end2})'
+```
+
+Where:
+- `t1`, `t2`: random start times within video duration (use ffprobe to get duration)
+- `end1`, `end2`: `t1 + random(3, 8)` seconds
+- `x1`, `x2`, `y1`, `y2`: random within video dimensions (use ffprobe)
+
+Get video dimensions and duration via `ffprobe` before building the command.
+Run watermark asynchronously with `asyncio.create_subprocess_exec` (never block).
 
 ---
 
-### 15. HANDLER LAYER CLEANLINESS
-- Do handlers contain any business logic? (They must not — delegates only)
-- Do handlers call repositories directly? (Forbidden — must go through services)
-- Do handlers call get_db() directly? (Forbidden)
-- Are all handlers thin: validate → delegate → respond?
+### F-09 · Admin Vault Upload Detection
+
+When admin posts any photo or video directly to `VAULT_CHANNEL_ID`:
+1. Bot detects via `@Client.on_message(filters.chat(VAULT_CHANNEL_ID))`
+   — filter: `filters.photo | filters.video`
+2. Apply appropriate watermark (detect type: photo → dual PNG, video → dual text)
+   Use `NSFW` or `PREMIUM` watermark config based on a `dest` field in the
+   vault entry; admin can tag with caption `#nsfw` or `#premium` — default NSFW
+3. Re-upload watermarked version to `VAULT_CHANNEL_ID`
+4. Delete original unwatermarked message from vault channel
+5. Add to vault DB as a new content item, eligible for redistribution
 
 ---
 
-### 16. CONFIGURATION & ENV SAFETY
-- Are all required ENV variables validated on startup?
-- Does the system fail fast with a clear error if a required variable is missing?
-- Are secrets (tokens, passwords) never logged?
+### F-10 · Premium Subscription Lifecycle & Expiry
+
+#### Expiry Notifications (add to subscription_worker.py)
+Add sweep methods that run daily:
+
+- **7 days out (once):** Find active subs with `expires_at` between now+6d and now+7d
+  that have NOT received the 7-day warning. Send DM, mark `seven_day_warned=True`.
+- **3 days out (twice, 24h apart):**
+  First warning: `expires_at` between now+2d and now+3d, `three_day_warned=False`.
+  Send DM, mark `three_day_warned_1=True`.
+  Second warning: `expires_at` between now+1d and now+2d, `three_day_warned_2=False`.
+  Send DM, mark `three_day_warned_2=True`.
+- **Expiry day:** When subscription expires → move to grace period (existing logic).
+- **Grace expired:** Kick user from all premium groups, notify (existing logic).
+
+Notification message format:
+```
+⏰ Your {plan_label} subscription expires in {N} days.
+
+Renew now to keep your premium access uninterrupted.
+```
+Button: `[ 🔄 Renew Now ]`
+
+---
+
+### F-11 · User Moderation History Tracking
+
+Create `moderation_log` collection (if not exists) with schema:
+```python
+{
+    "user_id": int,
+    "action": str,          # "warn" | "mute" | "kick" | "ban" | "unban"
+    "reason": str,
+    "admin_id": int,
+    "group_id": int | None,
+    "duration_minutes": int | None,   # for mutes
+    "expires_at": datetime | None,    # for mutes
+    "timestamp": datetime,
+}
+```
+
+Index: `(user_id, timestamp DESC)` for fast history lookups.
+
+This data feeds My Status (F-04) and `/userinfo` (F-07).
+Premium users see counts only (not reasons). Regular users see full details.
+
+---
+
+### F-12 · User Registration on /start
+
+Track ALL users who interact with the bot. On every `/start`:
+1. Upsert user record in `users` collection:
+   ```python
+   {
+       "user_id": int,
+       "username": str | None,
+       "first_name": str,
+       "last_name": str | None,
+       "join_date": datetime,       # first ever interaction
+       "last_seen": datetime,
+       "is_banned": bool,
+       "blocked_bot": bool,
+       "referral_code": str,        # unique, generated once
+       "referred_by": int | None,
+   }
+   ```
+2. If new user: generate unique `referral_code = token_hex(8)`
+3. If payload contains `ref_{user_id}`: store `referred_by`
+
+---
+
+## STEP 3 — DATABASE REQUIREMENTS
+
+Ensure ALL these collections exist with correct indexes:
+
+| Collection | Key Indexes |
+|---|---|
+| `users` | `user_id` unique, `referral_code` unique, `referred_by` |
+| `subscriptions` | `user_id` unique, `(status, expires_at)` |
+| `payments` | `user_id`, `status`, `payment_id` unique, `txid` unique sparse |
+| `payment_topics` | `user_id` unique |
+| `payment_audit` | `payment_id`, `timestamp` |
+| `payment_timeouts` | `expires_at`, `payment_id` |
+| `referrals` | `referred_user_id` unique, `(referrer_user_id, status)`, `(status, created_at)` |
+| `referral_wallets` | `user_id` unique |
+| `vault` | `content_id` unique, `(status, moderation_destination, created_at)`, `submitter_user_id`, `distribution_state` |
+| `queue` | `content_id` unique (partial: active statuses), `(status, priority DESC, execute_after)` |
+| `support_tickets` | `user_id`, `status`, `topic_id` unique |
+| `support_messages` | `ticket_id`, `(hub_message_id, direction)` unique sparse |
+| `moderation_log` | `(user_id, timestamp DESC)`, `admin_id` |
+| `consent_records` | `(user_id, record_type, is_active)` |
+| `creator_profiles` | `user_id` unique |
+| `user_topics` | `(user_id, topic_type)` unique, `topic_id` |
+| `bot_config` | `key` unique |
+| `invites` | `token` unique, `(chat_id, status)`, `intended_user_id` |
+| `moderation_audit` | `performed_by`, `content_id`, `target_user_id` |
+
+---
+
+## STEP 4 — ENVIRONMENT VARIABLES
+
+Ensure `.env.example` is complete and the app validates ALL of these at startup:
+
+```bash
+# Telegram credentials (REQUIRED)
+BOT_TOKEN=
+API_ID=
+API_HASH=
+
+# MongoDB (REQUIRED)
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB_NAME=bdgw_vaultflow
+
+# Redis (REQUIRED)
+REDIS_URL=redis://localhost:6379/0
+
+# Telegram IDs (REQUIRED)
+VERIFICATION_GROUP_ID=
+VAULT_CHANNEL_ID=
+MAIN_CHANNEL_ID=         # Channel users must join for referral to count
+NSFW_GROUP_ID=0
+PREMIUM_GROUP_ID=0
+PREMIUM_CHANNEL_ID=0     # Used for invite link generation
+LOG_CHANNEL_ID=0
+
+# Display names
+NSFW_DISPLAY_NAME=𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎
+PREMIUM_DISPLAY_NAME=𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌
+
+# Access control (REQUIRED — set OWNER_ID at minimum)
+OWNER_ID=
+ADMIN_IDS=[]
+SUDO_IDS=[]
+MODERATOR_IDS=[]
+SUPPORT_ADMIN_IDS=[]
+PAYMENT_ADMIN_IDS=[]
+SCHEDULER_ADMIN_IDS=[]
+
+# Distribution limits
+DAILY_CAP_NSFW=20
+DAILY_CAP_PREMIUM=30
+REPOST_PREVENTION_HOURS=168
+
+# Worker settings
+DISPATCHER_WORKER_COUNT=4
+WATERMARK_WORKER_COUNT=2
+WORKER_BATCH_SIZE=5
+WORKER_POLL_INTERVAL=2.0
+SCHEDULER_INTERVAL_SECONDS=60
+MAX_JOBS_PER_CYCLE=100
+
+# Queue
+QUEUE_DEADLINE_HOURS=24
+
+# Retries
+MAX_RETRY_ATTEMPTS=3
+RETRY_BASE_DELAY=5.0
+RETRY_MAX_DELAY=3600.0
+
+# Locks
+LOCK_TTL_SECONDS=300
+STALE_LOCK_THRESHOLD_SECONDS=600
+
+# Rate limits
+GLOBAL_RATE_LIMIT_PER_MIN=30
+PER_TARGET_RATE_LIMIT_PER_MIN=10
+FLOODWAIT_EXTRA_BUFFER=2
+FLOODWAIT_MAX_WAIT=86400
+
+# Media
+MEDIA_GROUP_TIMEOUT_SECONDS=3.0
+PROCESSED_MEDIA_DIR=./processed
+WATERMARK_CACHE_DIR=./watermark_cache
+FFMPEG_TIMEOUT=120.0
+
+# Watermarks
+WATERMARK_ENABLED=false
+WATERMARK_LOGO_PATH_NSFW=./assets/watermarks/nsfw_logo.png
+WATERMARK_LOGO_PATH_PREMIUM=./assets/watermarks/premium_logo.png
+WATERMARK_TEXT_NSFW=𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎
+WATERMARK_TEXT_PREMIUM=𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌
+WATERMARK_FONT_PATH=./assets/fonts/Montserrat-SemiBold.ttf
+WATERMARK_POSITION=BOTTOM_RIGHT
+WATERMARK_OPACITY=0.8
+WATERMARK_SCALE=0.15
+
+# Subscription & invites
+GRACE_PERIOD_DAYS=3
+INVITE_EXPIRY_MINUTES=30
+
+# Session name
+SESSION_NAME=vaultflow_bot
+SESSION_DIR=./sessions
+
+# Runtime
+DEBUG=false
+LOG_LEVEL=INFO
+```
+
+---
+
+## STEP 5 — SCHEDULED JOBS
+
+All must be registered in the scheduler at startup:
+
+| Job ID | Interval | Function |
+|---|---|---|
+| `distribution_cycle` | 60s | Enqueue vault content to queue |
+| `stale_lock_sweep` | 120s | Recover orphaned jobs |
+| `deadline_sweep` | 300s | Move overdue jobs to DLQ |
+| `subscription_expiry_sweep` | 300s | Move expired→grace, grace→expired |
+| `expiry_notification_7d` | 3600s | 7-day warnings |
+| `expiry_notification_3d` | 3600s | 3-day warnings |
+| `invite_link_sweep` | 300s | Detect unused expired invite links |
+| `referral_qualification_sweep` | 3600s | Qualify pending referrals |
+| `referral_stale_purge` | 86400s | Purge 48h+ pending referrals |
+| `collect_metrics` | 60s | Queue depth metrics |
+
+---
+
+## STEP 6 — PRODUCTION CHECKLIST
+
+Before marking any feature complete, verify:
+
+- [ ] No `# TODO` or `# FIXME` anywhere in output files
+- [ ] No `pass` in any handler or service (only in abstract base methods)
+- [ ] No bare `except: pass` — every exception is logged
+- [ ] Every `except Exception as e:` uses `repr(e)` or `str(e)` in the log
+- [ ] No hardcoded IDs, tokens, or magic strings — all from settings
+- [ ] All Telegram API calls have try/except with FloodWait handling
+- [ ] All delete/ban/kick calls wrapped in individual try/except
+- [ ] All DB operations are async/await with Motor
+- [ ] No blocking calls in async functions
+- [ ] No module-level `get_db()`, `get_redis()`, or service instantiation
+- [ ] All state transitions validated against allowed states
+- [ ] All admin actions check permission before executing
+- [ ] Atomic operations used for all financial state changes
+- [ ] Redis fast-path used before MongoDB for high-frequency checks
+- [ ] Every handler has entry-point logging
+- [ ] Every file output is COMPLETE — no truncation
+- [ ] `python -m py_compile {file}` passes for every file written
 
 ---
 
 ## OUTPUT FORMAT
 
-Structure your output exactly like this:
+For each file you write (whether fixing or creating):
 
----
+1. State: `FILE: path/to/file.py — [FIX B-XX] or [NEW: F-XX]`
+2. Output the COMPLETE file with zero truncation
+3. After all files: list what was fixed and what was built
 
-# DEPLOYMENT READINESS AUDIT — BDGW VaultFlow
+Do NOT:
+- Ask questions
+- Write partial implementations
+- Summarize unchanged sections
+- Stop before all items in this spec are addressed
+- Output pseudocode
 
-## VERDICT
-[ NOT DEPLOYABLE / DEPLOYABLE WITH WARNINGS / PRODUCTION READY ]
-One sentence explaining the verdict.
-
----
-
-## FATAL ISSUES  (must fix before any deployment)
-For each fatal issue:
-  FILE: path/to/file.py
-  LINE: N
-  ISSUE: exact description
-  IMPACT: what breaks at runtime
-  FIX: exact change required
-
----
-
-## WARNINGS  (should fix before stable production)
-Same format as FATAL ISSUES.
-
----
-
-## CONFIRMED WORKING
-List every subsystem that passed audit with a one-line confirmation.
-
----
-
-## DEPLOYMENT BLOCKERS SUMMARY
-Numbered list — fatal issues only, sorted by fix priority.
-Item 1 must be fixed first (blocks all testing).
-Item N is last (can be fixed after first deployment).
-
----
-
-## ESTIMATED FIX EFFORT
-Breakdown:
-  Critical fixes (boot blockers):     N items, ~X hours
-  Safety fixes (data integrity):      N items, ~X hours
-  Quality fixes (warnings/tech debt): N items, ~X hours
-  Total before safe deployment:       ~X hours
-
----
-
-Do not skip any file.
-Do not infer — read the actual code before reporting.
-Do not summarize groups of issues — report every individual violation separately.
-If a file is empty or missing, report it as a finding.
+START NOW. Read the repo, then deliver.

@@ -192,6 +192,16 @@ async def handle_private_message_support(client: Client, message: Message) -> No
 
     user_id = message.from_user.id
 
+    # B-08 FIX: Redis-backed fast check
+    from app.core.redis_client import get_redis
+    redis = get_redis()
+    if redis:
+        try:
+            if not await redis.exists(f"support_topic:{user_id}"):
+                return
+        except Exception as e:
+            logger.warning("Redis fast-path failed in handle_private_message_support", extra={"ctx_error": str(e)})
+
     try:
         topic_service = get_topic_service()
         topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)

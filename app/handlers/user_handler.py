@@ -21,11 +21,6 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Lazy getters — NO module-level instantiation ──────────────────────────────
-# FIX: _sub_service = SubscriptionService() was module-level.
-# If SubscriptionService.__init__ has any side effects, it crashes the plugin
-# loader silently — Pyrogram skips the file and registers zero handlers from it.
-# FIX: _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER was module-level.
-# settings access at import time can fail before the app is fully initialised.
 
 def _get_flood_buffer() -> int:
     return getattr(settings, "FLOODWAIT_EXTRA_BUFFER", 2)
@@ -34,7 +29,7 @@ def _get_sub_repo():
     return SubscriptionRepository()
 
 def _get_queue_repo():
-    return QueueRepository()
+    return QueueRepository(DatabaseManager.get_db())
 
 def _get_onboarding_service():
     return OnboardingService(_get_sub_repo())
@@ -64,14 +59,6 @@ async def _get_bot_username(client: Client) -> str:
 
 
 # ── Redis spam guard — fault tolerant ────────────────────────────────────────
-# FIX: Previous implementation crashed handle_start entirely if Redis was
-# unavailable. get_redis() returning None or raising caused an AttributeError
-# on the very first line of the handler. The outer try/except caught it but
-# the error reply also failed silently — result: /start appeared completely dead.
-# The UPDATE_TRACE fired (handler WAS registered) but no log output followed
-# because the crash happened before line 218's logger call.
-# Fix: Redis spam checks are now best-effort. If Redis is down, skip the check
-# and serve the user. Rate limiting is a nice-to-have, not a hard dependency.
 
 async def _check_spam_guard(key: str, ttl_seconds: int) -> bool:
     """
@@ -265,6 +252,7 @@ async def handle_start(client: Client, message: Message) -> None:
         if not message.from_user:
             return
         user_id = message.from_user.id
+        first_name = message.from_user.first_name or "Creator"
 
         # ── Anti-Spam / Cooldown (best-effort — degrades gracefully if Redis down)
         spam_key = f"onboarding:spam:{user_id}"
@@ -272,6 +260,20 @@ async def handle_start(client: Client, message: Message) -> None:
             return
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
+
+        # F-12: Auto-register user if not exists
+        sub_service = _get_sub_service()
+        existing_sub = await sub_service.get_subscription(user_id)
+        if not existing_sub:
+            from app.models.subscription import Plan
+            await sub_service.grant(
+                user_id=user_id,
+                plan=Plan.FREE,
+                duration_days=None,
+                granted_by=0,
+                notes="Auto-registered on /start"
+            )
+            logger.info("New user registered", extra={"ctx_user_id": user_id})
 
         # ── Referral Payload Handling ──
         if len(message.command) > 1:
@@ -296,13 +298,13 @@ async def handle_start(client: Client, message: Message) -> None:
                         extra={"ctx_user_id": user_id, "ctx_error": str(e)},
                     )
             elif payload == "resubscribe":
-                await handle_mystatus(client, message)
+                await handle_mystatus_direct(client, message)
                 return
 
         onboarding_service = _get_onboarding_service()
         text, keyboard = await onboarding_service.render_onboarding(
             user_id,
-            message.from_user.first_name or "Creator"
+            first_name
         )
 
         await message.reply_text(
@@ -324,6 +326,36 @@ async def handle_start(client: Client, message: Message) -> None:
                 extra={"ctx_error": str(e)},
             )
             pass
+
+async def handle_mystatus_direct(client: Client, message: Message) -> None:
+    user_id = message.from_user.id
+    sub_service = _get_sub_service()
+    sub = await sub_service.get_subscription(user_id)
+    from app.referral.repository import ReferralRepository
+    ref_repo = ReferralRepository(DatabaseManager.get_db())
+    wallet = await ref_repo.get_wallet(user_id)
+    queue_repo = _get_queue_repo()
+    user_queue = await queue_repo.get_user_queue(user_id)
+    from app.models.subscription import SubscriptionStatus
+    plan_name = sub.plan.value.upper() if sub else "FREE"
+    status_emoji = "✅" if sub and sub.status == SubscriptionStatus.ACTIVE else "⏳"
+    points = wallet.get("points_balance", 0) if wallet else 0
+    queue_text = ""
+    if user_queue:
+        queue_text = "\n\n<b>Recent Submissions:</b>\n"
+        for j in user_queue[:5]:
+            status = j.get("status", "pending").capitalize()
+            queue_text += f"• {j.get('content_id', '???')[:8]}... [{status}]\n"
+    else:
+        queue_text = "\n\n<i>No recent submissions.</i>"
+    text = (
+        f"👤 <b>Account Status</b>\n\n"
+        f"<b>Plan:</b> {plan_name} {status_emoji}\n"
+        f"<b>ID:</b> <code>{user_id}</code>\n"
+        f"<b>Points:</b> ৳{points}\n"
+        f"{queue_text}"
+    )
+    await message.reply_text(text, reply_markup=KeyboardBuilder.build_back_button(), parse_mode=ParseMode.HTML)
 
 
 # ── Menu Callbacks ────────────────────────────────────────────────────────────
@@ -363,7 +395,6 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 ref_service = ReferralService(ref_repo, client)
 
                 await show_referral_status(client, callback_query.message, ref_service)
-                await callback_query.answer()
                 return
             except Exception as e:
                 logger.exception(
@@ -400,43 +431,45 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]])
 
         elif action == "mystatus":
-            if user_id == settings.OWNER_ID:
-                role = "Owner"
-            elif user_id in settings.SUDO_IDS:
-                role = "Sudo Admin"
-            elif user_id in settings.ADMIN_IDS:
-                role = "Admin"
-            else:
-                role = None
-
-            if role:
-                text = (
-                    "📋 <b>Subscription Status</b>\n\n"
-                    f"✅ <b>Status:</b> Permanent Access\n"
-                    f"🔑 <b>Role:</b> {role}"
-                )
-            else:
-                sub_service = _get_sub_service()
-                sub = await sub_service.get_subscription(user_id)
-                text = _format_status(sub, user_id)
-
-            back_button = [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]
-            buttons = [back_button]
-
+            # F-04: Comprehensive Status Dashboard
             sub_service = _get_sub_service()
             sub = await sub_service.get_subscription(user_id)
-            if sub and (sub.is_expired or sub.is_in_grace):
-                bot_username = await _get_bot_username(client)
-                url = f"https://t.me/{bot_username}?start=resubscribe"
-                buttons.insert(0, [InlineKeyboardButton("🔄 Resubscribe", url=url)])
+            
+            from app.referral.repository import ReferralRepository
+            ref_repo = ReferralRepository(DatabaseManager.get_db())
+            wallet = await ref_repo.get_wallet(user_id)
+            
+            queue_repo = _get_queue_repo()
+            user_queue = await queue_repo.get_user_queue(user_id)
+            
+            from app.models.subscription import SubscriptionStatus
+            plan_name = sub.plan.value.upper() if sub else "FREE"
+            status_emoji = "✅" if sub and sub.status == SubscriptionStatus.ACTIVE else "⏳"
+            points = wallet.get("points_balance", 0) if wallet else 0
+            
+            queue_text = ""
+            if user_queue:
+                queue_text = "\n\n<b>Recent Submissions:</b>\n"
+                for j in user_queue[:5]:
+                    status = j.get("status", "pending").capitalize()
+                    queue_text += f"• {j.get('content_id', '???')[:8]}... [{status}]\n"
+            else:
+                queue_text = "\n\n<i>No recent submissions.</i>"
 
-            keyboard = InlineKeyboardMarkup(buttons)
+            text = (
+                f"👤 <b>Account Status</b>\n\n"
+                f"<b>Plan:</b> {plan_name} {status_emoji}\n"
+                f"<b>ID:</b> <code>{user_id}</code>\n"
+                f"<b>Points:</b> ৳{points}\n"
+                f"{queue_text}"
+            )
+            
+            keyboard = KeyboardBuilder.build_back_button()
 
         await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-        await callback_query.answer()
 
     except MessageNotModified:
-        await callback_query.answer()
+        pass
     except Exception as e:
         logger.exception(
             "menu_callback_failed",
@@ -475,54 +508,8 @@ async def handle_rules(client: Client, message: Message) -> None:
 async def handle_mystatus(client: Client, message: Message) -> None:
     if not message.from_user:
         return
-
-    user_id = message.from_user.id
-    is_group = message.chat.id != user_id
-
-    if user_id == settings.OWNER_ID:
-        role = "Owner"
-    elif user_id in settings.SUDO_IDS:
-        role = "Sudo Admin"
-    elif user_id in settings.ADMIN_IDS:
-        role = "Admin"
-    else:
-        role = None
-
-    if role:
-        text = (
-            "📋 <b>Subscription Status</b>\n\n"
-            f"✅ <b>Status:</b> Permanent Access\n"
-            f"🔑 <b>Role:</b> {role}"
-        )
-        dm_sent = await _send_private(client, user_id, text)
-        if is_group:
-            await _ack_in_group(client, message, "📩 Status sent to your DMs!", "", dm_sent)
-        return
-
-    sub_service = _get_sub_service()
-    sub = await sub_service.get_subscription(user_id)
-    text = _format_status(sub, user_id)
-
-    keyboard = None
-    if sub is None or sub.is_expired or sub.is_in_grace:
-        bot_username = await _get_bot_username(client)
-        url = f"https://t.me/{bot_username}?start=resubscribe" if bot_username else ""
-        if url:
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Resubscribe", url=url),
-            ]])
-
-    dm_sent = await _send_private(client, user_id, text, reply_markup=keyboard)
-
-    if is_group:
-        await _ack_in_group(
-            client, message,
-            ack_text="📩 Your subscription status has been sent to your DMs!",
-            blocked_text="",
-            dm_sent=dm_sent,
-        )
-
-    logger.info("/mystatus", extra={"ctx_user_id": user_id})
+    await handle_mystatus_direct(client, message)
+    logger.info("/mystatus", extra={"ctx_user_id": message.from_user.id})
 
 
 # ── /ping ─────────────────────────────────────────────────────────────────────

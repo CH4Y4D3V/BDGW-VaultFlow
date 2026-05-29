@@ -25,15 +25,7 @@ class ReferralRepository:
             name="referrer_status_lookup"
         )
         
-        # Index 3: TTL index on created_at (48hrs) WHERE status=PENDING
-        await self._referrals.create_index(
-            [("created_at", ASCENDING)],
-            name="pending_ttl",
-            expireAfterSeconds=172800,
-            partialFilterExpression={"status": ReferralStatus.PENDING}
-        )
-        
-        # Index 4: index on (status, created_at) for background job
+        # Index 3: index on (status, created_at) for background job and manual purging
         await self._referrals.create_index(
             [("status", ASCENDING), ("created_at", ASCENDING)],
             name="qualification_job_lookup"
@@ -45,6 +37,15 @@ class ReferralRepository:
             unique=True,
             name="unique_wallet_user"
         )
+
+    async def purge_stale_pending(self, hours: int = 48) -> int:
+        """Manually purge PENDING referrals older than N hours."""
+        threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
+        result = await self._referrals.delete_many({
+            "status": ReferralStatus.PENDING,
+            "created_at": {"$lt": threshold}
+        })
+        return result.deleted_count
 
     async def create_pending(self, referrer_id: int, referred_id: int) -> bool:
         doc = {

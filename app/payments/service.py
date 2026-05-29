@@ -158,17 +158,19 @@ class PaymentService:
         """
         Approval Sequence:
         1. Atomic lock
-        2. Activate subscription (TODO: call subscription_service)
-        3. Notify user with invite link
-        4. Audit log
+        2. Reload session (B-07 FIX)
+        3. Activate subscription
+        4. Notify user with invite link
+        5. Audit log
         """
-        session = await self.repository.get_session(payment_id)
-        if not session or session.status != PaymentStatus.UNDER_REVIEW:
-            return False
-
         lock_acquired = await self.repository.acquire_processing_lock(payment_id)
         if not lock_acquired:
             return False
+
+        # B-07 FIX: Reload session from DB after locking to avoid stale data
+        session = await self.repository.get_session(payment_id)
+        if not session or session.status != PaymentStatus.PROCESSING:
+             return False
 
         try:
             plan = PLANS[session.plan_id]

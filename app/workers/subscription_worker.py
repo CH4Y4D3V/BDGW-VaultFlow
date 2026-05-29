@@ -87,6 +87,48 @@ class SubscriptionWorker:
         now = datetime.now(timezone.utc)
         logger.debug("Subscription sweep running", extra={"ctx_time": now.isoformat()})
 
+        # ── Step 0: Pre-expiry notifications (7d and 3d) ─────────────────────
+        try:
+            # 7-day warning
+            seven_days_docs = await self._service.get_expiring_soon(within_hours=168)
+            for sub in seven_days_docs:
+                if not sub.metadata.get("seven_day_warned"):
+                    await self._notify(
+                        sub.user_id,
+                        f"⏰ <b>Your subscription expires in 7 days.</b>\n\n"
+                        f"Renew now to keep your premium access uninterrupted."
+                    )
+                    sub.metadata["seven_day_warned"] = True
+                    await self._service._repo.upsert(sub)
+
+            # 3-day warning (twice, 24h apart)
+            three_days_docs = await self._service.get_expiring_soon(within_hours(72))
+            for sub in three_days_docs:
+                # First 3-day warning (between 48h and 72h)
+                if not sub.metadata.get("three_day_warned_1"):
+                    await self._notify(
+                        sub.user_id,
+                        f"⏰ <b>Your subscription expires in 3 days.</b>\n\n"
+                        f"Renew now to keep your premium access uninterrupted."
+                    )
+                    sub.metadata["three_day_warned_1"] = True
+                    await self._service._repo.upsert(sub)
+                
+                # Second 3-day warning (between 24h and 48h)
+                elif not sub.metadata.get("three_day_warned_2"):
+                    # Only send if at least 24h passed since first warning
+                    # (Simplified: check if expires_at is < now + 48h)
+                    if sub.expires_at < now + timedelta(hours=48):
+                        await self._notify(
+                            sub.user_id,
+                            f"⚠️ <b>Your subscription expires in less than 48 hours!</b>\n\n"
+                            f"Renew now to avoid losing access."
+                        )
+                        sub.metadata["three_day_warned_2"] = True
+                        await self._service._repo.upsert(sub)
+        except Exception as e:
+            logger.error("Pre-expiry notification sweep failed", exc_info=e)
+
         # ── Step 1: Active → Grace ────────────────────────────────────────────
         newly_expired = await self._service.get_newly_expired()
         for sub in newly_expired:

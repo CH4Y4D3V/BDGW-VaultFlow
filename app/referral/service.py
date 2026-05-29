@@ -69,10 +69,32 @@ class ReferralService:
             if await self.check_membership(referred_id, channel_id):
                 success = await self._repo.qualify_referral(referred_id)
                 if success:
-                    await self._repo.increment_balance(referrer_id, 1)
+                    # F-06: 10 points for qualified referral
+                    await self._repo.increment_balance(referrer_id, 10)
                     qualified_count += 1
             await asyncio.sleep(0.1)
         return qualified_count
+
+    async def reward_approved_content(self, referred_id: int) -> None:
+        """F-06: Every 5 approved pieces from referred user = 1 point for referrer."""
+        ref = await self._repo.get_referral_by_referred(referred_id)
+        if not ref or ref['status'] != ReferralStatus.QUALIFIED:
+            return
+
+        referrer_id = ref['referrer_user_id']
+        
+        # We need to track approved count per referral.
+        # For now, let's use the DB to increment and check.
+        db = DatabaseManager.get_db()
+        res = await db['referrals'].find_one_and_update(
+            {"referred_user_id": referred_id},
+            {"$inc": {"approved_content_count": 1}},
+            return_document=True
+        )
+        
+        if res and res.get("approved_content_count", 0) % 5 == 0:
+            await self._repo.increment_balance(referrer_id, 1)
+            logger.info("referral_content_reward", extra={"ctx_referrer": referrer_id, "ctx_referred": referred_id})
 
     async def handle_member_left(self, user_id: int) -> None:
         ref = await self._repo.get_referral_by_referred(user_id)

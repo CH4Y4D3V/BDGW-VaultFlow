@@ -5,12 +5,11 @@ import uuid
 from pathlib import Path
 from typing import Optional
 from app.config import settings
-from app.core.models import WatermarkPosition
+from app.core.models import WatermarkPosition, MediaType
 from app.core.exceptions import (
-    FFmpegNotFoundError,
+    FFmpegError,
     FFmpegTimeoutError,
-    WatermarkProcessingError,
-    MediaFileNotFoundError,
+    WatermarkAssetError,
 )
 from app.utils.logger import get_logger
 
@@ -18,269 +17,151 @@ logger = get_logger(__name__)
 
 
 class WatermarkCache:
-    """
-    Maps (watermark_path, target_dimensions) → cached overlay path.
-    Prevents redundant FFmpeg rescale operations on the same watermark asset.
-    """
+    """In-memory cache for processed watermark assets or common frames."""
+    def __init__(self):
+        self._cache = {}
 
-    def __init__(self, cache_dir: str):
-        self._cache_dir = Path(cache_dir)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
-        self._entries: dict[str, Path] = {}
+    def get(self, key: str) -> Optional[str]:
+        return self._cache.get(key)
 
-    def _key(self, watermark_path: str, width: int, height: int) -> str:
-        raw = f"{watermark_path}:{width}x{height}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-    def get(self, watermark_path: str, width: int, height: int) -> Optional[Path]:
-        key = self._key(watermark_path, width, height)
-        cached = self._entries.get(key)
-        if cached and cached.exists():
-            return cached
-        self._entries.pop(key, None)
-        return None
-
-    def store(self, watermark_path: str, width: int, height: int, result_path: Path) -> None:
-        key = self._key(watermark_path, width, height)
-        self._entries[key] = result_path
-
-    def invalidate(self, watermark_path: str) -> None:
-        keys_to_remove = [
-            k for k, _ in self._entries.items() if watermark_path in k
-        ]
-        for k in keys_to_remove:
-            self._entries.pop(k, None)
-
-    def clear(self) -> None:
-        self._entries.clear()
-        shutil.rmtree(self._cache_dir, ignore_errors=True)
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
+    def set(self, key: str, path: str):
+        self._cache[key] = path
 
 
 class FFmpegProcessor:
     """
-    Async FFmpeg watermark engine.
-    Never blocks the event loop — all FFmpeg calls use asyncio.create_subprocess_exec.
+    Handles FFmpeg-based media processing for watermarking.
+    F-08 Dual System:
+    - Photos: random corner PNG logo (NSFW or Premium)
+    - Videos: random position dynamic text
     """
 
     def __init__(self):
-        self._ffmpeg_path: Optional[str] = None
-        self._cache = WatermarkCache(settings.WATERMARK_CACHE_DIR)
-        self._output_dir = Path(settings.PROCESSED_MEDIA_DIR)
+        self._cache = WatermarkCache()
+        self._temp_dir = Path(settings.MEDIA_TEMP_DIR)
+        self._output_dir = Path(settings.WATERMARK_OUTPUT_DIR)
+        
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-    async def ensure_ffmpeg(self) -> str:
-        if self._ffmpeg_path:
-            return self._ffmpeg_path
-
-        path = shutil.which("ffmpeg")
-        if not path:
-            raise FFmpegNotFoundError(
-                "ffmpeg not found in PATH. Install ffmpeg to enable watermarking."
-            )
-        self._ffmpeg_path = path
-        return path
-
-    async def apply_image_watermark(
+    async def process(
         self,
         input_path: str,
-        watermark_path: str,
-        output_path: Optional[str] = None,
-        position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT,
-        opacity: Optional[float] = None,
-        scale: Optional[float] = None,
+        output_path: str,
+        media_type: MediaType,
+        config: dict,
     ) -> str:
-        """Apply PNG watermark to an image using FFmpeg."""
-        await self.ensure_ffmpeg()
+        """
+        Main entry point for watermarking a single file.
+        F-08 Dual System Implementation.
+        """
+        if media_type == MediaType.PHOTO:
+            return await self._process_photo(input_path, output_path, config)
+        elif media_type == MediaType.VIDEO:
+            return await self._process_video(input_path, output_path, config)
+        else:
+            # Fallback for non-visual types
+            shutil.copy(input_path, output_path)
+            return output_path
 
-        if not Path(input_path).exists():
-            raise MediaFileNotFoundError(f"Input file not found: {input_path}")
-        if not Path(watermark_path).exists():
-            raise MediaFileNotFoundError(f"Watermark file not found: {watermark_path}")
+    async def _process_photo(self, input_path: str, output_path: str, config: dict) -> str:
+        import random
+        from PIL import Image
 
-        op = opacity if opacity is not None else settings.WATERMARK_OPACITY
-        sc = scale if scale is not None else settings.WATERMARK_SCALE
-        overlay = self._build_overlay_expression(position)
-
-        out_path = output_path or self._generate_output_path(input_path, "jpg")
-
-        # scale watermark relative to input, then overlay with alpha
-        filter_complex = (
-            f"[1:v]scale=iw*{sc}:-1,format=rgba,colorchannelmixer=aa={op}[wm];"
-            f"[0:v][wm]{overlay}[out]"
-        )
-
-        cmd = [
-            self._ffmpeg_path,
-            "-y",
-            "-i", input_path,
-            "-i", watermark_path,
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
-            "-q:v", "2",
-            out_path,
-        ]
+        logo_path = config.get("watermark_image_path")
+        if not logo_path or not Path(logo_path).exists():
+            shutil.copy(input_path, output_path)
+            return output_path
 
         try:
-            await self._run_ffmpeg(cmd, operation="image_watermark", input_path=input_path)
-            logger.info(
-                "Image watermark applied",
-                extra={"ctx_input": input_path, "ctx_output": out_path},
-            )
-            return out_path
-        except Exception:
-            if Path(out_path).exists():
-                try:
-                    Path(out_path).unlink()
-                except OSError:
-                    pass
-            raise
+            # Wrap in run_in_executor if CPU usage becomes an issue
+            with Image.open(input_path) as base, Image.open(logo_path) as logo:
+                base = base.convert("RGBA")
+                logo = logo.convert("RGBA")
+                
+                # Random scale 10-20% of base width
+                scale = random.uniform(0.1, 0.2)
+                logo_w = int(base.width * scale)
+                logo_h = int(logo.height * (logo_w / logo.width))
+                logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+                
+                # Random corner
+                margin = 20
+                positions = [
+                    (margin, margin), # Top Left
+                    (base.width - logo_w - margin, margin), # Top Right
+                    (margin, base.height - logo_h - margin), # Bottom Left
+                    (base.width - logo_w - margin, base.height - logo_h - margin) # Bottom Right
+                ]
+                pos = random.choice(positions)
+                
+                # Apply logo
+                base.alpha_composite(logo, dest=pos)
+                
+                # Save as high quality JPEG
+                base.convert("RGB").save(output_path, "JPEG", quality=95)
+                
+            return output_path
+        except Exception as e:
+            logger.error("Photo watermarking failed", extra={"ctx_error": str(e)})
+            shutil.copy(input_path, output_path)
+            return output_path
 
-    async def apply_video_watermark(
-        self,
-        input_path: str,
-        watermark_path: str,
-        output_path: Optional[str] = None,
-        position: WatermarkPosition = WatermarkPosition.BOTTOM_RIGHT,
-        opacity: Optional[float] = None,
-        scale: Optional[float] = None,
-    ) -> str:
-        """Apply PNG watermark to a video using FFmpeg, preserving audio."""
-        await self.ensure_ffmpeg()
-
-        if not Path(input_path).exists():
-            raise MediaFileNotFoundError(f"Input file not found: {input_path}")
-        if not Path(watermark_path).exists():
-            raise MediaFileNotFoundError(f"Watermark file not found: {watermark_path}")
-
-        op = opacity if opacity is not None else settings.WATERMARK_OPACITY
-        sc = scale if scale is not None else settings.WATERMARK_SCALE
-        overlay = self._build_overlay_expression(position)
-
-        out_path = output_path or self._generate_output_path(input_path, "mp4")
-
-        filter_complex = (
-            f"[1:v]scale=iw*{sc}:-1,format=rgba,colorchannelmixer=aa={op}[wm];"
-            f"[0:v][wm]{overlay}[out]"
+    async def _process_video(self, input_path: str, output_path: str, config: dict) -> str:
+        import random
+        text = config.get("watermark_text", "BDGW")
+        
+        # F-08: Random position text watermark
+        # Choose random percentage for x and y
+        x_pct = random.randint(5, 85)
+        y_pct = random.randint(5, 85)
+        
+        # Build drawtext filter
+        # fontsize is 5% of height
+        drawtext = (
+            f"drawtext=text='{text}':"
+            f"x=(w-text_w)*{x_pct}/100:y=(h-text_h)*{y_pct}/100:"
+            f"fontsize=h/20:fontcolor=white@0.5:shadowcolor=black:shadowx=2:shadowy=2"
         )
 
         cmd = [
-            self._ffmpeg_path,
-            "-y",
-            "-i", input_path,
-            "-i", watermark_path,
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", drawtext,
             "-c:a", "copy",
-            "-movflags", "+faststart",
-            out_path,
+            "-preset", "ultrafast",
+            output_path
         ]
 
-        try:
-            await self._run_ffmpeg(cmd, operation="video_watermark", input_path=input_path)
-            logger.info(
-                "Video watermark applied",
-                extra={"ctx_input": input_path, "ctx_output": out_path},
-            )
-            return out_path
-        except Exception:
-            if Path(out_path).exists():
-                try:
-                    Path(out_path).unlink()
-                except OSError:
-                    pass
-            raise
+        logger.debug("Executing FFmpeg for video watermark", extra={"ctx_cmd": " ".join(cmd)})
 
-    async def get_media_dimensions(self, file_path: str) -> tuple[int, int]:
-        """Returns (width, height) using ffprobe."""
-        ffprobe = shutil.which("ffprobe")
-        if not ffprobe:
-            raise FFmpegNotFoundError("ffprobe not found")
-
-        cmd = [
-            ffprobe,
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0",
-            file_path,
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(),
-                timeout=10.0,
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise FFmpegTimeoutError(f"ffprobe timed out for {file_path}")
-        except asyncio.CancelledError:
-            proc.kill()
-            await proc.wait()
-            raise
-        line = stdout.decode().strip()
-        parts = line.split(",")
-        if len(parts) != 2:
-            raise WatermarkProcessingError(f"Could not parse dimensions from: {line}")
-        return int(parts[0]), int(parts[1])
-
-    async def _run_ffmpeg(self, cmd: list[str], operation: str, input_path: str) -> None:
-        try:
-            proc = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            
+            # 5 minute timeout for video processing
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
 
-            try:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(),
-                    timeout=settings.FFMPEG_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                raise FFmpegTimeoutError(
-                    f"FFmpeg {operation} timed out after {settings.FFMPEG_TIMEOUT}s: {input_path}"
-                )
-            except asyncio.CancelledError:
-                proc.kill()
-                await proc.wait()
-                raise
+            if process.returncode != 0:
+                error_msg = stderr.decode()
+                logger.error("Video watermarking failed", extra={"ctx_stderr": error_msg})
+                shutil.copy(input_path, output_path)
+                return output_path
 
-            if proc.returncode != 0:
-                error_msg = stderr.decode(errors="replace").strip()
-                raise WatermarkProcessingError(
-                    f"FFmpeg {operation} failed (exit {proc.returncode}): {error_msg[-500:]}"
-                )
-
-        except (FFmpegTimeoutError, WatermarkProcessingError):
-            raise
+            return output_path
+        except asyncio.TimeoutError:
+            logger.error("FFmpeg process timed out")
+            shutil.copy(input_path, output_path)
+            return output_path
         except Exception as e:
-            raise WatermarkProcessingError(f"FFmpeg subprocess error: {e}") from e
+            logger.error("FFmpeg execution error", extra={"ctx_error": str(e)})
+            shutil.copy(input_path, output_path)
+            return output_path
 
-    @staticmethod
-    def _build_overlay_expression(position: WatermarkPosition) -> str:
-        margin = 10
-        positions = {
-            WatermarkPosition.TOP_LEFT: f"overlay={margin}:{margin}",
-            WatermarkPosition.TOP_RIGHT: f"overlay=W-w-{margin}:{margin}",
-            WatermarkPosition.BOTTOM_LEFT: f"overlay={margin}:H-h-{margin}",
-            WatermarkPosition.BOTTOM_RIGHT: f"overlay=W-w-{margin}:H-h-{margin}",
-            WatermarkPosition.CENTER: "overlay=(W-w)/2:(H-h)/2",
-        }
-        return positions.get(position, f"overlay=W-w-{margin}:H-h-{margin}")
-
-    def _generate_output_path(self, input_path: str, ext: str) -> str:
+    def _generate_output_path(self, input_path: str) -> str:
+        ext = Path(input_path).suffix.lower().lstrip(".") or "jpg"
         stem = Path(input_path).stem
         unique = uuid.uuid4().hex[:8]
         filename = f"{stem}_wm_{unique}.{ext}"
