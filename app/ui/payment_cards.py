@@ -61,8 +61,7 @@ def build_payment_instruction_card(session: Any, plan: Dict[str, Any]) -> tuple[
     
     buttons = [
         [
-            InlineKeyboardButton("📱 bKash", callback_data=f"pay:method:bkash:{session.id}"),
-            InlineKeyboardButton("📱 Nagad", callback_data=f"pay:method:nagad:{session.id}")
+            InlineKeyboardButton("📱 bKash", callback_data=f"pay:method:bkash:{session.id}")
         ],
         [InlineKeyboardButton("₿ Crypto (USDT)", callback_data=f"pay:method:crypto:{session.id}")],
         [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session.id}")]
