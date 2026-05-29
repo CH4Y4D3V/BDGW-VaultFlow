@@ -30,11 +30,12 @@ def build_admin_payment_review_card(
     )
     
     # 2. Subscription Information
+    price_val = plan.get('price', '0')
     sub_info = (
         "💎 <b>SUBSCRIPTION</b>\n"
         f"┣ {format_info_block('Plan', plan['label'])}\n"
         f"┣ {format_info_block('Duration', plan.get('duration', '30 days'))}\n"
-        f"┗ {format_info_block('Price', f'৳{plan.get(\"price\", \"0\")}')}\n"
+        f"┗ {format_info_block('Price', f'৳{price_val}')}\n"
     )
     
     # 3. Payment Information
