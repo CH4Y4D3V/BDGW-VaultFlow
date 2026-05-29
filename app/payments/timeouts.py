@@ -79,31 +79,44 @@ class PaymentTimeoutMonitor:
                 logger.warning("Failed to send warning", extra={"ctx_user_id": doc["user_id"], "ctx_flag": flag, "ctx_error": str(e)})
 
     async def expire_session(self, client: Client, payment_id: str) -> bool:
-        session = await self.repository.get_session(payment_id)
-        if not session or session.status in {
-            PaymentStatus.APPROVED,
-            PaymentStatus.CANCELLED,
-            PaymentStatus.EXPIRED,
-            PaymentStatus.REJECTED
-        }:
-            return False
-
-        session.status = PaymentStatus.EXPIRED
-        session.updated_at = datetime.now(timezone.utc)
-        await self.repository.save_session(session)
-        await self.repository.clear_timeout(payment_id)
-        await self.repository.log_event(payment_id, "payment_expired", {})
-
+        user_id = "unknown"
         try:
-            await client.send_message(
-                session.user_id,
-                "❌ <b>Your payment session has expired.</b>\n\nPlease start again if you still wish to upgrade.",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception as e:
-            logger.debug(
-                "payment_timeout_notify_failed",
-                extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
-            )
+            session = await self.repository.get_session(payment_id)
+            if not session or session.status in {
+                PaymentStatus.APPROVED,
+                PaymentStatus.CANCELLED,
+                PaymentStatus.EXPIRED,
+                PaymentStatus.REJECTED
+            }:
+                return False
 
-        return True
+            user_id = session.user_id
+            session.status = PaymentStatus.EXPIRED
+            session.updated_at = datetime.now(timezone.utc)
+            await self.repository.save_session(session)
+            await self.repository.clear_timeout(payment_id)
+            await self.repository.log_event(payment_id, "payment_expired", {})
+
+            try:
+                await client.send_message(
+                    session.user_id,
+                    "❌ <b>Your payment session has expired.</b>\n\nPlease start again if you still wish to upgrade.",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.debug(
+                    "payment_timeout_notify_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
+                )
+
+            return True
+        except Exception as e:
+            logger.exception(
+                "payment_session_expiration_failed",
+                extra={
+                    "payment_id": payment_id,
+                    "user_id": user_id,
+                    "ctx_error": str(e)
+                }
+            )
+            return False

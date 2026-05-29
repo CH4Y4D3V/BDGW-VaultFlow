@@ -106,6 +106,15 @@ class TopicManager:
                 upsert=True,
             )
             
+            logger.info(
+                "user_topic_persisted",
+                extra={
+                    "ctx_user_id": user_id,
+                    "ctx_topic_type": topic_type,
+                    "ctx_topic_id": topic_id
+                }
+            )
+            
             self._local_cache[cache_key] = topic_id
             return topic_id
 
@@ -181,16 +190,46 @@ class TopicManager:
         import random
         from pyrogram.raw.types import UpdateNewForumTopic, Updates
 
+        group_id = settings.VERIFICATION_GROUP_ID
+        logger.info(
+            "attempting_forum_topic_creation",
+            extra={
+                "ctx_group_id": group_id,
+                "ctx_title": title,
+            }
+        )
+
+        # Pre-flight check: Verify group type and forum status
+        try:
+            chat = await client.get_chat(group_id)
+            is_forum = getattr(chat, "is_forum", False)
+            me = await chat.get_member("me")
+            can_manage = me.privileges.can_manage_topics if me.privileges else False
+            
+            logger.info(
+                "forum_preflight_check",
+                extra={
+                    "ctx_group_id": group_id,
+                    "ctx_chat_type": str(chat.type),
+                    "ctx_is_forum": is_forum,
+                    "ctx_can_manage_topics": can_manage,
+                    "ctx_bot_id": me.user.id
+                }
+            )
+            
+            if not is_forum:
+                logger.error("verification_group_is_not_a_forum", extra={"ctx_group_id": group_id})
+            if not can_manage:
+                logger.error("bot_lacks_manage_topics_permission", extra={"ctx_group_id": group_id})
+
+        except Exception as pre_err:
+            logger.warning("forum_preflight_failed", extra={"ctx_error": str(pre_err)})
+
         delays = [2, 4, 8]
         for attempt, delay in enumerate(delays):
             try:
-                peer = await client.resolve_peer(settings.VERIFICATION_GROUP_ID)
+                peer = await client.resolve_peer(group_id)
                 
-                # Verify it's a forum (optional but recommended)
-                # chat = await client.get_chat(settings.VERIFICATION_GROUP_ID)
-                # if not getattr(chat, "is_forum", False):
-                #     raise RuntimeError(f"Group {settings.VERIFICATION_GROUP_ID} is not a Forum.")
-
                 result = await client.invoke(
                     raw.functions.channels.CreateForumTopic(
                         channel=peer,
@@ -221,10 +260,14 @@ class TopicManager:
                             break
 
                 if topic_id is None:
+                    logger.error(
+                        "topic_id_extraction_failed",
+                        extra={"ctx_result": str(result)}
+                    )
                     raise RuntimeError("Failed to extract topic_id from CreateForumTopic response")
                 
                 logger.info(
-                    "Forum topic created",
+                    "forum_topic_created",
                     extra={"ctx_title": title, "ctx_topic_id": topic_id},
                 )
                 return topic_id
@@ -237,45 +280,32 @@ class TopicManager:
                 )
                 await asyncio.sleep(wait_time)
 
-            except Forbidden as e:
-                logger.error(
-                    "forum_topic_creation_forbidden",
-                    extra={
-                        "ctx_title": title,
-                        "ctx_error": repr(e),
-                        "ctx_group_id": settings.VERIFICATION_GROUP_ID,
-                        "ctx_note": "Bot may lack 'manage_topics' permission or forum topics are disabled in group."
-                    },
-                    exc_info=True
-                )
-                raise
-
             except RPCError as e:
-                logger.error(
+                logger.exception(
                     "forum_topic_creation_rpc_error",
                     extra={
                         "ctx_title": title, 
-                        "ctx_error_type": type(e).__name__,
+                        "ctx_error_code": e.CODE,
+                        "ctx_error_name": e.NAME,
                         "ctx_error_message": str(e),
+                        "ctx_group_id": group_id,
                         "ctx_attempt": attempt + 1
-                    },
-                    exc_info=True
+                    }
                 )
                 if attempt == len(delays) - 1:
                     break
                 await asyncio.sleep(delay)
 
             except Exception as e:
-                logger.error(
+                logger.exception(
                     "forum_topic_creation_unexpected_error",
                     extra={
                         "ctx_title": title,
                         "ctx_error_type": type(e).__name__,
                         "ctx_error_message": str(e),
                         "ctx_attempt": attempt + 1,
-                        "ctx_group_id": settings.VERIFICATION_GROUP_ID,
-                    },
-                    exc_info=True,
+                        "ctx_group_id": group_id,
+                    }
                 )
                 if attempt == len(delays) - 1:
                     break

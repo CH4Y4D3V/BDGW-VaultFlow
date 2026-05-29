@@ -260,6 +260,14 @@ async def archive_to_vault(
 
         copied_msg = None
         if settings.VAULT_CHANNEL_ID:
+            logger.info(
+                "copying_to_vault",
+                extra={
+                    "ctx_vault_chat_id": settings.VAULT_CHANNEL_ID,
+                    "ctx_from_chat_id": msg.chat.id,
+                    "ctx_message_id": msg.id
+                }
+            )
             for attempt in range(_MAX_RETRIES):
                 try:
                     copied_msg = await client.copy_message(
@@ -267,12 +275,28 @@ async def archive_to_vault(
                         from_chat_id=msg.chat.id,
                         message_id=msg.id,
                     )
+                    logger.info(
+                        "vault_copy_success",
+                        extra={
+                            "ctx_vault_msg_id": copied_msg.id,
+                            "ctx_attempt": attempt + 1
+                        }
+                    )
                     break
                 except FloodWait as e:
                     await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
                 except RPCError as e:
-                    logger.error("Vault copy failed", extra={"ctx_error": str(e), "ctx_attempt": attempt + 1})
+                    logger.error(
+                        "vault_copy_failed_rpc",
+                        extra={
+                            "ctx_error": str(e),
+                            "ctx_error_type": type(e).__name__,
+                            "ctx_attempt": attempt + 1
+                        }
+                    )
                     await asyncio.sleep(2 ** attempt)
+        else:
+            logger.error("vault_channel_id_not_configured")
 
         vault_msg_id = copied_msg.id if copied_msg else 0
         vault_message_ids.append(vault_msg_id)

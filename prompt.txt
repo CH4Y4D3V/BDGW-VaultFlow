@@ -1,478 +1,267 @@
-You are a senior Python backend architect, Telegram infrastructure engineer, MongoDB engineer, Pyrogram expert, distributed systems engineer, and production incident responder.
+The audit is not complete.
 
-Your task is to completely audit, debug, and repair the BDGW VaultFlow system.
+Current runtime logs still show production failures.
 
-DO NOT make assumptions.
+VERIFIED FAILURES
 
-DO NOT provide theoretical explanations.
+1.
 
-DO NOT stop after identifying issues.
+Support workflow still fails.
 
-You must trace execution, verify root causes, and implement production-ready fixes.
+Logs:
 
-==================================================
-CURRENT VERIFIED FAILURES
-=========================
+HANDLER: handle_support_menu entered
 
-Support System:
+forum_topic_creation_failed
 
-* Support button opens
-* Support workflow fails
-* forum_topic_creation_unexpected_error appears repeatedly
+The callback executes correctly.
 
-Payment System:
-
-* Payment details are not forwarded
-* Admin does not receive payment proofs
-* User-specific payment topics are not created
-* Failed to get payments topic appears repeatedly
-
-Submission System:
-
-* User content submissions are not reaching moderation
-* Verification group receives nothing
-* Moderation workflow cannot begin
-
-Vault System:
-
-* Vault remains empty
-
-Distribution System:
-
-* Scheduler runs
-* Distribution cycles run
-* Provider runs
-
-But:
-
-Vault is empty for destination
-
-fetch_distribution_content:
-returning no eligible content
-
-Referral System:
-
-* Referral status unavailable
-
-Payment Monitor:
-
-* PaymentTimeoutMonitor.check_timeouts crashes every minute
-
-Redis:
-
-* Redis fast-path failed in handle_payment_inputs
-
-==================================================
-PRIMARY OBJECTIVE
-=================
-
-Trace every workflow completely.
-
-Do not fix symptoms.
-
-Find exact root causes.
-
-==================================================
-PHASE 1
-SUPPORT SYSTEM AUDIT
-====================
-
-Trace:
-
-Support Button
-→ Callback Handler
-→ Support Service
-→ Topic Creation
-→ Topic Lookup
-→ Topic Reuse
-→ User Thread
-→ Admin Notification
+Failure occurs during forum topic creation.
 
 Investigate:
 
-* support handlers
-* support services
-* topic creation code
-* forum API usage
-* group configuration
+app/services/topic_manager.py
 
-Verify:
+Specifically:
 
-* target group exists
-* group is forum-enabled
-* bot permissions
-* topic caching
-* topic lookup logic
+_create_telegram_topic()
 
-Find exact reason for:
-
-forum_topic_creation_unexpected_error
-
-Replace generic logging with:
+Add logger.exception() and expose:
 
 * exception type
 * exception message
-* stack trace
-* user id
 * group id
-* topic id
+* topic title
+* bot permissions
 
-==================================================
-PHASE 2
-PAYMENT SYSTEM AUDIT
-====================
+Do not log only:
 
-Trace:
+forum_topic_creation_failed
 
-Premium Button
-→ Payment Menu
-→ Payment Details Display
-→ Admin Payment Method Retrieval
-→ User Payment Proof Upload
-→ Payment Topic Creation
-→ Admin Notification
-→ Payment Approval
+Log the actual Telegram RPC error.
 
-Verify:
+2.
 
-* payment topic creation
-* payment topic lookup
-* payment state machine
-* payment proof forwarding
-* payment approval flow
+PaymentTimeoutMonitor still fails.
+
+Logs:
+
+Failed to expire session
+
+repeated continuously.
 
 Investigate:
 
-Failed to get payments topic
+app/payments/timeouts.py
+
+Find exact exception.
+
+Current logs still hide root cause.
+
+Replace with:
+
+logger.exception(
+"payment_session_expiration_failed",
+extra={
+"payment_id": payment_id,
+"user_id": user_id
+}
+)
+
+3.
+
+Vault remains empty.
+
+Logs:
+
+vault_empty_for_destination
+
+no_eligible_content_this_cycle
+
+Distribution is healthy.
+
+Vault population is not.
 
 Verify:
 
-* payment group id
-* forum permissions
-* topic naming
-* topic cache
-* topic recovery
-
-Implement:
-
-* topic reuse
-* topic recovery
-* restart recovery
-* retry logic
-
-==================================================
-PHASE 3
-SUBMISSION SYSTEM AUDIT
-=======================
-
-Trace:
-
-User
-→ Submit Content
-→ Submission Handler
-→ Verification Group
-→ Verification Card
-→ Moderation Callback
-→ Approve
-→ Queue
-→ Vault
-
-Verify every step.
-
-Find exact failure.
-
-Add logs:
-
 submission_received
-
-submission_forward_started
 
 submission_forward_completed
 
 verification_card_created
 
-moderation_callback_received
-
 moderation_approved
-
-vault_insert_started
 
 vault_insert_completed
 
-==================================================
-PHASE 4
-FORUM TOPIC INFRASTRUCTURE AUDIT
-================================
+Provide runtime evidence.
 
-Search repository for:
+4.
 
-create_forum_topic
+Run direct forum diagnostics.
 
-get_forum_topic
+Before creating a topic:
 
-forum_topic
+Log:
 
-message_thread_id
+verification_group_id
 
-topic_id
+support_group_id
 
-Investigate:
-
-* support topics
-* payment topics
-* user topics
-
-Determine whether:
-
-* forum APIs changed
-* topic IDs are invalid
-* cached topics are stale
-* permissions are missing
-* exceptions are swallowed
-
-Create a unified TopicManager.
-
-Requirements:
-
-* create topic
-* lookup topic
-* recover topic
-* cache topic
-* restart safe
-* retry safe
-
-==================================================
-PHASE 5
-PAYMENT TIMEOUT MONITOR
-=======================
-
-Investigate:
-
-PaymentTimeoutMonitor.check_timeouts
-
-Current logs show:
-
-Job "PaymentTimeoutMonitor.check_timeouts"
-raised an exception
-
-Find exact exception.
-
-Current code is hiding the real error.
-
-Replace logging with:
-
-logger.exception()
-
-Include:
-
-payment id
-
-user id
-
-state
-
-timeout
-
-exception
-
-stack trace
-
-Fix the root cause.
-
-==================================================
-PHASE 6
-REDIS AUDIT
-===========
-
-Investigate:
-
-Redis fast-path failed in handle_payment_inputs
-
-Trace:
-
-payment input
-→ redis lookup
-→ state retrieval
-→ fallback path
+payment_group_id
 
 Verify:
 
-* redis connectivity
-* serialization
-* deserialization
-* key expiry
-* reconnect logic
+* group exists
+* group is supergroup
+* forum mode enabled
+* bot has Manage Topics permission
+
+If topic creation fails:
+
+Log exact Telegram exception.
+
+Current logs are insufficient.
+
+OUTPUT REQUIRED
+
+1. Full stack trace for forum_topic_creation_failed.
+2. Full stack trace for Failed to expire session.
+3. Runtime proof of vault_insert_completed.
+4. Runtime proof of payment_topic_created.
+5. Runtime proof of support topic creation.
+
+
+current logs:
+
+2026-05-29T14:21:50.271587914Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:50.271593519Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:50.271597358Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:50.271605848Z [inf]  UPDATE_TRACE: message
+2026-05-29T14:21:54.108989625Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:55.904494438Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:55.904502451Z [inf]  Distribution cycle started
+2026-05-29T14:21:55.904511057Z [inf]  System Heartbeat
+2026-05-29T14:21:55.904520434Z [inf]  channel_provider_query_result
+2026-05-29T14:21:55.906211453Z [inf]  vault_empty_for_destination
+2026-05-29T14:21:55.906225349Z [inf]  Metrics collected
+2026-05-29T14:21:55.906240158Z [err]  Failed to expire session
+2026-05-29T14:21:55.909229479Z [inf]  vault_empty_for_destination
+2026-05-29T14:21:55.909245223Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:21:55.909255707Z [err]  Failed to expire session
+2026-05-29T14:21:55.909358048Z [inf]  channel_provider_query_result
+2026-05-29T14:21:57.082999906Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:21:58.729546657Z [inf]  1:M 29 May 2026 14:21:49.008 * 1 changes in 60 seconds. Saving...
+2026-05-29T14:21:58.729554862Z [inf]  1:M 29 May 2026 14:21:49.008 * Background saving started by pid 123
+2026-05-29T14:21:58.729561370Z [inf]  123:C 29 May 2026 14:21:49.016 * DB saved on disk
+2026-05-29T14:21:58.729566502Z [inf]  123:C 29 May 2026 14:21:49.016 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB
+2026-05-29T14:21:58.729571130Z [inf]  1:M 29 May 2026 14:21:49.109 * Background saving terminated with success
+2026-05-29T14:22:00.080506844Z [inf]  HANDLER: handle_support_menu entered
+2026-05-29T14:22:00.080518638Z [err]  forum_topic_creation_failed
+2026-05-29T14:22:00.083858068Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:22:19.489494106Z [inf]  UPDATE_TRACE: callback_query
+2026-05-29T14:22:58.742599003Z [inf]  1:M 29 May 2026 14:22:50.096 * 1 changes in 60 seconds. Saving...
+2026-05-29T14:22:58.742605382Z [inf]  1:M 29 May 2026 14:22:50.097 * Background saving started by pid 124
+2026-05-29T14:22:58.742609270Z [inf]  124:C 29 May 2026 14:22:50.106 * DB saved on disk
+2026-05-29T14:22:58.742613684Z [inf]  124:C 29 May 2026 14:22:50.106 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB
+2026-05-29T14:22:58.742617553Z [inf]  1:M 29 May 2026 14:22:50.197 * Background saving terminated with success
+2026-05-29T14:22:59.415339553Z [inf]  System Heartbeat
+2026-05-29T14:22:59.415346180Z [inf]  Metrics collected
+2026-05-29T14:22:59.415359723Z [err]  Failed to expire session
+2026-05-29T14:23:00.714898733Z [err]  Failed to expire session
+2026-05-29T14:23:30.470069185Z [inf]  UPDATE_TRACE: message
+2026-05-29T14:24:00.881008690Z [inf]  Distribution cycle started
+2026-05-29T14:24:00.881132629Z [inf]  System Heartbeat
+2026-05-29T14:24:00.881147646Z [inf]  channel_provider_query_result
+2026-05-29T14:24:00.881155203Z [inf]  vault_empty_for_destination
+2026-05-29T14:24:01.535192015Z [inf]  Metrics collected
+2026-05-29T14:24:01.535197750Z [err]  Failed to expire session
+2026-05-29T14:24:01.535202909Z [err]  Failed to expire session
+2026-05-29T14:24:01.536756882Z [inf]  channel_provider_query_result
+2026-05-29T14:24:01.536764817Z [inf]  vault_empty_for_destination
+2026-05-29T14:24:01.536772147Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:25:00.980045138Z [inf]  System Heartbeat
+2026-05-29T14:25:00.980054339Z [inf]  Metrics collected
+2026-05-29T14:25:00.980064052Z [err]  Failed to expire session
+2026-05-29T14:25:00.982670913Z [err]  Failed to expire session
+2026-05-29T14:26:01.181831659Z [inf]  System Heartbeat
+2026-05-29T14:26:01.181842722Z [inf]  Metrics collected
+2026-05-29T14:26:01.181851312Z [inf]  channel_provider_query_result
+2026-05-29T14:26:01.181878522Z [inf]  Distribution cycle started
+2026-05-29T14:26:01.183320272Z [inf]  vault_empty_for_destination
+2026-05-29T14:26:01.183325503Z [err]  Failed to expire session
+2026-05-29T14:26:01.183330074Z [err]  Failed to expire session
+2026-05-29T14:26:01.186494139Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:26:01.186578122Z [inf]  channel_provider_query_result
+2026-05-29T14:26:01.186583672Z [inf]  vault_empty_for_destination
+2026-05-29T14:27:01.595904830Z [inf]  System Heartbeat
+2026-05-29T14:27:01.595909799Z [inf]  Metrics collected
+2026-05-29T14:27:01.595915967Z [err]  Failed to expire session
+2026-05-29T14:27:02.726944424Z [err]  Failed to expire session
+2026-05-29T14:28:02.832705724Z [inf]  channel_provider_query_result
+2026-05-29T14:28:02.832711950Z [inf]  vault_empty_for_destination
+2026-05-29T14:28:02.832741718Z [inf]  Distribution cycle started
+2026-05-29T14:28:02.832746814Z [inf]  System Heartbeat
+2026-05-29T14:28:02.833614875Z [inf]  Metrics collected
+2026-05-29T14:28:02.833655822Z [err]  Failed to expire session
+2026-05-29T14:28:02.833662343Z [err]  Failed to expire session
+2026-05-29T14:28:02.836964004Z [inf]  channel_provider_query_result
+2026-05-29T14:28:02.836970867Z [inf]  vault_empty_for_destination
+2026-05-29T14:28:02.836977306Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:29:02.700454188Z [err]  Failed to expire session
+2026-05-29T14:29:02.700561219Z [inf]  Metrics collected
+2026-05-29T14:29:02.700567552Z [inf]  System Heartbeat
+2026-05-29T14:29:02.700574393Z [err]  Failed to expire session
+2026-05-29T14:30:03.054580435Z [inf]  Distribution cycle started
+2026-05-29T14:30:03.054587576Z [inf]  System Heartbeat
+2026-05-29T14:30:03.054595321Z [inf]  Metrics collected
+2026-05-29T14:30:03.054643706Z [inf]  channel_provider_query_result
+2026-05-29T14:30:03.057948904Z [err]  Failed to expire session
+2026-05-29T14:30:03.057957017Z [err]  Failed to expire session
+2026-05-29T14:30:03.058053669Z [inf]  vault_empty_for_destination
+2026-05-29T14:30:03.060534938Z [inf]  channel_provider_query_result
+2026-05-29T14:30:03.060548062Z [inf]  vault_empty_for_destination
+2026-05-29T14:30:03.060562034Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:31:04.308902642Z [inf]  Metrics collected
+2026-05-29T14:31:04.308908913Z [inf]  System Heartbeat
+2026-05-29T14:31:04.308916882Z [err]  Failed to expire session
+2026-05-29T14:31:05.720332094Z [err]  Failed to expire session
+2026-05-29T14:31:56.467691785Z [inf]  vault_empty_for_destination
+2026-05-29T14:31:56.467704696Z [inf]  System Heartbeat
+2026-05-29T14:31:56.467834081Z [inf]  Distribution cycle started
+2026-05-29T14:31:56.467841893Z [inf]  Metrics collected
+2026-05-29T14:31:56.467847212Z [inf]  channel_provider_query_result
+2026-05-29T14:31:56.470512919Z [err]  Failed to expire session
+2026-05-29T14:31:56.470526674Z [err]  Failed to expire session
+2026-05-29T14:31:56.473335015Z [inf]  channel_provider_query_result
+2026-05-29T14:31:56.473340972Z [inf]  vault_empty_for_destination
+2026-05-29T14:31:56.473346119Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:32:55.927536381Z [inf]  Metrics collected
+2026-05-29T14:32:55.927542522Z [inf]  System Heartbeat
+2026-05-29T14:32:55.927549457Z [err]  Failed to expire session
+2026-05-29T14:32:55.932835077Z [err]  Failed to expire session
+2026-05-29T14:33:56.701459028Z [inf]  Distribution cycle started
+2026-05-29T14:33:56.701472035Z [inf]  System Heartbeat
+2026-05-29T14:33:56.701478931Z [inf]  channel_provider_query_result
+2026-05-29T14:33:56.701487262Z [inf]  vault_empty_for_destination
+2026-05-29T14:33:56.704865083Z [inf]  Metrics collected
+2026-05-29T14:33:56.704870735Z [err]  Failed to expire session
+2026-05-29T14:33:56.704876941Z [err]  Failed to expire session
+2026-05-29T14:33:56.707157730Z [inf]  channel_provider_query_result
+2026-05-29T14:33:56.707164059Z [inf]  vault_empty_for_destination
+2026-05-29T14:33:56.707170402Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:34:56.325204140Z [inf]  System Heartbeat
+2026-05-29T14:34:56.325210496Z [err]  Failed to expire session
+2026-05-29T14:34:56.327317794Z [inf]  Metrics collected
+2026-05-29T14:34:56.327327817Z [err]  Failed to expire session
+2026-05-29T14:35:56.698330645Z [inf]  Distribution cycle started
+2026-05-29T14:35:56.698345573Z [inf]  Metrics collected
+2026-05-29T14:35:56.698354731Z [inf]  System Heartbeat
+2026-05-29T14:35:56.698363710Z [inf]  channel_provider_query_result
+2026-05-29T14:35:56.704695270Z [err]  Failed to expire session
+2026-05-29T14:35:56.704747125Z [inf]  vault_empty_for_destination
+2026-05-29T14:35:56.704754445Z [err]  Failed to expire session
+2026-05-29T14:35:56.710730042Z [inf]  no_eligible_content_this_cycle
+2026-05-29T14:35:56.710886475Z [inf]  channel_provider_query_result
+2026-05-29T14:35:56.710894768Z [inf]  vault_empty_for_destination
 
-Implement:
-
-* automatic recovery
-* fallback safety
-* better logging
-
-==================================================
-PHASE 7
-REFERRAL SYSTEM
-===============
-
-Investigate:
-
-Referral status unavailable
-
-Trace:
-
-Referral Menu
-→ Referral Service
-→ Referral Stats
-→ Mongo Query
-
-Find:
-
-* missing collection
-* broken query
-* schema mismatch
-* missing indexes
-
-Fix completely.
-
-==================================================
-PHASE 8
-VAULT AUDIT
-===========
-
-Current logs show:
-
-Vault is empty for destination
-
-Verify:
-
-approval
-→ vault insert
-→ vault storage
-→ vault retrieval
-
-Audit:
-
-vault collections
-
-vault schema
-
-vault indexes
-
-vault insert code
-
-Verify:
-
-approved content is actually stored
-
-Find why vault remains empty.
-
-==================================================
-PHASE 9
-DISTRIBUTION PIPELINE
-=====================
-
-Trace:
-
-Scheduler
-→ Provider
-→ Queue
-→ Dispatcher
-→ Delivery
-
-Verify:
-
-distribution engine is healthy
-
-Verify:
-
-provider returns content
-
-Verify:
-
-vault content is available
-
-Verify:
-
-target selection
-
-Verify:
-
-delivery callback
-
-Find all hidden blockers.
-
-==================================================
-PHASE 10
-OBSERVABILITY UPGRADE
-=====================
-
-Replace all generic logs such as:
-
-forum_topic_creation_unexpected_error
-
-payment_state_transition_rejected
-
-referral_status_unavailable
-
-non_core_index_setup_failed
-
-with structured logs containing:
-
-file
-
-function
-
-user_id
-
-chat_id
-
-topic_id
-
-payment_id
-
-exception_type
-
-exception_message
-
-stack_trace
-
-==================================================
-FINAL OUTPUT
-============
-
-Provide:
-
-1. Root cause report
-2. Failure graph
-3. Repository-wide issue list
-4. Exact files affected
-5. Exact functions affected
-6. Complete production-ready fixes
-7. Full replacement code
-
-Requirements:
-
-* async-safe
-* restart-safe
-* Redis-safe
-* Mongo-safe
-* Telegram-safe
-* forum-safe
-* floodwait-safe
-* production-grade
-
-Do not stop after diagnosis.
-
-Apply fixes.
-
-Generate complete code for all modified files.
-
-No pseudo-code.
-
-No placeholders.
-
-No partial implementations.
-
-No assumptions.
-
-Everything must be verified from actual repository code before proposing fixes.
