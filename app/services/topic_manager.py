@@ -188,7 +188,7 @@ class TopicManager:
     async def _create_telegram_topic(self, client: Client, title: str) -> int:
         """Internal: Raw MTProto call to create a topic with retry logic."""
         import random
-        from pyrogram.raw.types import UpdateNewForumTopic, Updates
+        from pyrogram.raw.types import Updates, UpdateNewChannelMessage, UpdateNewMessage, MessageService, MessageActionTopicCreate
 
         group_id = settings.VERIFICATION_GROUP_ID
         logger.info(
@@ -202,7 +202,7 @@ class TopicManager:
         # Pre-flight check: Verify group type and forum status
         try:
             chat = await client.get_chat(group_id)
-            is_forum = getattr(chat, "is_forum", False)
+            is_forum = (chat.type == ChatType.FORUM) or getattr(chat, "is_forum", False)
             me = await chat.get_member("me")
             can_manage = me.privileges.can_manage_topics if me.privileges else False
             
@@ -231,8 +231,8 @@ class TopicManager:
                 peer = await client.resolve_peer(group_id)
                 
                 result = await client.invoke(
-                    raw.functions.channels.CreateForumTopic(
-                        channel=peer,
+                    raw.functions.messages.CreateForumTopic(
+                        peer=peer,
                         title=title,
                         random_id=random.randint(1, 2**63 - 1),
                     )
@@ -241,28 +241,36 @@ class TopicManager:
                 topic_id = None
                 if isinstance(result, Updates):
                     for update in result.updates:
-                        if isinstance(update, UpdateNewForumTopic):
-                            topic_id = update.id
-                            break
-                
+                        # Path A: Explicit UpdateNewForumTopic (if exists in this library version)
+                        if type(update).__name__ == "UpdateNewForumTopic":
+                            topic_id = getattr(update, "id", None)
+                            if topic_id: break
+                        
+                        # Path B: MessageService with MessageActionTopicCreate
+                        if isinstance(update, (UpdateNewChannelMessage, UpdateNewMessage)):
+                            msg = update.message
+                            if isinstance(msg, MessageService) and isinstance(msg.action, MessageActionTopicCreate):
+                                topic_id = msg.id
+                                break
+
                 if topic_id is None:
-                    # Fallback for some pyrofork versions where UpdateNewForumTopic might be nested or different
+                    # Final Fallback: Search recently created topics by title
                     logger.warning(
-                        "UpdateNewForumTopic not found in Updates, attempting fallback extraction",
-                        extra={"ctx_result_type": type(result).__name__}
+                        "topic_id_not_in_updates_attempting_search_fallback",
+                        extra={"ctx_title": title}
                     )
-                    for update in getattr(result, "updates", []):
-                        if hasattr(update, "id") and "ForumTopic" in type(update).__name__:
-                            topic_id = update.id
-                            break
-                        if hasattr(update, "message") and hasattr(update.message, "reply_to") and hasattr(update.message.reply_to, "reply_to_top_id"):
-                            topic_id = update.message.reply_to.reply_to_top_id
-                            break
+                    try:
+                        async for topic in client.get_forum_topics(group_id, limit=5):
+                            if topic.title == title:
+                                topic_id = topic.id
+                                break
+                    except Exception as fallback_err:
+                        logger.warning("topic_search_fallback_failed", extra={"ctx_error": str(fallback_err)})
 
                 if topic_id is None:
                     logger.error(
                         "topic_id_extraction_failed",
-                        extra={"ctx_result": str(result)}
+                        extra={"ctx_result_type": type(result).__name__}
                     )
                     raise RuntimeError("Failed to extract topic_id from CreateForumTopic response")
                 
@@ -293,7 +301,7 @@ class TopicManager:
                     }
                 )
                 if attempt == len(delays) - 1:
-                    break
+                    raise
                 await asyncio.sleep(delay)
 
             except Exception as e:
@@ -308,7 +316,7 @@ class TopicManager:
                     }
                 )
                 if attempt == len(delays) - 1:
-                    break
+                    raise
                 await asyncio.sleep(delay)
         
         raise RuntimeError(f"Failed to create forum topic: {title}")

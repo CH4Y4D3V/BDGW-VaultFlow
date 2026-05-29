@@ -1,267 +1,343 @@
-The audit is not complete.
+You are a Senior Telegram Bot UX Architect, Product Designer, Pyrogram Engineer, and Production UI Reviewer.
 
-Current runtime logs still show production failures.
+Your task is to completely redesign and polish the BDGW Content Bot payment system UI/UX.
 
-VERIFIED FAILURES
+Current implementation is functional but visually weak, difficult to scan, and lacks important contextual information.
 
-1.
+I want a complete production-grade Telegram interface redesign.
 
-Support workflow still fails.
+━━━━━━━━━━━━━━━━━━━━━━
+OBJECTIVES
+━━━━━━━━━━━━━━━━━━━━━━
 
-Logs:
+1. Modernize all payment-related messages.
+2. Improve readability.
+3. Improve visual hierarchy.
+4. Improve trust and professionalism.
+5. Reduce moderator mistakes.
+6. Make payment verification easier.
+7. Make user status instantly visible.
+8. Create premium-quality Telegram card layouts.
+9. Make every message mobile-friendly.
+10. Ensure all admin actions are clear and impossible to misinterpret.
 
-HANDLER: handle_support_menu entered
+━━━━━━━━━━━━━━━━━━━━━━
+ADMIN PAYMENT REVIEW CARD
+━━━━━━━━━━━━━━━━━━━━━━
 
-forum_topic_creation_failed
+Current admin card is poor.
 
-The callback executes correctly.
+Problems:
 
-Failure occurs during forum topic creation.
+* User ID only
+* No profile information
+* No proof status
+* No support status
+* Weak layout
+* Hard to scan
+* Unprofessional appearance
 
-Investigate:
+Redesign admin payment review card.
 
-app/services/topic_manager.py
+Must include:
 
-Specifically:
+User Information Section
 
-_create_telegram_topic()
+* Full Name
+* Username
+* User ID
+* Account mention link
 
-Add logger.exception() and expose:
+Subscription Information
 
-* exception type
-* exception message
-* group id
-* topic title
-* bot permissions
+* Plan Name
+* Duration
+* Price
+* Currency
 
-Do not log only:
+Payment Information
 
-forum_topic_creation_failed
+* Payment Method
+* Payment Number
+* Transaction ID (if available)
+* Session ID
 
-Log the actual Telegram RPC error.
+Proof Status Section
 
-2.
+* Awaiting Proof
+* Proof Submitted
+* Under Review
+* Approved
+* Rejected
 
-PaymentTimeoutMonitor still fails.
+Support Status Section
 
-Logs:
+* Support Available
+* Support Busy
+* Support Offline
 
-Failed to expire session
+Time Information
 
-repeated continuously.
+* Request Time
+* Last Update Time
 
-Investigate:
+Admin Actions
 
-app/payments/timeouts.py
+* Approve Payment
+* Reject Payment
+* View Proof
+* Contact User
 
-Find exact exception.
+Use structured sections and visual separators.
 
-Current logs still hide root cause.
+━━━━━━━━━━━━━━━━━━━━━━
+PAYMENT PROOF FLOW
+━━━━━━━━━━━━━━━━━━━━━━
 
-Replace with:
+Current flow is ugly and unclear.
 
-logger.exception(
-"payment_session_expiration_failed",
-extra={
-"payment_id": payment_id,
-"user_id": user_id
-}
-)
+Redesign entire flow.
 
-3.
+STEP 1
+User selects Premium.
 
-Vault remains empty.
+STEP 2
+Bot shows beautiful payment card.
 
-Logs:
+Must contain:
 
-vault_empty_for_destination
+💎 Premium Plan
 
-no_eligible_content_this_cycle
+Plan Details
+Price
+Duration
+Features
 
-Distribution is healthy.
+Payment Instructions
 
-Vault population is not.
+Payment Number
+Payment Method
+Required Reference
 
-Verify:
+Warning Section
 
-submission_received
+After payment:
+Submit screenshot proof.
 
-submission_forward_completed
+━━━━━━━━━━━━━━━━━━━━━━
 
-verification_card_created
+STEP 3
+User uploads screenshot.
 
-moderation_approved
+Bot immediately responds with:
 
-vault_insert_completed
+✅ Payment Proof Received
 
-Provide runtime evidence.
+Show:
 
-4.
+Session ID
+Submission Time
+Status
 
-Run direct forum diagnostics.
+Status:
+⏳ Pending Admin Review
 
-Before creating a topic:
+Professional card layout.
 
-Log:
+━━━━━━━━━━━━━━━━━━━━━━
 
-verification_group_id
+STEP 4
+Admin receives proof.
 
-support_group_id
+Proof message must contain:
 
-payment_group_id
+User Information
+Plan Information
+Payment Information
+Uploaded Screenshot Preview
+Status
+Actions
 
-Verify:
+Inline buttons:
 
-* group exists
-* group is supergroup
-* forum mode enabled
-* bot has Manage Topics permission
+✅ Approve
+❌ Reject
+👤 Open Profile
 
-If topic creation fails:
+━━━━━━━━━━━━━━━━━━━━━━
+PAYMENT APPROVAL FLOW
+━━━━━━━━━━━━━━━━━━━━━━
 
-Log exact Telegram exception.
+When approved:
 
-Current logs are insufficient.
+User receives premium success card.
 
-OUTPUT REQUIRED
+Include:
 
-1. Full stack trace for forum_topic_creation_failed.
-2. Full stack trace for Failed to expire session.
-3. Runtime proof of vault_insert_completed.
-4. Runtime proof of payment_topic_created.
-5. Runtime proof of support topic creation.
+🎉 Premium Activated
+
+Plan
+Expiry Date
+Premium Group Status
+
+Buttons:
+
+🚀 Join Premium
+📋 Subscription Details
+🆘 Support
+
+━━━━━━━━━━━━━━━━━━━━━━
+PAYMENT REJECTION FLOW
+━━━━━━━━━━━━━━━━━━━━━━
+
+Rejected users receive:
+
+❌ Payment Verification Failed
+
+Include:
+
+Reason
+Instructions
+Retry Button
+
+Buttons:
+
+📤 Submit New Proof
+🆘 Contact Support
+
+━━━━━━━━━━━━━━━━━━━━━━
+SUPPORT SYSTEM UI
+━━━━━━━━━━━━━━━━━━━━━━
+
+Current support flow is plain.
+
+Redesign.
+
+Support Start Message:
+
+🛟 Support Center
+
+Explain:
+
+* Team availability
+* Response expectations
+* Ticket process
+
+After user sends issue:
+
+Generate Ticket ID
+
+Show:
+
+Ticket ID
+Status
+Created Time
+
+Status:
+⏳ Awaiting Response
+
+━━━━━━━━━━━━━━━━━━━━━━
+ADMIN SUPPORT PANEL
+━━━━━━━━━━━━━━━━━━━━━━
+
+Admin support notifications must contain:
+
+User Information
+Username
+User ID
+Ticket ID
+Issue Summary
+Status
+
+Buttons:
+
+💬 Reply
+✅ Resolve
+🚫 Close
+
+━━━━━━━━━━━━━━━━━━━━━━
+BOT-WIDE UI STANDARDS
+━━━━━━━━━━━━━━━━━━━━━━
+
+Apply globally.
+
+Requirements:
+
+* Consistent card design
+* Consistent spacing
+* Consistent emoji system
+* Modern premium appearance
+* Mobile-first layout
+* Easy scanning
+* Clear status badges
+* Clear action sections
+* Clear warnings
+* Clean typography
+
+Do NOT create giant walls of text.
+
+Use:
+
+Headers
+Sections
+Dividers
+Status indicators
+Information blocks
+
+━━━━━━━━━━━━━━━━━━━━━━
+TECHNICAL REQUIREMENTS
+━━━━━━━━━━━━━━━━━━━━━━
+
+Analyze entire codebase.
+
+Find all payment-related handlers.
+
+Find all support-related handlers.
+
+Find all message builders.
+
+Refactor them into reusable UI builder functions.
+
+Create:
+
+ui/
+├── payment_cards.py
+├── support_cards.py
+├── status_cards.py
+├── admin_cards.py
+└── common.py
+
+Move all message formatting there.
+
+No duplicated text.
+
+No duplicated layouts.
+
+All cards must be reusable.
+
+━━━━━━━━━━━━━━━━━━━━━━
+DELIVERABLES
+━━━━━━━━━━━━━━━━━━━━━━
+
+Provide:
+
+1. Complete code changes.
+2. Modified files list.
+3. New reusable UI architecture.
+4. Updated handlers.
+5. Updated callback flows.
+6. Updated inline keyboards.
+7. Before vs After summary.
+8. Any UX issues found elsewhere in the project.
+9. Additional UI improvements beyond those requested.
+10. Production-ready implementation with no placeholders.
+
+Do not only suggest designs.
+
+Actually modify the codebase and implement the redesign.
+
 
 
 current logs:
 
-2026-05-29T14:21:50.271587914Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:50.271593519Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:50.271597358Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:50.271605848Z [inf]  UPDATE_TRACE: message
-2026-05-29T14:21:54.108989625Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:55.904494438Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:55.904502451Z [inf]  Distribution cycle started
-2026-05-29T14:21:55.904511057Z [inf]  System Heartbeat
-2026-05-29T14:21:55.904520434Z [inf]  channel_provider_query_result
-2026-05-29T14:21:55.906211453Z [inf]  vault_empty_for_destination
-2026-05-29T14:21:55.906225349Z [inf]  Metrics collected
-2026-05-29T14:21:55.906240158Z [err]  Failed to expire session
-2026-05-29T14:21:55.909229479Z [inf]  vault_empty_for_destination
-2026-05-29T14:21:55.909245223Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:21:55.909255707Z [err]  Failed to expire session
-2026-05-29T14:21:55.909358048Z [inf]  channel_provider_query_result
-2026-05-29T14:21:57.082999906Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:21:58.729546657Z [inf]  1:M 29 May 2026 14:21:49.008 * 1 changes in 60 seconds. Saving...
-2026-05-29T14:21:58.729554862Z [inf]  1:M 29 May 2026 14:21:49.008 * Background saving started by pid 123
-2026-05-29T14:21:58.729561370Z [inf]  123:C 29 May 2026 14:21:49.016 * DB saved on disk
-2026-05-29T14:21:58.729566502Z [inf]  123:C 29 May 2026 14:21:49.016 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB
-2026-05-29T14:21:58.729571130Z [inf]  1:M 29 May 2026 14:21:49.109 * Background saving terminated with success
-2026-05-29T14:22:00.080506844Z [inf]  HANDLER: handle_support_menu entered
-2026-05-29T14:22:00.080518638Z [err]  forum_topic_creation_failed
-2026-05-29T14:22:00.083858068Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:22:19.489494106Z [inf]  UPDATE_TRACE: callback_query
-2026-05-29T14:22:58.742599003Z [inf]  1:M 29 May 2026 14:22:50.096 * 1 changes in 60 seconds. Saving...
-2026-05-29T14:22:58.742605382Z [inf]  1:M 29 May 2026 14:22:50.097 * Background saving started by pid 124
-2026-05-29T14:22:58.742609270Z [inf]  124:C 29 May 2026 14:22:50.106 * DB saved on disk
-2026-05-29T14:22:58.742613684Z [inf]  124:C 29 May 2026 14:22:50.106 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB
-2026-05-29T14:22:58.742617553Z [inf]  1:M 29 May 2026 14:22:50.197 * Background saving terminated with success
-2026-05-29T14:22:59.415339553Z [inf]  System Heartbeat
-2026-05-29T14:22:59.415346180Z [inf]  Metrics collected
-2026-05-29T14:22:59.415359723Z [err]  Failed to expire session
-2026-05-29T14:23:00.714898733Z [err]  Failed to expire session
-2026-05-29T14:23:30.470069185Z [inf]  UPDATE_TRACE: message
-2026-05-29T14:24:00.881008690Z [inf]  Distribution cycle started
-2026-05-29T14:24:00.881132629Z [inf]  System Heartbeat
-2026-05-29T14:24:00.881147646Z [inf]  channel_provider_query_result
-2026-05-29T14:24:00.881155203Z [inf]  vault_empty_for_destination
-2026-05-29T14:24:01.535192015Z [inf]  Metrics collected
-2026-05-29T14:24:01.535197750Z [err]  Failed to expire session
-2026-05-29T14:24:01.535202909Z [err]  Failed to expire session
-2026-05-29T14:24:01.536756882Z [inf]  channel_provider_query_result
-2026-05-29T14:24:01.536764817Z [inf]  vault_empty_for_destination
-2026-05-29T14:24:01.536772147Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:25:00.980045138Z [inf]  System Heartbeat
-2026-05-29T14:25:00.980054339Z [inf]  Metrics collected
-2026-05-29T14:25:00.980064052Z [err]  Failed to expire session
-2026-05-29T14:25:00.982670913Z [err]  Failed to expire session
-2026-05-29T14:26:01.181831659Z [inf]  System Heartbeat
-2026-05-29T14:26:01.181842722Z [inf]  Metrics collected
-2026-05-29T14:26:01.181851312Z [inf]  channel_provider_query_result
-2026-05-29T14:26:01.181878522Z [inf]  Distribution cycle started
-2026-05-29T14:26:01.183320272Z [inf]  vault_empty_for_destination
-2026-05-29T14:26:01.183325503Z [err]  Failed to expire session
-2026-05-29T14:26:01.183330074Z [err]  Failed to expire session
-2026-05-29T14:26:01.186494139Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:26:01.186578122Z [inf]  channel_provider_query_result
-2026-05-29T14:26:01.186583672Z [inf]  vault_empty_for_destination
-2026-05-29T14:27:01.595904830Z [inf]  System Heartbeat
-2026-05-29T14:27:01.595909799Z [inf]  Metrics collected
-2026-05-29T14:27:01.595915967Z [err]  Failed to expire session
-2026-05-29T14:27:02.726944424Z [err]  Failed to expire session
-2026-05-29T14:28:02.832705724Z [inf]  channel_provider_query_result
-2026-05-29T14:28:02.832711950Z [inf]  vault_empty_for_destination
-2026-05-29T14:28:02.832741718Z [inf]  Distribution cycle started
-2026-05-29T14:28:02.832746814Z [inf]  System Heartbeat
-2026-05-29T14:28:02.833614875Z [inf]  Metrics collected
-2026-05-29T14:28:02.833655822Z [err]  Failed to expire session
-2026-05-29T14:28:02.833662343Z [err]  Failed to expire session
-2026-05-29T14:28:02.836964004Z [inf]  channel_provider_query_result
-2026-05-29T14:28:02.836970867Z [inf]  vault_empty_for_destination
-2026-05-29T14:28:02.836977306Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:29:02.700454188Z [err]  Failed to expire session
-2026-05-29T14:29:02.700561219Z [inf]  Metrics collected
-2026-05-29T14:29:02.700567552Z [inf]  System Heartbeat
-2026-05-29T14:29:02.700574393Z [err]  Failed to expire session
-2026-05-29T14:30:03.054580435Z [inf]  Distribution cycle started
-2026-05-29T14:30:03.054587576Z [inf]  System Heartbeat
-2026-05-29T14:30:03.054595321Z [inf]  Metrics collected
-2026-05-29T14:30:03.054643706Z [inf]  channel_provider_query_result
-2026-05-29T14:30:03.057948904Z [err]  Failed to expire session
-2026-05-29T14:30:03.057957017Z [err]  Failed to expire session
-2026-05-29T14:30:03.058053669Z [inf]  vault_empty_for_destination
-2026-05-29T14:30:03.060534938Z [inf]  channel_provider_query_result
-2026-05-29T14:30:03.060548062Z [inf]  vault_empty_for_destination
-2026-05-29T14:30:03.060562034Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:31:04.308902642Z [inf]  Metrics collected
-2026-05-29T14:31:04.308908913Z [inf]  System Heartbeat
-2026-05-29T14:31:04.308916882Z [err]  Failed to expire session
-2026-05-29T14:31:05.720332094Z [err]  Failed to expire session
-2026-05-29T14:31:56.467691785Z [inf]  vault_empty_for_destination
-2026-05-29T14:31:56.467704696Z [inf]  System Heartbeat
-2026-05-29T14:31:56.467834081Z [inf]  Distribution cycle started
-2026-05-29T14:31:56.467841893Z [inf]  Metrics collected
-2026-05-29T14:31:56.467847212Z [inf]  channel_provider_query_result
-2026-05-29T14:31:56.470512919Z [err]  Failed to expire session
-2026-05-29T14:31:56.470526674Z [err]  Failed to expire session
-2026-05-29T14:31:56.473335015Z [inf]  channel_provider_query_result
-2026-05-29T14:31:56.473340972Z [inf]  vault_empty_for_destination
-2026-05-29T14:31:56.473346119Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:32:55.927536381Z [inf]  Metrics collected
-2026-05-29T14:32:55.927542522Z [inf]  System Heartbeat
-2026-05-29T14:32:55.927549457Z [err]  Failed to expire session
-2026-05-29T14:32:55.932835077Z [err]  Failed to expire session
-2026-05-29T14:33:56.701459028Z [inf]  Distribution cycle started
-2026-05-29T14:33:56.701472035Z [inf]  System Heartbeat
-2026-05-29T14:33:56.701478931Z [inf]  channel_provider_query_result
-2026-05-29T14:33:56.701487262Z [inf]  vault_empty_for_destination
-2026-05-29T14:33:56.704865083Z [inf]  Metrics collected
-2026-05-29T14:33:56.704870735Z [err]  Failed to expire session
-2026-05-29T14:33:56.704876941Z [err]  Failed to expire session
-2026-05-29T14:33:56.707157730Z [inf]  channel_provider_query_result
-2026-05-29T14:33:56.707164059Z [inf]  vault_empty_for_destination
-2026-05-29T14:33:56.707170402Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:34:56.325204140Z [inf]  System Heartbeat
-2026-05-29T14:34:56.325210496Z [err]  Failed to expire session
-2026-05-29T14:34:56.327317794Z [inf]  Metrics collected
-2026-05-29T14:34:56.327327817Z [err]  Failed to expire session
-2026-05-29T14:35:56.698330645Z [inf]  Distribution cycle started
-2026-05-29T14:35:56.698345573Z [inf]  Metrics collected
-2026-05-29T14:35:56.698354731Z [inf]  System Heartbeat
-2026-05-29T14:35:56.698363710Z [inf]  channel_provider_query_result
-2026-05-29T14:35:56.704695270Z [err]  Failed to expire session
-2026-05-29T14:35:56.704747125Z [inf]  vault_empty_for_destination
-2026-05-29T14:35:56.704754445Z [err]  Failed to expire session
-2026-05-29T14:35:56.710730042Z [inf]  no_eligible_content_this_cycle
-2026-05-29T14:35:56.710886475Z [inf]  channel_provider_query_result
-2026-05-29T14:35:56.710894768Z [inf]  vault_empty_for_destination
-
+2026-05-29T15:00:24.449795907Z [inf]  UPDATE_TRACE: message2026-05-29T15:01:05.976725815Z [inf]  Metrics collected2026-05-29T15:01:05.976732789Z [err]  Failed to expire session2026-05-29T15:01:05.976738585Z [err]  Failed to expire session2026-05-29T15:01:07.250285413Z [inf]  System Heartbeat2026-05-29T15:01:46.707524187Z [inf]  Initializing BDGW VaultFlow main process...2026-05-29T15:01:46.707529994Z [inf]  lifecycle_bootstrapping_start2026-05-29T15:01:46.707535532Z [inf]  Health server started2026-05-29T15:01:46.707542680Z [inf]  mongodb_connection_start2026-05-29T15:01:46.707550315Z [inf]  migration_queue_stabilization_complete2026-05-29T15:01:46.707554476Z [inf]  mongodb_connection_established2026-05-29T15:01:46.707562172Z [inf]  migration_vault_stabilization_start2026-05-29T15:01:46.707564404Z [inf]  mongodb_replica_set_detected2026-05-29T15:01:46.707573252Z [inf]  migration_queue_stabilization_start2026-05-29T15:01:46.707573734Z [inf]  migration_vault_stabilization_complete2026-05-29T15:01:46.707584161Z [inf]  100.64.0.2 [29/May/2026:15:01:45 +0000] "GET /health HTTP/1.1" 200 193 "-" "RailwayHealthCheck/1.0"2026-05-29T15:01:46.712094353Z [inf]  mongodb_indexes_verified2026-05-29T15:01:46.712099828Z [inf]  mongodb_indexes_verified2026-05-29T15:01:46.712117533Z [err]  non_core_index_setup_failed2026-05-29T15:01:46.713556516Z [inf]  NSFW channel seeded2026-05-29T15:01:46.713577301Z [inf]  PREMIUM channel seeded2026-05-29T15:01:46.713584696Z [inf]  Distribution channels seeded successfully2026-05-29T15:01:46.713643031Z [inf]  lifecycle_bot_start2026-05-29T15:01:46.713773781Z [inf]  mongodb_initialization_complete2026-05-29T15:01:47.993101963Z [inf]  Starting Container2026-05-29T15:01:49.943374868Z [inf]  lifecycle_channel_verification_start2026-05-29T15:01:50.225539945Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:01:50.225548151Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:01:50.604544122Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:01:50.607653243Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:01:50.607680887Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:01:50.607684296Z [inf]  lifecycle_audit_group_registered2026-05-29T15:01:50.607687814Z [inf]  lifecycle_audit_group_registered2026-05-29T15:01:50.607691664Z [inf]  lifecycle_audit_complete2026-05-29T15:01:50.607695264Z [inf]  lifecycle_bot_connected2026-05-29T15:01:50.607698752Z [inf]  Distribution engine starting2026-05-29T15:01:50.607763191Z [inf]  Dispatcher worker started2026-05-29T15:01:50.607774229Z [inf]  Dispatcher worker started2026-05-29T15:01:50.607795529Z [inf]  Dispatcher worker started2026-05-29T15:01:50.607800620Z [inf]  Dispatcher worker started2026-05-29T15:01:50.607805511Z [inf]  Dispatcher pool started with 4 workers2026-05-29T15:01:50.607811420Z [inf]  Watermark worker started2026-05-29T15:01:50.607816140Z [inf]  Watermark worker started2026-05-29T15:01:50.607820693Z [inf]  Watermark pool started2026-05-29T15:01:50.607834455Z [inf]  scheduler lock cleared on startup2026-05-29T15:01:50.607843439Z [inf]  Scheduler lock acquired. Starting integrity scan...2026-05-29T15:01:50.665495899Z [inf]  Distribution scheduler started (Primary instance)2026-05-29T15:01:50.665500799Z [inf]  System supervisor started2026-05-29T15:01:50.665505662Z [inf]  Distribution engine started2026-05-29T15:01:50.665510079Z [inf]  Subscription worker started2026-05-29T15:01:50.675266572Z [err]  lifecycle_referral_startup_failed2026-05-29T15:01:50.683162628Z [inf]  lifecycle_payment_monitor_registered2026-05-29T15:01:50.683169600Z [inf]  lifecycle_startup_complete2026-05-29T15:01:50.683175403Z [inf]  boot_stage2026-05-29T15:01:50.683180153Z [inf]  VaultFlow idle — waiting for shutdown signal.2026-05-29T15:01:56.738041452Z [inf]  OS Signal trapped, marking stop event for graceful shutdown...2026-05-29T15:01:56.738045789Z [inf]  lifecycle_shutdown_start2026-05-29T15:01:56.738050798Z [inf]  Subscription worker stopped2026-05-29T15:01:56.738054867Z [inf]  Distribution engine shutting down2026-05-29T15:01:56.738058861Z [inf]  System supervisor stopped cleanly2026-05-29T15:01:56.738168532Z [inf]  Distribution scheduler stopped and lock released2026-05-29T15:01:56.738174630Z [inf]  Draining dispatcher worker...2026-05-29T15:01:56.738970714Z [inf]  Draining dispatcher worker...2026-05-29T15:01:56.738977329Z [inf]  Draining dispatcher worker...2026-05-29T15:01:56.738985105Z [inf]  Draining dispatcher worker...2026-05-29T15:01:56.738991583Z [inf]  Dispatcher worker stopped2026-05-29T15:01:56.739003037Z [inf]  Dispatcher worker stopped2026-05-29T15:01:56.739008977Z [inf]  Dispatcher worker stopped2026-05-29T15:01:56.739246246Z [inf]  Dispatcher worker stopped2026-05-29T15:01:56.739251856Z [inf]  Dispatcher pool stopped2026-05-29T15:01:56.739258261Z [inf]  Draining watermark worker...2026-05-29T15:01:56.739263758Z [inf]  Draining watermark worker...2026-05-29T15:01:56.739269540Z [inf]  Watermark worker stopped2026-05-29T15:01:56.739276415Z [inf]  Watermark worker stopped2026-05-29T15:01:56.739282780Z [inf]  Watermark pool stopped2026-05-29T15:01:56.739406811Z [inf]  Distribution engine stopped cleanly2026-05-29T15:01:56.739413126Z [inf]  mongodb_connection_closed2026-05-29T15:01:56.739420296Z [inf]  lifecycle_shutdown_complete2026-05-29T15:01:56.739426022Z [inf]  Main process exit complete2026-05-29T15:01:57.207980581Z [inf]  Stopping Container2026-05-29T15:02:10.682101870Z [inf]  UPDATE_TRACE: message2026-05-29T15:02:10.682107257Z [inf]  UPDATE_TRACE: message2026-05-29T15:02:11.645617556Z [inf]  UPDATE_TRACE: message2026-05-29T15:02:19.682509395Z [inf]  UPDATE_TRACE: message2026-05-29T15:02:19.682517574Z [inf]  HANDLER: handle_group_media_submission entered2026-05-29T15:02:19.682523309Z [wrn]  group_handler: could not resolve submitter_id — no from_user or sender_chat2026-05-29T15:02:27.473487503Z [inf]  UPDATE_TRACE: message2026-05-29T15:02:27.473493949Z [inf]  HANDLER: handle_group_media_submission entered2026-05-29T15:02:57.477334062Z [inf]  System Heartbeat2026-05-29T15:02:57.477341430Z [inf]  Metrics collected2026-05-29T15:02:57.477346850Z [err]  payment_session_expiration_failed2026-05-29T15:02:57.478892363Z [err]  payment_session_expiration_failed2026-05-29T15:02:57.478897330Z [inf]  UPDATE_TRACE: message2026-05-29T15:03:17.303082018Z [inf]  UPDATE_TRACE: message2026-05-29T15:03:57.315209280Z [inf]  System Heartbeat2026-05-29T15:03:57.315214195Z [inf]  Distribution cycle started2026-05-29T15:03:57.315219664Z [err]  payment_session_expiration_failed2026-05-29T15:03:57.316424941Z [inf]  Metrics collected2026-05-29T15:03:57.316430117Z [inf]  channel_provider_query_result2026-05-29T15:03:57.316434348Z [inf]  vault_empty_for_destination2026-05-29T15:03:57.316438602Z [err]  payment_session_expiration_failed2026-05-29T15:03:57.317925701Z [inf]  channel_provider_query_result2026-05-29T15:03:57.317932094Z [inf]  vault_empty_for_destination2026-05-29T15:03:57.317935912Z [inf]  no_eligible_content_this_cycle2026-05-29T15:04:57.327993313Z [inf]  System Heartbeat2026-05-29T15:04:57.327998508Z [inf]  Metrics collected2026-05-29T15:04:57.328003014Z [err]  payment_session_expiration_failed2026-05-29T15:04:57.329456213Z [err]  payment_session_expiration_failed2026-05-29T15:05:57.343877605Z [inf]  Distribution cycle started2026-05-29T15:05:57.343883682Z [inf]  System Heartbeat2026-05-29T15:05:57.343887322Z [inf]  channel_provider_query_result2026-05-29T15:05:57.343890581Z [inf]  vault_empty_for_destination2026-05-29T15:05:57.345659585Z [err]  payment_session_expiration_failed2026-05-29T15:05:57.345664978Z [inf]  Metrics collected2026-05-29T15:05:57.345668847Z [err]  payment_session_expiration_failed2026-05-29T15:05:57.347288439Z [inf]  channel_provider_query_result2026-05-29T15:05:57.347292418Z [inf]  vault_empty_for_destination2026-05-29T15:05:57.347295964Z [inf]  no_eligible_content_this_cycle2026-05-29T15:06:37.349923789Z [inf]  UPDATE_TRACE: message2026-05-29T15:06:37.349927723Z [inf]  UPDATE_TRACE: message2026-05-29T15:06:37.349933150Z [inf]  UPDATE_TRACE: message2026-05-29T15:06:37.349939422Z [inf]  UPDATE_TRACE: message2026-05-29T15:06:57.392629853Z [inf]  System Heartbeat2026-05-29T15:06:57.392636856Z [inf]  Metrics collected2026-05-29T15:06:57.392642301Z [err]  payment_session_expiration_failed2026-05-29T15:06:57.393686667Z [err]  payment_session_expiration_failed2026-05-29T15:07:57.241936841Z [inf]  Distribution cycle started2026-05-29T15:07:57.241941154Z [inf]  System Heartbeat2026-05-29T15:07:57.241945257Z [inf]  Metrics collected2026-05-29T15:07:57.241949254Z [err]  payment_session_expiration_failed2026-05-29T15:07:57.243097254Z [err]  payment_session_expiration_failed2026-05-29T15:07:57.243107652Z [inf]  channel_provider_query_result2026-05-29T15:07:57.243114287Z [inf]  vault_empty_for_destination2026-05-29T15:07:57.244667861Z [inf]  channel_provider_query_result2026-05-29T15:07:57.244674741Z [inf]  vault_empty_for_destination2026-05-29T15:07:57.244679487Z [inf]  no_eligible_content_this_cycle2026-05-29T15:08:25.589532674Z [inf]  Starting Container2026-05-29T15:08:26.573898767Z [inf]  mongodb_connection_established2026-05-29T15:08:26.573908634Z [inf]  mongodb_replica_set_detected2026-05-29T15:08:26.573915555Z [inf]  migration_queue_stabilization_start2026-05-29T15:08:26.573947264Z [inf]  Initializing BDGW VaultFlow main process...2026-05-29T15:08:26.573953368Z [inf]  lifecycle_bootstrapping_start2026-05-29T15:08:26.573960691Z [inf]  Health server started2026-05-29T15:08:26.573966299Z [inf]  mongodb_connection_start2026-05-29T15:08:26.574916427Z [inf]  migration_queue_stabilization_complete2026-05-29T15:08:26.574920634Z [inf]  migration_vault_stabilization_start2026-05-29T15:08:26.574924560Z [inf]  migration_vault_stabilization_complete2026-05-29T15:08:26.574928904Z [inf]  mongodb_indexes_verified2026-05-29T15:08:26.574933998Z [inf]  mongodb_indexes_verified2026-05-29T15:08:26.574938230Z [err]  non_core_index_setup_failed2026-05-29T15:08:26.576078856Z [inf]  100.64.0.2 [29/May/2026:15:08:26 +0000] "GET /health HTTP/1.1" 200 193 "-" "RailwayHealthCheck/1.0"2026-05-29T15:08:26.576085515Z [inf]  mongodb_initialization_complete2026-05-29T15:08:26.576090051Z [inf]  NSFW channel seeded2026-05-29T15:08:26.576095344Z [inf]  PREMIUM channel seeded2026-05-29T15:08:26.576099911Z [inf]  Distribution channels seeded successfully2026-05-29T15:08:26.576104382Z [inf]  lifecycle_bot_start2026-05-29T15:08:30.911028930Z [inf]  lifecycle_channel_verification_start2026-05-29T15:08:31.013150428Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:08:31.132301405Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:08:31.213358427Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:08:31.294121253Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:08:31.381093785Z [inf]  lifecycle_channel_access_confirmed2026-05-29T15:08:31.381099407Z [inf]  lifecycle_audit_group_registered2026-05-29T15:08:31.381103352Z [inf]  lifecycle_audit_group_registered2026-05-29T15:08:31.382007860Z [inf]  lifecycle_audit_complete2026-05-29T15:08:31.382017677Z [inf]  lifecycle_bot_connected2026-05-29T15:08:31.382023080Z [inf]  Distribution engine starting2026-05-29T15:08:31.402195188Z [inf]  Dispatcher worker started2026-05-29T15:08:31.577484612Z [inf]  Dispatcher worker started2026-05-29T15:08:31.577490674Z [inf]  Dispatcher worker started2026-05-29T15:08:31.577495930Z [inf]  Dispatcher worker started2026-05-29T15:08:31.577500354Z [inf]  Dispatcher pool started with 4 workers2026-05-29T15:08:31.577504784Z [inf]  Watermark worker started2026-05-29T15:08:31.577508807Z [inf]  Watermark worker started2026-05-29T15:08:31.577513881Z [inf]  Watermark pool started2026-05-29T15:08:31.578070475Z [inf]  scheduler lock cleared on startup2026-05-29T15:08:31.578073869Z [inf]  Scheduler lock acquired. Starting integrity scan...2026-05-29T15:08:31.578076802Z [inf]  Distribution scheduler started (Primary instance)2026-05-29T15:08:31.578079786Z [inf]  System supervisor started2026-05-29T15:08:31.578083257Z [inf]  Distribution engine started2026-05-29T15:08:31.578086576Z [inf]  Subscription worker started2026-05-29T15:08:31.578089675Z [err]  lifecycle_referral_startup_failed2026-05-29T15:08:31.579141020Z [inf]  lifecycle_payment_monitor_registered2026-05-29T15:08:31.579145576Z [inf]  lifecycle_startup_complete2026-05-29T15:08:31.579148766Z [inf]  boot_stage2026-05-29T15:08:31.579152001Z [inf]  VaultFlow idle — waiting for shutdown signal.2026-05-29T15:08:36.424929975Z [inf]  Stopping Container2026-05-29T15:08:37.237854264Z [inf]  OS Signal trapped, marking stop event for graceful shutdown...2026-05-29T15:08:37.237862803Z [inf]  lifecycle_shutdown_start2026-05-29T15:08:37.237867733Z [inf]  Subscription worker stopped2026-05-29T15:08:37.237872165Z [inf]  Distribution engine shutting down2026-05-29T15:08:37.237876747Z [inf]  System supervisor stopped cleanly2026-05-29T15:08:37.237881543Z [inf]  Distribution scheduler stopped and lock released2026-05-29T15:08:37.237885956Z [inf]  Draining dispatcher worker...2026-05-29T15:08:37.239255793Z [inf]  Draining dispatcher worker...2026-05-29T15:08:37.239262177Z [inf]  Draining dispatcher worker...2026-05-29T15:08:37.239270243Z [inf]  Draining dispatcher worker...2026-05-29T15:08:37.239276041Z [inf]  Dispatcher worker stopped2026-05-29T15:08:37.239281138Z [inf]  Dispatcher worker stopped2026-05-29T15:08:37.239286076Z [inf]  Dispatcher worker stopped2026-05-29T15:08:37.240799164Z [inf]  Dispatcher worker stopped2026-05-29T15:08:37.240805161Z [inf]  Dispatcher pool stopped2026-05-29T15:08:37.240809093Z [inf]  Draining watermark worker...2026-05-29T15:08:37.240813422Z [inf]  Draining watermark worker...2026-05-29T15:08:37.240817226Z [inf]  Watermark worker stopped2026-05-29T15:08:37.240820729Z [inf]  Watermark worker stopped2026-05-29T15:08:37.240824274Z [inf]  Watermark pool stopped2026-05-29T15:08:37.242081614Z [inf]  Distribution engine stopped cleanly2026-05-29T15:08:37.242086311Z [inf]  mongodb_connection_closed2026-05-29T15:08:37.242090108Z [inf]  lifecycle_shutdown_complete2026-05-29T15:08:37.242093608Z [inf]  Main process exit complete2026-05-29T15:09:21.098400698Z [inf]  1 29 May 2026 15:09:18.289 * 1 changes in 60 seconds. Saving...2026-05-29T15:09:21.098405190Z [inf]  1 29 May 2026 15:09:18.289 * Background saving started by pid 1252026-05-29T15:09:21.098410476Z [inf]  125 29 May 2026 15:09:18.298 * DB saved on disk2026-05-29T15:09:21.098416535Z [inf]  125 29 May 2026 15:09:18.298 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB2026-05-29T15:09:21.098420948Z [inf]  1 29 May 2026 15:09:18.390 * Background saving terminated with success2026-05-29T15:09:21.456044377Z [inf]  UPDATE_TRACE: message2026-05-29T15:09:21.456049269Z [inf]  /start command received2026-05-29T15:09:21.456052915Z [inf]  Subscription granted2026-05-29T15:09:21.456055889Z [inf]  New user registered2026-05-29T15:09:41.454804354Z [inf]  System Heartbeat2026-05-29T15:09:41.454810251Z [err]  payment_session_expiration_failed2026-05-29T15:09:41.455388625Z [inf]  Metrics collected2026-05-29T15:09:41.455391979Z [err]  payment_session_expiration_failed2026-05-29T15:10:41.460994763Z [inf]  System Heartbeat2026-05-29T15:10:41.460999515Z [inf]  Distribution cycle started2026-05-29T15:10:41.461002242Z [err]  payment_session_expiration_failed2026-05-29T15:10:41.461990861Z [inf]  Metrics collected2026-05-29T15:10:41.461999359Z [err]  payment_session_expiration_failed2026-05-29T15:10:41.462004146Z [inf]  channel_provider_query_result2026-05-29T15:10:41.463501449Z [inf]  vault_empty_for_destination2026-05-29T15:10:41.463511221Z [inf]  channel_provider_query_result2026-05-29T15:10:41.463517230Z [inf]  vault_empty_for_destination2026-05-29T15:10:41.463523454Z [inf]  no_eligible_content_this_cycle2026-05-29T15:11:01.463139531Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:11:01.463143201Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:11:04.472417688Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:11:04.578734812Z [err]  Failed to get user payment topic2026-05-29T15:11:34.576358156Z [inf]  System Heartbeat2026-05-29T15:11:34.576364232Z [inf]  Metrics collected2026-05-29T15:11:34.576368661Z [err]  payment_session_expiration_failed2026-05-29T15:11:34.577015840Z [err]  payment_session_expiration_failed2026-05-29T15:12:04.590451772Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:12:34.606368674Z [inf]  System Heartbeat2026-05-29T15:12:34.606372384Z [inf]  Distribution cycle started2026-05-29T15:12:34.606375356Z [err]  payment_session_expiration_failed2026-05-29T15:12:34.606935416Z [inf]  Metrics collected2026-05-29T15:12:34.606940402Z [err]  payment_session_expiration_failed2026-05-29T15:12:34.606944200Z [inf]  channel_provider_query_result2026-05-29T15:12:34.607868074Z [inf]  vault_empty_for_destination2026-05-29T15:12:34.607871899Z [inf]  channel_provider_query_result2026-05-29T15:12:34.607875656Z [inf]  vault_empty_for_destination2026-05-29T15:12:34.607880514Z [inf]  no_eligible_content_this_cycle2026-05-29T15:13:34.385553735Z [inf]  System Heartbeat2026-05-29T15:13:34.385557765Z [inf]  Metrics collected2026-05-29T15:13:34.385562536Z [err]  payment_session_expiration_failed2026-05-29T15:13:34.385566668Z [err]  payment_session_expiration_failed2026-05-29T15:13:40.489271946Z [inf]  UPDATE_TRACE: message2026-05-29T15:13:49.218143843Z [inf]  UPDATE_TRACE: message2026-05-29T15:14:40.104981946Z [inf]  Distribution cycle started2026-05-29T15:14:40.104988276Z [inf]  System Heartbeat2026-05-29T15:14:40.104993737Z [err]  payment_session_expiration_failed2026-05-29T15:14:40.105395480Z [inf]  Metrics collected2026-05-29T15:14:40.105403219Z [inf]  channel_provider_query_result2026-05-29T15:14:40.105408568Z [inf]  vault_empty_for_destination2026-05-29T15:14:40.105414368Z [err]  payment_session_expiration_failed2026-05-29T15:14:40.105424659Z [inf]  channel_provider_query_result2026-05-29T15:14:40.105431804Z [inf]  vault_empty_for_destination2026-05-29T15:14:40.105437351Z [inf]  no_eligible_content_this_cycle2026-05-29T15:14:59.231844656Z [inf]  UPDATE_TRACE: message2026-05-29T15:15:39.241637004Z [inf]  System Heartbeat2026-05-29T15:15:39.241644404Z [inf]  Metrics collected2026-05-29T15:15:39.241649169Z [err]  payment_session_expiration_failed2026-05-29T15:15:39.242333005Z [err]  payment_session_expiration_failed2026-05-29T15:15:46.454268579Z [inf]  UPDATE_TRACE: message2026-05-29T15:15:46.809502990Z [inf]  /start command received2026-05-29T15:15:51.792053340Z [inf]  1 29 May 2026 15:15:46.744 * 1 changes in 60 seconds. Saving...2026-05-29T15:15:51.792056744Z [inf]  1 29 May 2026 15:15:46.745 * Background saving started by pid 1262026-05-29T15:15:51.792061087Z [inf]  126 29 May 2026 15:15:46.756 * DB saved on disk2026-05-29T15:15:51.792065442Z [inf]  126 29 May 2026 15:15:46.757 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB2026-05-29T15:15:51.792068939Z [inf]  1 29 May 2026 15:15:46.845 * Background saving terminated with success2026-05-29T15:15:54.150398544Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:16:24.223899778Z [inf]  UPDATE_TRACE: message2026-05-29T15:16:24.223903131Z [inf]  UPDATE_TRACE: message2026-05-29T15:16:24.223906757Z [inf]  UPDATE_TRACE: message2026-05-29T15:16:24.223910570Z [inf]  UPDATE_TRACE: message2026-05-29T15:16:31.529477067Z [inf]  Distribution cycle started2026-05-29T15:16:31.529480629Z [inf]  System Heartbeat2026-05-29T15:16:31.546918783Z [inf]  Metrics collected2026-05-29T15:16:31.546923062Z [err]  payment_session_expiration_failed2026-05-29T15:16:31.549192459Z [err]  payment_session_expiration_failed2026-05-29T15:16:31.554703316Z [inf]  channel_provider_query_result2026-05-29T15:16:31.554709449Z [inf]  vault_empty_for_destination2026-05-29T15:16:31.563449923Z [inf]  channel_provider_query_result2026-05-29T15:16:31.563455831Z [inf]  vault_empty_for_destination2026-05-29T15:16:31.563459401Z [inf]  no_eligible_content_this_cycle2026-05-29T15:17:31.573112700Z [inf]  Metrics collected2026-05-29T15:17:31.573116116Z [err]  payment_session_expiration_failed2026-05-29T15:17:31.574106788Z [err]  payment_session_expiration_failed2026-05-29T15:17:51.428956503Z [inf]  1 29 May 2026 15:17:42.895 * 1 changes in 60 seconds. Saving...2026-05-29T15:17:51.428961150Z [inf]  1 29 May 2026 15:17:42.895 * Background saving started by pid 1272026-05-29T15:17:51.428964135Z [inf]  127 29 May 2026 15:17:42.904 * DB saved on disk2026-05-29T15:17:51.428967026Z [inf]  127 29 May 2026 15:17:42.904 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB2026-05-29T15:17:51.428970002Z [inf]  1 29 May 2026 15:17:42.996 * Background saving terminated with success2026-05-29T15:17:51.572150311Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:17:51.572154678Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:17:51.572158459Z [inf]  HANDLER: handle_support_menu entered2026-05-29T15:17:51.572162486Z [err]  forum_topic_creation_failed2026-05-29T15:18:31.403481075Z [inf]  UPDATE_TRACE: message2026-05-29T15:18:31.403486230Z [inf]  /start command received2026-05-29T15:18:31.403491860Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:18:31.668285797Z [inf]  Distribution cycle started2026-05-29T15:18:31.668290044Z [inf]  System Heartbeat2026-05-29T15:18:31.668293764Z [inf]  channel_provider_query_result2026-05-29T15:18:31.668298144Z [inf]  vault_empty_for_destination2026-05-29T15:18:31.669156468Z [err]  payment_session_expiration_failed2026-05-29T15:18:31.669163130Z [inf]  Metrics collected2026-05-29T15:18:31.669168562Z [err]  payment_session_expiration_failed2026-05-29T15:18:31.669913878Z [inf]  channel_provider_query_result2026-05-29T15:18:31.669918171Z [inf]  vault_empty_for_destination2026-05-29T15:18:31.669922764Z [inf]  no_eligible_content_this_cycle2026-05-29T15:18:51.550664203Z [inf]  1 29 May 2026 15:18:43.074 * 1 changes in 60 seconds. Saving...2026-05-29T15:18:51.550667061Z [inf]  1 29 May 2026 15:18:43.074 * Background saving started by pid 1282026-05-29T15:18:51.550670017Z [inf]  128 29 May 2026 15:18:43.084 * DB saved on disk2026-05-29T15:18:51.550672903Z [inf]  128 29 May 2026 15:18:43.084 * Fork CoW for RDB: current 0 MB, peak 0 MB, average 0 MB2026-05-29T15:18:51.550675777Z [inf]  1 29 May 2026 15:18:43.175 * Background saving terminated with success2026-05-29T15:18:51.573242008Z [inf]  UPDATE_TRACE: callback_query2026-05-29T15:18:58.772752888Z [inf]  UPDATE_TRACE: callback_query
