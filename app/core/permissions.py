@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import functools
 from enum import Enum
-from typing import Callable, List
+from typing import Callable
 
 from pyrogram.types import CallbackQuery, Message
 
@@ -15,19 +14,19 @@ logger = get_logger(__name__)
 
 class Role(str, Enum):
     OWNER = "owner"
-    SUPER_ADMIN = "super_admin"
+    SUDO = "sudo"
     MODERATOR = "moderator"
     SUPPORT_ADMIN = "support_admin"
     PAYMENT_ADMIN = "payment_admin"
     SCHEDULER_ADMIN = "scheduler_admin"
 
 
-def get_user_roles(user_id: int) -> List[Role]:
-    roles: List[Role] = []
+def get_user_roles(user_id: int) -> list[Role]:
+    roles: list[Role] = []
     if user_id == settings.OWNER_ID:
         roles.append(Role.OWNER)
     if user_id in settings.SUDO_IDS:
-        roles.append(Role.SUPER_ADMIN)
+        roles.append(Role.SUDO)
     if user_id in settings.ADMIN_IDS or user_id in settings.MODERATOR_IDS:
         roles.append(Role.MODERATOR)
     if user_id in settings.SUPPORT_ADMIN_IDS:
@@ -40,7 +39,7 @@ def get_user_roles(user_id: int) -> List[Role]:
 
 
 def has_role(user_id: int, role: Role) -> bool:
-    """OWNER and SUPER_ADMIN inherit all roles."""
+    """OWNER and SUDO inherit all roles."""
     if user_id == settings.OWNER_ID:
         return True
     if user_id in settings.SUDO_IDS:
@@ -66,6 +65,14 @@ def is_scheduler_admin(user_id: int) -> bool:
 
 def is_any_admin(user_id: int) -> bool:
     return bool(get_user_roles(user_id))
+
+
+# ── Startup Validation ────────────────────────────────────────────────────────
+
+REQUIRED_ROLES = ["OWNER", "SUDO", "MODERATOR", "SUPPORT_ADMIN", "PAYMENT_ADMIN", "SCHEDULER_ADMIN"]
+for req_role in REQUIRED_ROLES:
+    if not hasattr(Role, req_role):
+        raise RuntimeError(f"Invalid role reference: Role.{req_role} used but not defined.")
 
 
 # ── Permission guard decorator ────────────────────────────────────────────────

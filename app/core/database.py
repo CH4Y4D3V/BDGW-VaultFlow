@@ -205,9 +205,14 @@ class DatabaseManager:
             try:
                 await ref_repo.create_indexes()
             except Exception as e:
+                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
                     "non_core_index_setup_failed",
-                    extra={"ctx_collection": "referral", "ctx_error": repr(e)},
+                    extra={
+                        "ctx_collection": "referral",
+                        "ctx_index_name": index_name,
+                        "ctx_mongo_error": str(e)
+                    },
                     exc_info=True
                 )
 
@@ -217,9 +222,14 @@ class DatabaseManager:
                 await payment_repo.create_indexes()
                 logger.info("MongoDB initialization complete (Connection + Indices)")
             except Exception as e:
+                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
                     "non_core_index_setup_failed",
-                    extra={"ctx_collection": "payments", "ctx_error": repr(e)},
+                    extra={
+                        "ctx_collection": "payments",
+                        "ctx_index_name": index_name,
+                        "ctx_mongo_error": str(e)
+                    },
                     exc_info=True
                 )
             
