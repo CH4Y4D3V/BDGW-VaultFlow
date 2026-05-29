@@ -183,11 +183,11 @@ class DatabaseManager:
             await DataMigrationManager.stabilize_vault(cls._db)
         except Exception as e:
             logger.error(
-                "MIGRATION: Data stabilization audit failed â€” attempting to proceed to index creation",
+                "MIGRATION: Data stabilization audit failed — attempting to proceed to index creation",
                 extra={"ctx_error": str(e)}
             )
 
-        # â”€â”€ Schema Verification (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # Schema Verification
         logger.debug("Initiating index verification/creation phase...")
         try:
             await cls._ensure_indexes()
@@ -198,34 +198,34 @@ class DatabaseManager:
                 extra={"ctx_error": str(e)}
             )
 
-        # â”€â”€ Referral System Indexes (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        # ── Referral System Indexes (Non-FATAL) ──────────────────────────────
+        # Non-Core System Indexes
+        try:
+            from app.referral.repository import ReferralRepository
+            ref_repo = ReferralRepository(cls._db)
             try:
-                from app.referral.repository import ReferralRepository
-                ref_repo = ReferralRepository(cls._db)
-                try:
-                    await ref_repo.create_indexes()
-                except Exception as e:
-                    logger.error(
-                        "non_core_index_setup_failed",
-                        extra={"ctx_collection": "referral", "ctx_error": repr(e)},
-                        exc_info=True
-                    )
+                await ref_repo.create_indexes()
+            except Exception as e:
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={"ctx_collection": "referral", "ctx_error": repr(e)},
+                    exc_info=True
+                )
 
-                from app.payments.repository import PaymentRepository
-                payment_repo = PaymentRepository(cls._db)
-                try:
-                    await payment_repo.create_indexes()
-                except Exception as e:
-                    logger.error(
-                        "non_core_index_setup_failed",
-                        extra={"ctx_collection": "payments", "ctx_error": repr(e)},
-                        exc_info=True
-                    )
+            from app.payments.repository import PaymentRepository
+            payment_repo = PaymentRepository(cls._db)
+            try:
+                await payment_repo.create_indexes()
+            except Exception as e:
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={"ctx_collection": "payments", "ctx_error": repr(e)},
+                    exc_info=True
+                )
+            
             logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
             logger.error(
-                "non_core_index_setup_failed",
+                "non_core_final_init_failed",
                 extra={"ctx_error": repr(e)},
                 exc_info=True
             )
