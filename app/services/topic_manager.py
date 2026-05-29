@@ -88,7 +88,17 @@ class TopicManager:
                 return topic_id
 
             icon = _TOPIC_ICONS.get(topic_type, "💬")
-            title = f"{icon} User {user_id}"
+            
+            # Attempt to get user's first name for a better topic title
+            user_name = f"User {user_id}"
+            try:
+                user = await client.get_users(user_id)
+                if user.first_name:
+                    user_name = user.first_name
+            except Exception:
+                pass
+                
+            title = f"{icon} {user_name}"
             
             topic_id = await self._create_telegram_topic(client, title)
             

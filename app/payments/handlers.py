@@ -172,7 +172,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     service = get_payment_service()
     
     session = await service.get_active_session(user_id)
-    if not session:
+    if not session or session.status not in [PaymentStatus.AWAITING_PAYMENT, PaymentStatus.WAITING_SCREENSHOT]:
         raise ContinuePropagation
 
     if session.status == PaymentStatus.AWAITING_PAYMENT:
@@ -417,14 +417,25 @@ async def _notify_admins_of_submission(client: Client, session: PaymentSession, 
     text = build_admin_payment_review_card(user, session, plan)
     reply_markup = build_admin_payment_actions(session.id, session.user_id)
     
-    await client.send_photo(
-        chat_id=settings.VERIFICATION_GROUP_ID,
-        photo=file_id,
-        caption=text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML,
-        message_thread_id=topic_id
-    )
+    try:
+        await client.send_photo(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            photo=file_id,
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+            message_thread_id=topic_id
+        )
+    except Exception as e:
+        logger.warning("Failed to send photo for submission notification, falling back to text", extra={"ctx_error": str(e)})
+        # Fallback to text message if photo fails (e.g. invalid file_id or it was a document)
+        await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=f"{text}\n\n⚠️ <i>Screenshot could not be loaded directly. File ID: <code>{file_id}</code></i>",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+            message_thread_id=topic_id
+        )
 
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:(?P<action>approve|reject):(?P<sid>.+)$"))
