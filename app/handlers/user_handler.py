@@ -432,6 +432,9 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
         elif action == "mystatus":
             # F-04: Comprehensive Status Dashboard
+            from app.ui.status_cards import build_user_status_card
+            from app.models.subscription import SubscriptionStatus
+            
             sub_service = _get_sub_service()
             sub = await sub_service.get_subscription(user_id)
             
@@ -439,32 +442,23 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             ref_repo = ReferralRepository(DatabaseManager.get_db())
             wallet = await ref_repo.get_wallet(user_id)
             
-            queue_repo = _get_queue_repo()
-            user_queue = await queue_repo.get_user_queue(user_id)
+            onboarding_service = _get_onboarding_service()
+            user_state = await onboarding_service.get_user_state(user_id)
             
-            from app.models.subscription import SubscriptionStatus
-            plan_name = sub.plan.value.upper() if sub else "FREE"
-            status_emoji = "✅" if sub and sub.status == SubscriptionStatus.ACTIVE else "⏳"
-            points = wallet.get("points_balance", 0) if wallet else 0
-            
-            queue_text = ""
-            if user_queue:
-                queue_text = "\n\n<b>Recent Submissions:</b>\n"
-                for j in user_queue[:5]:
-                    status = j.get("status", "pending").capitalize()
-                    queue_text += f"• {j.get('content_id', '???')[:8]}... [{status}]\n"
-            else:
-                queue_text = "\n\n<i>No recent submissions.</i>"
+            # Prepare data for new UI
+            sub_data = None
+            if sub and sub.status == SubscriptionStatus.ACTIVE:
+                sub_data = {
+                    "plan_label": sub.plan.value.upper(),
+                    "expiry": sub.expires_at.strftime("%Y-%m-%d") if sub.expires_at else "Lifetime"
+                }
 
-            text = (
-                f"👤 <b>Account Status</b>\n\n"
-                f"<b>Plan:</b> {plan_name} {status_emoji}\n"
-                f"<b>ID:</b> <code>{user_id}</code>\n"
-                f"<b>Points:</b> ৳{points}\n"
-                f"{queue_text}"
+            text, keyboard = build_user_status_card(
+                user_id=user_id,
+                username=callback_query.from_user.username,
+                state=user_state.value,
+                subscription=sub_data
             )
-            
-            keyboard = KeyboardBuilder.build_back_button()
 
         await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 

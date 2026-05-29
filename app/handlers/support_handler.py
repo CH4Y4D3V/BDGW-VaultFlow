@@ -74,6 +74,9 @@ async def _safe_reply(
             await asyncio.sleep(2 ** attempt)
 
 
+from app.ui.support_cards import build_support_welcome_card, build_ticket_created_card
+from app.ui.common import build_back_button
+
 # ── Callback: menu:support ────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^menu:support$"))
@@ -102,10 +105,10 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     )
 
     try:
+        text, reply_markup = build_support_welcome_card()
         await callback.message.edit_text(
-            "🆘 <b>Support</b>\n\n"
-            "Send your message and we'll connect you with our support team.\n\n"
-            "<i>Just type your question or issue below.</i>",
+            text,
+            reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
         await callback.answer()
@@ -216,7 +219,12 @@ async def handle_private_message_support(client: Client, message: Message) -> No
         )
 
         support_service = get_support_service()
-        await support_service.handle_user_message(client, message)
+        is_first = await support_service.handle_user_message(client, message)
+        
+        if is_first:
+            ticket_id = f"T-{user_id}-{topic_id}" # Simplified ticket ID for UI
+            text = build_ticket_created_card(ticket_id)
+            await message.reply_text(text, parse_mode=ParseMode.HTML)
 
     except Exception as e:
         logger.error(

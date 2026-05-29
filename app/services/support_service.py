@@ -68,20 +68,26 @@ class SupportService:
     Routes support messages between user DMs and the verification hub topics.
     """
 
-    async def handle_user_message(self, client: Client, message) -> None:
+    async def handle_user_message(self, client: Client, message) -> bool:
         """
         Called when a private message arrives and the user has (or needs) a support topic.
         1. Get or create support topic.
         2. Copy message into topic.
         3. Persist to support_messages.
+        Returns: True if this is likely the first message in a new ticket session.
         """
         if not message.from_user:
-            return
+            return False
 
         user_id = message.from_user.id
         topic_service = get_topic_service()
 
         try:
+            # Check if topic already existed before calling get_or_create
+            # (get_user_topic_id is a read-only check)
+            existing_topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)
+            is_first = existing_topic_id is None
+
             topic_id = await topic_service.get_or_create_user_topic(
                 client, user_id, TOPIC_SUPPORT
             )
@@ -98,7 +104,7 @@ class SupportService:
                 )
             except Exception:
                 pass
-            return
+            return False
 
         hub_message_id = await _copy_message_safe(
             client,
@@ -107,6 +113,33 @@ class SupportService:
             message_id=message.id,
             thread_id=topic_id,
         )
+
+        if is_first:
+            from app.ui.support_cards import build_admin_support_card, build_admin_support_actions
+            ticket_id = f"T-{user_id}-{topic_id}"
+            
+            # Use message text as issue summary if available
+            issue_summary = message.text or "[Media Submission]"
+            if len(issue_summary) > 200:
+                issue_summary = issue_summary[:197] + "..."
+
+            admin_text = build_admin_support_card(
+                user=message.from_user,
+                ticket_id=ticket_id,
+                issue_summary=issue_summary
+            )
+            admin_markup = build_admin_support_actions(ticket_id, user_id)
+            
+            try:
+                await client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=admin_text,
+                    reply_markup=admin_markup,
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.warning("failed_to_send_admin_support_card", extra={"ctx_error": str(e)})
 
         await _support_repo.save_message({
             "user_id": user_id,
@@ -125,6 +158,7 @@ class SupportService:
                 "ctx_hub_msg_id": hub_message_id,
             },
         )
+        return is_first
 
 
 # Module-level singleton

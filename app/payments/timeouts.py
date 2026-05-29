@@ -97,6 +97,14 @@ class PaymentTimeoutMonitor:
             await self.repository.clear_timeout(payment_id)
             await self.repository.log_event(payment_id, "payment_expired", {})
 
+            # Remove from Redis fast-path
+            from app.core.redis_client import RedisClient
+            try:
+                redis = await RedisClient.get_client()
+                await redis.delete(f"pay_session:{user_id}")
+            except Exception:
+                pass
+
             try:
                 await client.send_message(
                     session.user_id,
@@ -109,6 +117,7 @@ class PaymentTimeoutMonitor:
                     extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
                 )
 
+            logger.info("payment_session_expired_successfully", extra={"ctx_payment_id": payment_id, "ctx_user_id": user_id})
             return True
         except Exception as e:
             logger.exception(

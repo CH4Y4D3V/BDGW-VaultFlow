@@ -22,34 +22,33 @@ class KeyboardBuilder:
         # Banned users only get support
         if state == "banned":
             return InlineKeyboardMarkup([
-                [InlineKeyboardButton("🆘 Support", callback_data="menu:support")]
+                [InlineKeyboardButton("🆘 Support & Appeal", callback_data="menu:support")]
             ])
 
         # Streamlined layout
         buttons = [
-            [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
+            [InlineKeyboardButton("💎 PREMIUM ACCESS", callback_data="menu:premium")],
             [
-                InlineKeyboardButton("📨 Submit Content", callback_data="menu:submit"),
-                InlineKeyboardButton("👤 Anonymous", callback_data="menu:anonymous"),
+                InlineKeyboardButton("📨 SUBMIT", callback_data="menu:submit"),
+                InlineKeyboardButton("👤 ANONYMOUS", callback_data="menu:anonymous"),
             ],
             [
-                InlineKeyboardButton("👥 Referral", callback_data="menu:referrals"),
-                InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")
+                InlineKeyboardButton("👥 REFERRAL", callback_data="menu:referrals"),
+                InlineKeyboardButton("📊 MY STATUS", callback_data="menu:mystatus")
             ],
-            [InlineKeyboardButton("🆘 Support", callback_data="menu:support")]
+            [InlineKeyboardButton("🆘 CUSTOMER SUPPORT", callback_data="menu:support")]
         ]
 
         return InlineKeyboardMarkup(buttons)
 
     @staticmethod
     def build_back_button(target: str = "home") -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬅️ Back to Menu", callback_data=f"menu:{target}")
-        ]])
+        from app.ui.common import build_back_button
+        return InlineKeyboardMarkup([build_back_button(target)])
 
     @staticmethod
     def build_premium_conversion() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("💳 Upgrade to Premium", callback_data="menu:pay_premium")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu:home")]
+            [InlineKeyboardButton("💳 UPGRADE TO PREMIUM", callback_data="menu:pay_premium")],
+            [InlineKeyboardButton("⬅️ BACK TO MENU", callback_data="menu:home")]
         ])

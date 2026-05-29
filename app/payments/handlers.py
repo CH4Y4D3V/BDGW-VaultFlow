@@ -21,33 +21,25 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+from app.ui.payment_cards import (
+    build_plan_selection_card,
+    build_payment_instruction_card,
+    build_payment_status_card,
+    build_proof_received_card,
+    build_premium_activated_card,
+    build_payment_rejected_card
+)
+
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
     """Shows premium plan selection."""
     await callback.answer()
-    text = (
-        "Premium gives you access to exclusive BDGW content channels.\n\n"
-        "Select a plan:"
-    )
     
-    buttons = []
-    for plan_id, plan in PLANS.items():
-        buttons.append([
-            InlineKeyboardButton(
-                f"{plan['label']} — ৳{plan['price']}",
-                callback_data=f"pay:select:{plan_id}"
-            )
-        ])
-    
-    buttons.append([
-        InlineKeyboardButton("📊 Check Status", callback_data="pay:status"),
-        InlineKeyboardButton("🔄 Renew", callback_data="menu:premium")
-    ])
-    buttons.append([InlineKeyboardButton("← Back", callback_data="menu:home")])
+    text, reply_markup = build_plan_selection_card(PLANS)
     
     await callback.message.edit_text(
         text,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML
     )
 
@@ -69,25 +61,13 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
 
     try:
         session = await service.create_session(user_id, plan_id)
+        plan = PLANS[plan_id]
         
-        text = (
-            f"<b>Plan:</b> {PLANS[plan_id]['label']}\n"
-            f"<b>Amount to Pay:</b> ৳{session.locked_amount}\n\n"
-            "Select your payment method:"
-        )
-        
-        buttons = [
-            [
-                InlineKeyboardButton("bKash", callback_data=f"pay:method:bkash:{session.id}"),
-                InlineKeyboardButton("Nagad", callback_data=f"pay:method:nagad:{session.id}")
-            ],
-            [InlineKeyboardButton("Crypto (USDT)", callback_data=f"pay:method:crypto:{session.id}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session.id}")]
-        ]
+        text, reply_markup = build_payment_instruction_card(session, plan)
         
         await callback.message.edit_text(
             text,
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
         
@@ -105,18 +85,12 @@ async def handle_payment_status(client: Client, callback: CallbackQuery) -> None
         await callback.answer("No active payment session.", show_alert=True)
         return
 
-    text = (
-        f"<b>Payment Status</b>\n\n"
-        f"Plan: {PLANS[session.plan_id]['label']}\n"
-        f"Amount: ৳{session.locked_amount}\n"
-        f"Status: {session.status.value}"
-    )
+    plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
+    text, reply_markup = build_payment_status_card(session, plan)
+    
     await callback.message.edit_text(
         text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session.id}")],
-            [InlineKeyboardButton("← Back", callback_data="menu:premium")],
-        ]),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
     await callback.answer()
@@ -218,9 +192,10 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         session.txid = session.txid or message.text
         await service.update_status(session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id)
         
+        text = build_proof_received_card(session.id)
+        
         await message.reply_text(
-            "✅ Proof submitted! Our admins will review it shortly.\n"
-            f"<b>Session ID:</b> <code>{session.id}</code>",
+            text,
             parse_mode=ParseMode.HTML
         )
         
@@ -238,26 +213,19 @@ async def _notify_admins_of_request(client: Client, session: PaymentSession, met
         logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
         topic_id = None
 
-    text = (
-        "💎 <b>New Payment Request</b>\n\n"
-        f"👤 User: <code>{session.user_id}</code>\n"
-        f"📦 Plan: {PLANS[session.plan_id]['label']}\n"
-        f"💰 <b>৳{session.locked_amount:.2f}</b>\n"
-        f"📱 Method: {method.capitalize()}\n"
-        f"🆔 Session: <code>{session.id}</code>"
-    )
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
     
-    buttons = [
-        [
-            InlineKeyboardButton("📩 Send Payment Details", callback_data=f"pay:admin:send:{session.id}"),
-            InlineKeyboardButton("❌ Reject Request", callback_data=f"pay:admin:rej_req:{session.id}")
-        ]
-    ]
+    # Get user object for better card details
+    user = await client.get_users(session.user_id)
+    plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
+    
+    text = build_admin_payment_review_card(user, session, plan)
+    reply_markup = build_admin_payment_actions(session.id, session.user_id)
     
     await client.send_message(
         chat_id=settings.VERIFICATION_GROUP_ID,
         text=text,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
         message_thread_id=topic_id
     )
@@ -440,28 +408,20 @@ async def _notify_admins_of_submission(client: Client, session: PaymentSession, 
         logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
         topic_id = None
 
-    text = (
-        "💎 <b>Payment Proof Received</b>\n\n"
-        f"👤 User: <code>{session.user_id}</code>\n"
-        f"📦 Plan: {PLANS[session.plan_id]['label']}\n"
-        f"💰 <b>৳{session.locked_amount:.2f}</b>\n"
-        f"📱 Method: {session.payment_method}\n"
-        f"🔑 TXID: <code>{txid}</code>\n"
-        f"🆔 Session: <code>{session.id}</code>"
-    )
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
     
-    buttons = [
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f"pay:admin:approve:{session.id}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"pay:admin:reject:{session.id}")
-        ]
-    ]
+    # Get user object for better card details
+    user = await client.get_users(session.user_id)
+    plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
+    
+    text = build_admin_payment_review_card(user, session, plan)
+    reply_markup = build_admin_payment_actions(session.id, session.user_id)
     
     await client.send_photo(
         chat_id=settings.VERIFICATION_GROUP_ID,
         photo=file_id,
         caption=text,
-        reply_markup=InlineKeyboardMarkup(buttons),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
         message_thread_id=topic_id
     )
@@ -478,6 +438,7 @@ async def handle_admin_decision(client: Client, callback: CallbackQuery) -> None
         return
         
     service = get_payment_service()
+    from app.ui.admin_cards import build_admin_rejection_reasons
     
     if action == "approve":
         success = await service.approve_payment(client, session_id, admin_id)
@@ -492,15 +453,23 @@ async def handle_admin_decision(client: Client, callback: CallbackQuery) -> None
             
     elif action == "reject":
         # Show rejection reasons
-        buttons = [
-            [InlineKeyboardButton("Invalid TXID", callback_data=f"pay:admin:rej_rsn:txid:{session_id}")],
-            [InlineKeyboardButton("Wrong Amount", callback_data=f"pay:admin:rej_rsn:amount:{session_id}")],
-            [InlineKeyboardButton("Duplicate TX", callback_data=f"pay:admin:rej_rsn:dup:{session_id}")],
-            [InlineKeyboardButton("Screenshot Unclear", callback_data=f"pay:admin:rej_rsn:unclear:{session_id}")]
-        ]
-        await callback.message.edit_reply_markup(InlineKeyboardMarkup(buttons))
+        reply_markup = build_admin_rejection_reasons(session_id)
+        await callback.message.edit_reply_markup(reply_markup)
         await callback.answer()
 
+@Client.on_callback_query(filters.regex(r"^pay:admin:back:(?P<sid>.+)$"))
+async def handle_admin_back_to_main(client: Client, callback: CallbackQuery) -> None:
+    session_id = callback.matches[0].group("sid")
+    from app.ui.admin_cards import build_admin_payment_actions
+    
+    service = get_payment_service()
+    session = await service.get_session(session_id)
+    if not session:
+        await callback.answer("Session no longer exists.")
+        return
+        
+    await callback.message.edit_reply_markup(build_admin_payment_actions(session.id, session.user_id))
+    await callback.answer()
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:rej_rsn:(?P<reason>\w+):(?P<sid>.+)$"))
 async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> None:
@@ -525,13 +494,13 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
             reply_markup=None
         )
         
-        # Notify User
+        # Notify User with new UI
         try:
+            text, reply_markup = build_payment_rejected_card(reason_text, session_id)
             await client.send_message(
                 session.user_id,
-                f"❌ <b>Your payment was rejected.</b>\n\n"
-                f"<b>Reason:</b> {reason_text}\n\n"
-                "Please try again or contact support if you have questions.",
+                text,
+                reply_markup=reply_markup,
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
