@@ -184,7 +184,7 @@ class AppLifecycle:
                 )
                 logger.info("Payment timeout monitor registered")
         except Exception as e:
-            logger.error("Failed to register payment timeout monitor", extra={"ctx_error": str(e)}, exc_info=True)
+            logger.error("Failed to register payment timeout monitor", exc_info=e)
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")
