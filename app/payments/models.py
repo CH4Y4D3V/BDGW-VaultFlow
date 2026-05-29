@@ -71,13 +71,17 @@ class PaymentSession:
 
     @classmethod
     def from_dict(cls, data: dict) -> PaymentSession:
+        raw_status = data["status"]
+        if raw_status == "waiting_txid":
+            raw_status = "awaiting_payment"
+            
         return cls(
             id=data["_id"],
             user_id=data["user_id"],
             plan_id=data["plan_id"],
             locked_amount=data["locked_amount"],
             currency=data.get("currency", "BDT"),
-            status=PaymentStatus(data["status"]),
+            status=PaymentStatus(raw_status),
             payment_method=data.get("payment_method"),
             txid=data.get("txid"),
             screenshot_file_id=data.get("screenshot_file_id"),
