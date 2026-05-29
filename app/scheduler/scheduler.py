@@ -220,7 +220,7 @@ class DistributionScheduler:
                 if remaining <= 0:
                     continue
 
-                pending = await self._queue_repo.get_channel_pending_count(int(dest))
+                pending = await self._queue_repo.get_channel_pending_count(source_id)
                 slots = min(settings.MAX_JOBS_PER_CYCLE - pending, remaining)
                 if slots <= 0:
                     continue

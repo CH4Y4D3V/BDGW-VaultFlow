@@ -547,10 +547,10 @@ class QueueRepository:
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
-    async def get_channel_pending_count(self, channel_id: int) -> int:
-        """Return count of PENDING jobs for a given channel_id."""
+    async def get_channel_pending_count(self, source_channel_id: str) -> int:
+        """Return count of PENDING jobs for a given source_channel_id."""
         return await self._queue.count_documents(
-            {"target_channel_id": channel_id, "status": "pending"}
+            {"source_channel_id": source_channel_id, "status": "pending"}
         )
 
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
