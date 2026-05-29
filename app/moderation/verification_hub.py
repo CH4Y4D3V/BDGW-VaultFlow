@@ -61,12 +61,39 @@ async def forward_to_verification(
     group_id = settings.VERIFICATION_GROUP_ID
     first_msg_id = messages[0].id
 
+    logger.info(
+        "submission_forward_started",
+        extra={
+            "ctx_user_id": submitter_user_id,
+            "ctx_count": len(messages),
+            "ctx_group_id": group_id,
+            "ctx_topic_id": topic_id
+        }
+    )
+
     forwarded_ids: list[int] = []
     for msg in messages:
         fwd = await _forward_single(client, msg, group_id, submitter_user_id, topic_id)
         if fwd is None:
+            logger.error(
+                "submission_forward_failed",
+                extra={
+                    "ctx_user_id": submitter_user_id,
+                    "ctx_msg_id": msg.id,
+                    "ctx_group_id": group_id
+                }
+            )
             return False
         forwarded_ids.append(fwd.id)
+
+    logger.info(
+        "submission_forward_completed",
+        extra={
+            "ctx_user_id": submitter_user_id,
+            "ctx_count": len(messages),
+            "ctx_forwarded_ids": forwarded_ids
+        }
+    )
 
     last_fwd_id = forwarded_ids[-1]
     count = len(messages)
@@ -104,7 +131,7 @@ async def forward_to_verification(
                 message_thread_id=topic_id
             )
             logger.info(
-                "Verification card sent",
+                "verification_card_created",
                 extra={
                     "ctx_user_id": submitter_user_id,
                     "ctx_first_msg_id": first_msg_id,

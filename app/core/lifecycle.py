@@ -46,14 +46,14 @@ class AppLifecycle:
         if self._running:
             return
 
-        logger.info("Bootstrapping VaultFlow runtime environment...")
+        logger.info("lifecycle_bootstrapping_start")
 
         # 0. Start health server immediately for Railway liveness probe
         try:
             port = int(os.environ.get("PORT", 8080))
             self._health_runner = await start_health_server(port)
         except Exception:
-            logger.error("Failed to start health server", exc_info=True)
+            logger.error("lifecycle_health_server_failed", exc_info=True)
 
         # 1. Config Validation
         self._validate_config()
@@ -62,20 +62,20 @@ class AppLifecycle:
         try:
             await DatabaseManager.connect()
         except Exception:
-            logger.exception("BOOT FAILURE: Database initialization aborted")
+            logger.exception("lifecycle_db_init_failed")
             sys.exit(1)
 
         try:
             channel_service = ChannelService()
             await channel_service.seed_channels()
         except Exception:
-            logger.exception("BOOT FAILURE: Channel seeding failed")
+            logger.exception("lifecycle_channel_seeding_failed")
             sys.exit(1)
 
 
         # 3. Telegram Client
         try:
-            logger.info("Starting Pyrogram client...")
+            logger.info("lifecycle_bot_start")
             await self._bot.start()
             me = await self._bot.get_me()
             set_bot_id(me.id)
@@ -84,13 +84,13 @@ class AppLifecycle:
                 await self._verify_channel_access()
             except Exception as verify_err:
                 logger.warning(
-                    "Channel access check failed — continuing in degraded state",
+                    "lifecycle_channel_access_failed_degraded",
                     extra={"ctx_error": str(verify_err)},
                 )
 
             total_handlers = self._audit_handler_registration()
             logger.info(
-                "Pyrogram connected",
+                "lifecycle_bot_connected",
                 extra={
                     "ctx_bot_username": me.username,
                     "ctx_total_handlers": total_handlers,
@@ -99,7 +99,7 @@ class AppLifecycle:
 
         except Exception as e:
             logger.exception(
-                "Failed to start Pyrogram client",
+                "lifecycle_bot_start_failed",
                 extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
             )
             raise
@@ -117,7 +117,7 @@ class AppLifecycle:
             await self._engine.start()
         except Exception as e:
             logger.exception(
-                "Failed to start Distribution Engine",
+                "lifecycle_engine_start_failed",
                 extra={"ctx_error_type": type(e).__name__, "ctx_error": str(e)},
             )
             raise
@@ -126,7 +126,7 @@ class AppLifecycle:
         try:
             await self._subscription_worker.start(bot=self._bot)
         except Exception:
-            logger.error("Failed to start Subscription Worker", exc_info=True)
+            logger.error("lifecycle_subscription_worker_failed", exc_info=True)
             self._subscription_worker = None
 
         # 6. Referral System Integration
@@ -153,15 +153,15 @@ class AppLifecycle:
                     channel_id=int(settings.VAULT_CHANNEL_ID)
                 )
                 self._referral_scheduler.register_jobs()
-                logger.info("Referral background jobs registered")
+                logger.info("lifecycle_referral_jobs_registered")
             else:
-                logger.warning("Referral Scheduler skipped: DistributionEngine scheduler not found")
+                logger.warning("lifecycle_referral_scheduler_skipped")
 
             # 4. Membership Handler bridge
             init_membership_handler(ref_service)
 
         except Exception as e:
-            logger.error("Referral system startup failed (non-fatal)", extra={"ctx_error": str(e)})
+            logger.error("lifecycle_referral_startup_failed", extra={"ctx_error": str(e)})
 
         # 7. Payment Timeout Monitor
         try:
@@ -182,12 +182,12 @@ class AppLifecycle:
                     replace_existing=True,
                     coalesce=True
                 )
-                logger.info("Payment timeout monitor registered")
+                logger.info("lifecycle_payment_monitor_registered")
         except Exception as e:
-            logger.error("Failed to register payment timeout monitor", exc_info=e)
+            logger.error("lifecycle_payment_monitor_failed", extra={"ctx_error": str(e)}, exc_info=True)
 
         self._running = True
-        logger.info("VaultFlow fully started — all systems operational.")
+        logger.info("lifecycle_startup_complete")
 
     async def _verify_channel_access(self) -> None:
         """
@@ -195,7 +195,7 @@ class AppLifecycle:
         This forces Pyrogram to cache the peer. Only the VAULT_CHANNEL_ID is
         considered a critical failure that aborts startup.
         """
-        logger.info("Verifying access to critical channels...")
+        logger.info("lifecycle_channel_verification_start")
         channels_to_check = {
             "VAULT_CHANNEL_ID": getattr(settings, "VAULT_CHANNEL_ID", None),
             "PREMIUM_CHANNEL_ID": getattr(settings, "PREMIUM_CHANNEL_ID", None),
@@ -209,36 +209,33 @@ class AppLifecycle:
 
             if not raw_id:
                 if is_critical:
-                    logger.critical(f"CRITICAL: {name} is not configured in environment. Aborting.")
+                    logger.critical("lifecycle_critical_channel_unconfigured", extra={"ctx_channel": name})
                     critical_failure = True
                 continue
 
             try:
                 channel_id = int(raw_id)
                 chat = await self._bot.get_chat(channel_id)
-                logger.info(f"✅ Access confirmed for {name}: '{chat.title}' ({chat.id})")
+                logger.info("lifecycle_channel_access_confirmed", extra={"ctx_channel": name, "ctx_title": chat.title})
             except Exception as e:
                 log_msg = (
                     f"Failed to access channel {name} ({raw_id}). "
                     f"Ensure the bot is a member with appropriate permissions. Error: {e}"
                 )
                 if is_critical:
-                    logger.critical(f"CRITICAL FAILURE: {log_msg}")
+                    logger.critical("lifecycle_critical_channel_access_failed", extra={"ctx_error": str(e)})
                     critical_failure = True
                 else:
                     if name == "PREMIUM_CHANNEL_ID":
                         logger.warning(
-                            "PREMIUM_CHANNEL_ID is unreachable — invite link generation will fail until this is resolved.",
+                            "lifecycle_premium_channel_unreachable",
                             extra={"ctx_error": str(e)}
                         )
                     else:
-                        logger.warning(f"WARNING: {log_msg}")
+                        logger.warning("lifecycle_channel_access_warning", extra={"ctx_msg": log_msg})
 
         if critical_failure:
-            logger.critical(
-                "Aborting startup due to critical channel access failure. "
-                "Please check bot membership and permissions in the VAULT_CHANNEL_ID."
-            )
+            logger.critical("lifecycle_boot_aborted_channel_failure")
             sys.exit(1)
 
     def _audit_handler_registration(self) -> int:
@@ -251,18 +248,12 @@ class AppLifecycle:
         try:
             dispatcher = getattr(self._bot, "dispatcher", None)
             if dispatcher is None:
-                logger.error(
-                    "STARTUP AUDIT: bot.dispatcher is None — "
-                    "Pyrogram plugin system may not have initialised"
-                )
+                logger.error("lifecycle_audit_dispatcher_missing")
                 return 0
 
             groups = getattr(dispatcher, "groups", None)
             if groups is None:
-                logger.error(
-                    "STARTUP AUDIT: bot.dispatcher.groups is None — "
-                    "cannot verify handler registration"
-                )
+                logger.error("lifecycle_audit_groups_missing")
                 return 0
 
             for group_id, handlers in groups.items():
@@ -280,7 +271,7 @@ class AppLifecycle:
 
         except Exception as e:
             logger.error(
-                "STARTUP AUDIT: handler inspection failed",
+                "lifecycle_audit_inspection_failed",
                 extra={"ctx_error": str(e)},
                 exc_info=True,
             )
@@ -288,11 +279,7 @@ class AppLifecycle:
 
         if total_handlers == 0:
             logger.critical(
-                "STARTUP AUDIT CRITICAL: ZERO handlers registered. "
-                "The bot is connected but will not respond to ANY update. "
-                "Check that app/handlers/ contains valid plugin files and that "
-                "Pyrogram loaded them successfully (no import errors at startup). "
-                "Aborting — a silent deaf bot is worse than not starting.",
+                "lifecycle_audit_no_handlers",
                 extra={"ctx_groups": dict(breakdown)},
             )
             sys.exit(1)
@@ -300,7 +287,7 @@ class AppLifecycle:
         for group_id in sorted(breakdown.keys()):
             names = breakdown[group_id]
             logger.info(
-                "STARTUP AUDIT: handler group registered",
+                "lifecycle_audit_group_registered",
                 extra={
                     "ctx_group_id": group_id,
                     "ctx_handler_count": len(names),
@@ -309,7 +296,7 @@ class AppLifecycle:
             )
 
         logger.info(
-            "STARTUP AUDIT: handler registration complete",
+            "lifecycle_audit_complete",
             extra={
                 "ctx_total_handlers": total_handlers,
                 "ctx_group_count": len(breakdown),
@@ -318,57 +305,54 @@ class AppLifecycle:
 
         if total_handlers < 5:
             logger.warning(
-                "STARTUP AUDIT WARNING: very few handlers registered (%d). "
-                "Plugin loading may have partially failed. "
-                "Check for import errors in app/handlers/ files.",
-                total_handlers,
+                "lifecycle_audit_few_handlers",
                 extra={"ctx_total": total_handlers},
             )
 
         return total_handlers
 
     async def stop(self) -> None:
-        logger.info("Initiating graceful shutdown...")
+        logger.info("lifecycle_shutdown_start")
 
         if self._referral_scheduler:
             try:
                 await self._referral_scheduler.stop()
             except Exception:
-                logger.error("Error stopping Referral Scheduler", exc_info=True)
+                logger.error("lifecycle_shutdown_referral_failed", exc_info=True)
 
         if self._subscription_worker:
             try:
                 await self._subscription_worker.stop()
             except Exception:
-                logger.error("Error stopping subscription worker", exc_info=True)
+                logger.error("lifecycle_shutdown_sub_worker_failed", exc_info=True)
 
         if self._engine and self._engine.is_running:
             try:
                 await asyncio.wait_for(self._engine.stop(), timeout=45.0)
             except asyncio.TimeoutError:
-                logger.warning("Engine shutdown timed out after 45 seconds")
+                logger.warning("lifecycle_shutdown_engine_timeout")
             except Exception:
-                logger.error("Error during engine shutdown", exc_info=True)
+                logger.error("lifecycle_shutdown_engine_failed", exc_info=True)
 
         if self._bot and getattr(self._bot, "is_connected", False):
             try:
                 await self._bot.stop()
             except Exception:
-                logger.error("Error stopping Pyrogram client", exc_info=True)
+                logger.error("lifecycle_shutdown_bot_failed", exc_info=True)
 
         try:
             await DatabaseManager.disconnect()
         except Exception:
-            logger.error("Error disconnecting MongoDB", exc_info=True)
+            logger.error("lifecycle_shutdown_db_failed", exc_info=True)
 
         if self._health_runner:
             try:
                 await self._health_runner.cleanup()
             except Exception:
-                logger.error("Error stopping health server", exc_info=True)
+                logger.error("lifecycle_shutdown_health_failed", exc_info=True)
 
         self._running = False
-        logger.info("Shutdown complete.")
+        logger.info("lifecycle_shutdown_complete")
 
     def _validate_config(self) -> None:
         required = [
@@ -383,7 +367,7 @@ class AppLifecycle:
         missing = [name for name, val in required if not val]
         if missing:
             logger.error(
-                "Missing required environment variables",
+                "lifecycle_config_validation_failed",
                 extra={"ctx_missing": missing},
             )
             sys.exit(1)

@@ -268,6 +268,10 @@ class WatermarkWorker:
                 })
 
             # 4. Atomic Swap
+            logger.info(
+                "Watermarking complete, swapping references",
+                extra={"ctx_group_id": group_id, "ctx_count": len(new_refs)}
+            )
             await self._queue.swap_album_vault_references(group_id, new_refs)
             logger.info(
                 "Atomic vault reference swap complete for album",

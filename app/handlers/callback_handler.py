@@ -62,6 +62,14 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
     try:
         await callback.answer()
         
+        logger.info(
+            "moderation_callback_received",
+            extra={
+                "ctx_moderator_id": callback.from_user.id,
+                "ctx_data": callback.data
+            }
+        )
+        
         if not callback.message or not callback.message.chat:
             return
 

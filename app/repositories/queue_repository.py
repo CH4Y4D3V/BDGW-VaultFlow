@@ -503,19 +503,32 @@ class QueueRepository:
 
     # ─── Atomic Album Operations ──────────────────────────────────────────────
 
-    async def swap_album_vault_references(self, media_group_id: str, new_refs: List[dict]) -> None:
+    async def swap_album_vault_references(self, identifier: str, new_refs: List[dict]) -> None:
         """
-        Atomically replace all vault references for an album.
+        Atomically replace all vault references for an album or a single job.
+        identifier: either a media_group_id (string) or a job_id (string)
         new_refs: list of {"album_sequence_index": int, "vault_message_id": int}
         """
         async with await self._db.client.start_session() as session:
             async with session.start_transaction():
                 for ref in new_refs:
+                    # Try album match first
+                    query = {
+                        "media_group_id": identifier,
+                        "album_sequence_index": ref["album_sequence_index"],
+                    }
+                    
+                    # If no media_group_id, fallback to _id
+                    if ref["album_sequence_index"] is None:
+                        query = {
+                            "$or": [
+                                {"_id": ObjectId(identifier)},
+                                {"media_group_id": identifier}
+                            ]
+                        }
+
                     result = await self._queue.update_one(
-                        {
-                            "media_group_id": media_group_id,
-                            "album_sequence_index": ref["album_sequence_index"],
-                        },
+                        query,
                         {
                             "$set": {
                                 "vault_message_id": ref["vault_message_id"],
@@ -528,7 +541,7 @@ class QueueRepository:
                     )
                     if result.modified_count == 0:
                         raise ConsistencyViolationError(
-                            f"Failed to swap reference for album {media_group_id} "
+                            f"Failed to swap reference for {identifier} "
                             f"index {ref['album_sequence_index']}"
                         )
 
@@ -549,13 +562,33 @@ class QueueRepository:
         return result if result is not None else []
 
     async def recover_stale_jobs(self) -> int:
-        """Recover jobs from crashed workers."""
+        """Recover jobs from crashed workers, returning them to their correct pre-lock status."""
         threshold = datetime.now(timezone.utc) - timedelta(
             seconds=settings.STALE_LOCK_THRESHOLD_SECONDS
         )
         now = datetime.now(timezone.utc)
 
-        result = await self._queue.update_many(
+        # 1. Recover jobs that were in WATERMARKING status (identified by watermark_state=PROCESSING)
+        wm_result = await self._queue.update_many(
+            {
+                "status": JobStatus.LOCKED,
+                "locked_at": {"$lt": threshold},
+                "watermark_required": True,
+                "watermark_state": WatermarkState.PROCESSING
+            },
+            {
+                "$set": {
+                    "status": JobStatus.WATERMARKING,
+                    "watermark_state": WatermarkState.PENDING,
+                    "locked_by": None,
+                    "locked_at": None,
+                    "updated_at": now,
+                }
+            },
+        )
+
+        # 2. Recover all other jobs to PENDING
+        other_result = await self._queue.update_many(
             {
                 "status": JobStatus.LOCKED,
                 "locked_at": {"$lt": threshold},
@@ -569,7 +602,7 @@ class QueueRepository:
                 }
             },
         )
-        return result.modified_count
+        return wm_result.modified_count + other_result.modified_count
 
     # ─── Fairness / Repost Prevention ────────────────────────────────────────
 

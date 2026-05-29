@@ -108,7 +108,7 @@ def permission_required(role: Role, silent: bool = False):
             else:
                 # Unknown update type — deny by default
                 logger.warning(
-                    "permission_required: unknown update type",
+                    "permission_unknown_update_type",
                     extra={"ctx_type": type(update).__name__, "ctx_role": role.value},
                 )
                 return
@@ -120,7 +120,7 @@ def permission_required(role: Role, silent: bool = False):
 
             if not has_role(user_id, role):
                 logger.warning(
-                    "permission_required: access denied",
+                    "permission_access_denied",
                     extra={
                         "ctx_user_id": user_id,
                         "ctx_required_role": role.value,
@@ -140,7 +140,7 @@ def permission_required(role: Role, silent: bool = False):
                             )
                     except Exception as e:
                         logger.debug(
-                            "permission_required: could not send denial",
+                            "permission_denial_reply_failed",
                             extra={"ctx_error": str(e)},
                         )
                 return

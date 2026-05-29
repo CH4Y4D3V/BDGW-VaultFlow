@@ -19,7 +19,7 @@ class DataMigrationManager:
         """
         Audit and stabilize the queue collection to prevent index creation failures.
         """
-        logger.info("MIGRATION: Starting queue stabilization audit...")
+        logger.info("migration_queue_stabilization_start")
         
         queue = db[settings.QUEUE_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
@@ -41,7 +41,7 @@ class DataMigrationManager:
         invalid_count = await queue.count_documents(invalid_ref_query)
         if invalid_count > 0:
             logger.warning(
-                "MIGRATION: Detected active jobs with null/invalid vault references. Quarantining...",
+                "migration_invalid_vault_refs_detected",
                 extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_count": invalid_count}
             )
             
@@ -56,7 +56,7 @@ class DataMigrationManager:
             # Purge from active queue so index creation can proceed
             result = await queue.delete_many(invalid_ref_query)
             logger.info(
-                "MIGRATION: Removed invalid jobs from active queue.",
+                "migration_invalid_jobs_removed",
                 extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_deleted": result.deleted_count}
             )
 
@@ -71,7 +71,7 @@ class DataMigrationManager:
         content_dups = await queue.aggregate(pipeline).to_list(length=None)
         if content_dups:
             logger.warning(
-                "MIGRATION: Detected duplicate active content groups. Resolving...",
+                "migration_duplicate_content_groups_detected",
                 extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_dups": len(content_dups)}
             )
             for dup in content_dups:
@@ -86,18 +86,18 @@ class DataMigrationManager:
                         await quarantine.insert_one(doc)
                         await queue.delete_one({"_id": doc_id})
             logger.info(
-                "MIGRATION: Resolved content_id conflicts.",
+                "migration_content_id_conflicts_resolved",
                 extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_resolved": len(content_dups)}
             )
 
-        logger.info("MIGRATION: Queue stabilization complete.")
+        logger.info("migration_queue_stabilization_complete")
 
     @classmethod
     async def stabilize_vault(cls, db: AsyncIOMotorDatabase) -> None:
         """
         Audit and stabilize the vault collection before index creation.
         """
-        logger.info("MIGRATION: Starting vault stabilization audit...")
+        logger.info("migration_vault_stabilization_start")
         
         vault = db[settings.VAULT_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
@@ -114,7 +114,7 @@ class DataMigrationManager:
         invalid_count = await vault.count_documents(invalid_vault_query)
         if invalid_count > 0:
             logger.warning(
-                "MIGRATION: Detected vault items with null references. Quarantining...",
+                "migration_null_vault_refs_detected",
                 extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_count": invalid_count}
             )
             
@@ -127,11 +127,11 @@ class DataMigrationManager:
             
             result = await vault.delete_many(invalid_vault_query)
             logger.info(
-                "MIGRATION: Removed invalid vault items.",
+                "migration_invalid_vault_items_removed",
                 extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_deleted": result.deleted_count}
             )
 
-        logger.info("MIGRATION: Vault stabilization complete.")
+        logger.info("migration_vault_stabilization_complete")
 
 
 class DatabaseManager:
@@ -145,7 +145,7 @@ class DatabaseManager:
         if cls._initialized:
             return
 
-        logger.info("Starting MongoDB connection process...")
+        logger.info("mongodb_connection_start")
         try:
             client = AsyncIOMotorClient(
                 settings.MONGO_URI,
@@ -157,44 +157,44 @@ class DatabaseManager:
             cls._client = client
             cls._db = client[settings.MONGO_DB_NAME]
 
-            # â”€â”€ Connection Test (FATAL if fails) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            logger.debug("Pinging MongoDB admin database...")
+            # ── Connection Test (FATAL if fails) ───────────────────────────
+            logger.debug("mongodb_ping_admin")
             await client.admin.command("ping")
-            logger.info("MongoDB socket connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
+            logger.info("mongodb_connection_established", extra={"ctx_db": settings.MONGO_DB_NAME})
 
-            # â”€â”€ Capabilities Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── Capabilities Audit ──────────────────────────────────────────
             try:
                 # Check for replica set status (needed for transactions)
                 status = await client.admin.command("replSetGetStatus")
-                logger.info("MongoDB replica set detected", extra={"ctx_set_name": status.get("set")})
+                logger.info("mongodb_replica_set_detected", extra={"ctx_set_name": status.get("set")})
                 cls._transactions_supported = True
             except Exception:
-                logger.warning("MongoDB replica set NOT detected â€” transactions will be disabled/unavailable")
+                logger.warning("mongodb_replica_set_missing")
                 cls._transactions_supported = False
 
         except Exception as e:
-            logger.exception("FATAL: MongoDB connection or authentication failed")
+            logger.exception("mongodb_connection_failed")
             raise e
 
-        # â”€â”€ MIGRATION STABILIZATION (Non-FATAL) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── MIGRATION STABILIZATION (Non-FATAL) ──────────────────────────
         # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
         try:
             await DataMigrationManager.stabilize_queue(cls._db)
             await DataMigrationManager.stabilize_vault(cls._db)
         except Exception as e:
             logger.error(
-                "MIGRATION: Data stabilization audit failed — attempting to proceed to index creation",
+                "migration_stabilization_audit_failed",
                 extra={"ctx_error": str(e)}
             )
 
         # Schema Verification
-        logger.debug("Initiating index verification/creation phase...")
+        logger.debug("mongodb_index_verification_start")
         try:
             await cls._ensure_indexes()
-            logger.info("All MongoDB indexes verified/created")
+            logger.info("mongodb_indexes_verified")
         except Exception as e:
             logger.error(
-                "DEGRADED: Index verification failed. Application will boot with missing/stale indexes.",
+                "mongodb_index_verification_failed",
                 extra={"ctx_error": str(e)}
             )
 
@@ -220,7 +220,7 @@ class DatabaseManager:
             payment_repo = PaymentRepository(cls._db)
             try:
                 await payment_repo.create_indexes()
-                logger.info("MongoDB initialization complete (Connection + Indices)")
+                logger.info("mongodb_initialization_complete")
             except Exception as e:
                 index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
@@ -253,7 +253,7 @@ class DatabaseManager:
             cls._client = None
             cls._db = None
             cls._initialized = False
-            logger.info("MongoDB connection closed")
+            logger.info("mongodb_connection_closed")
 
     @classmethod
     def get_db(cls) -> AsyncIOMotorDatabase:
@@ -267,9 +267,9 @@ class DatabaseManager:
         db = cls.get_db()
 
         async def _safe_create(collection_name: str, indexes: list[IndexModel]) -> None:
-            logger.debug(f"Verifying indexes for collection: {collection_name}")
+            logger.debug("mongodb_index_verification_collection", extra={"ctx_collection": collection_name})
             
-            # â”€â”€ RC-11: Surgical Index Reconciliation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            # ── RC-11: Surgical Index Reconciliation ──────────────────────
             # Specifically for unique indexes which often change definitions
             target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique"]
             
@@ -290,7 +290,7 @@ class DatabaseManager:
                             
                             if mismatch:
                                 logger.warning(
-                                    f"Index definition mismatch for {target_name}. Surgically recreating...",
+                                    "mongodb_index_definition_mismatch",
                                     extra={
                                         "ctx_collection": collection_name,
                                         "ctx_index": target_name,
@@ -301,40 +301,40 @@ class DatabaseManager:
                                 await db[collection_name].drop_index(target_name)
             except Exception as e:
                 logger.warning(
-                    f"Surgical index audit failed for {collection_name} (non-fatal)",
-                    extra={"ctx_error": str(e)}
+                    "mongodb_index_audit_failed",
+                    extra={"ctx_collection": collection_name, "ctx_error": str(e)}
                 )
 
             try:
                 await db[collection_name].create_indexes(indexes)
-                logger.debug(f"Successfully verified indexes for {collection_name}")
+                logger.debug("mongodb_index_verified_collection", extra={"ctx_collection": collection_name})
             except Exception as e:
                 # RC-10 FIX: Catch other index specification mismatches.
                 error_str = str(e)
                 if "already exists with different options" in error_str or "IndexOptionsConflict" in error_str:
                     logger.warning(
-                        f"Index conflict detected in {collection_name}. Attempting full collection recovery...",
+                        "mongodb_index_conflict_detected",
                         extra={"ctx_collection": collection_name, "ctx_error": error_str}
                     )
                     try:
                         await db[collection_name].drop_indexes()
                         await db[collection_name].create_indexes(indexes)
-                        logger.info(f"Successfully recovered and recreated indexes for {collection_name}")
+                        logger.info("mongodb_index_recovered_collection", extra={"ctx_collection": collection_name})
                         return
                     except Exception as secondary_e:
                         logger.error(
-                            f"Index recovery failed for {collection_name}",
+                            "mongodb_index_recovery_failed",
                             extra={"ctx_collection": collection_name, "ctx_error": str(secondary_e)}
                         )
                         raise secondary_e
                 
                 logger.error(
-                    f"Index creation failed for collection: {collection_name}",
+                    "mongodb_index_creation_failed",
                     extra={"ctx_collection": collection_name, "ctx_error": str(e)}
                 )
                 raise e
 
-        # â”€â”€ Queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Queue ────────────────────────────────────────────────────────
         await _safe_create(settings.QUEUE_COLLECTION, [
             IndexModel(
                 [("content_id", ASCENDING)],
@@ -418,7 +418,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Vault â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Vault ────────────────────────────────────────────────────────
         await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
             IndexModel(
@@ -466,7 +466,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Pending submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Pending submissions ──────────────────────────────────────────
         await _safe_create(settings.PENDING_COLLECTION, [
             IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
             IndexModel(
@@ -481,7 +481,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Subscriptions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Subscriptions ──────────────────────────────────────────────
         await _safe_create("subscriptions", [
             IndexModel([("user_id", ASCENDING)], name="sub_user_unique", unique=True),
             IndexModel(
@@ -506,7 +506,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Memberships â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Memberships ────────────────────────────────────────────────
         await _safe_create("memberships", [
             IndexModel(
                 [("user_id", ASCENDING), ("chat_id", ASCENDING)],
@@ -530,7 +530,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Invites â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Invites ────────────────────────────────────────────────────
         await _safe_create("invites", [
             IndexModel([("token", ASCENDING)], name="invite_token_unique", unique=True),
             IndexModel(
@@ -556,7 +556,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Activity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Activity ───────────────────────────────────────────────────
         await _safe_create("activity", [
             IndexModel(
                 [("user_id", ASCENDING), ("timestamp", DESCENDING)],
@@ -582,12 +582,12 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Bot config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Bot config ─────────────────────────────────────────────────
         await _safe_create("bot_config", [
             IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
         ])
 
-        # â”€â”€ User topics â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── User topics ────────────────────────────────────────────────
         await _safe_create("user_topics", [
             IndexModel(
                 [("user_id", ASCENDING), ("topic_type", ASCENDING)],
@@ -602,7 +602,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Support messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Support messages ───────────────────────────────────────────
         await _safe_create("support_messages", [
             IndexModel(
                 [("topic_id", ASCENDING)],
@@ -627,7 +627,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Moderation audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Moderation audit ───────────────────────────────────────────
         await _safe_create("moderation_audit", [
             IndexModel(
                 [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
@@ -648,7 +648,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Consent records â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Consent records ────────────────────────────────────────────
         await _safe_create("consent_records", [
             IndexModel(
                 [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
@@ -657,7 +657,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ Creator profiles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── Creator profiles ───────────────────────────────────────────
         await _safe_create("creator_profiles", [
             IndexModel(
                 [("user_id", ASCENDING)],
@@ -671,7 +671,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ M3: submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── M3: submissions ───────────────────────────────────────────
         await _safe_create("submissions", [
             IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
@@ -681,7 +681,7 @@ class DatabaseManager:
             IndexModel([("user_id", ASCENDING)], name="submissions_user", background=True),
         ])
 
-        # â”€â”€ M3: takedown_requests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── M3: takedown_requests ─────────────────────────────────────
         await _safe_create("takedown_requests", [
             IndexModel(
                 [("content_id", ASCENDING), ("status", ASCENDING)],
@@ -697,7 +697,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ M3: floodwait_tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── M3: floodwait_tracking ────────────────────────────────────
         await _safe_create("floodwait_tracking", [
             IndexModel(
                 [("target_id", ASCENDING), ("recorded_at", DESCENDING)],
@@ -712,7 +712,7 @@ class DatabaseManager:
             ),
         ])
 
-        # â”€â”€ M3: distribution_jobs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        # ── M3: distribution_jobs ─────────────────────────────────────
         await _safe_create("distribution_jobs", [
             IndexModel([("content_id", ASCENDING)], name="distjob_content", background=True),
             IndexModel(
@@ -722,7 +722,7 @@ class DatabaseManager:
             ),
         ])
 
-        logger.info("All MongoDB indexes verified/created")
+        logger.info("mongodb_indexes_verified")
 
 
 async def get_database() -> AsyncIOMotorDatabase:

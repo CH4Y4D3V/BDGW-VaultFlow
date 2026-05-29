@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 from app.referral.service import ReferralService

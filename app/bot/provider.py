@@ -15,16 +15,6 @@ async def fetch_distribution_content() -> List[Dict]:
 
     Provides the data boundary ensuring only fully ingested, non-duplicate,
     non-locked, non-cooldown content is released to the fairness selector.
-
-    LOG CLARITY FIX: the previous implementation emitted
-    "No active channels returned by content provider" even when channels
-    existed and were queried but their vault was simply empty. This was
-    misleading — operators interpreted it as a seeding failure when in
-    reality the system was working correctly and just had no content to post.
-    The final log now distinguishes three cases clearly:
-      A) No channels configured at all (seeding failure)
-      B) Channels configured, some have eligible content
-      C) Channels configured, ALL vaults empty / all locked
     """
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
@@ -34,9 +24,8 @@ async def fetch_distribution_content() -> List[Dict]:
     total_active_channels = await channels.count_documents({"is_active": True})
     if total_active_channels == 0:
         logger.error(
-            "fetch_distribution_content: channel_config has NO active channels. "
-            "Seed is missing — check NSFW_GROUP_ID / PREMIUM_GROUP_ID env vars "
-            "and ensure ChannelService.seed_channels() ran at boot."
+            "no_active_channels_configured",
+            extra={"ctx_hint": "Check NSFW_GROUP_ID/PREMIUM_GROUP_ID and seeding"}
         )
         return []
 
@@ -49,7 +38,7 @@ async def fetch_distribution_content() -> List[Dict]:
 
         if not dest or not source_id:
             logger.warning(
-                "Skipping malformed channel config — missing destination or source_channel_id",
+                "malformed_channel_config_skipped",
                 extra={"ctx_config_id": str(config.get("_id"))},
             )
             continue
@@ -80,7 +69,7 @@ async def fetch_distribution_content() -> List[Dict]:
         content = await cursor.to_list(length=None)
 
         logger.info(
-            "Channel provider query result",
+            "channel_provider_query_result",
             extra={
                 "ctx_dest": dest,
                 "ctx_total_queued": total_queued,
@@ -99,14 +88,12 @@ async def fetch_distribution_content() -> List[Dict]:
         else:
             if total_queued == 0:
                 logger.info(
-                    "Vault is empty for destination — no content has been approved yet. "
-                    "Submit and approve content through the moderation pipeline to begin distribution.",
+                    "vault_empty_for_destination",
                     extra={"ctx_dest": dest},
                 )
             else:
                 logger.warning(
-                    "Vault has queued content but none is eligible — "
-                    "all items are locked, removed, or on cooldown.",
+                    "vault_has_content_none_eligible",
                     extra={
                         "ctx_dest": dest,
                         "ctx_total_queued": total_queued,
@@ -114,15 +101,9 @@ async def fetch_distribution_content() -> List[Dict]:
                     },
                 )
 
-    # LOG CLARITY FIX: distinguish empty vault (normal on fresh deploy) from
-    # missing channel config (seeding failure). The old message fired for both.
     if not active_configs:
         logger.info(
-            "fetch_distribution_content: returning no eligible content this cycle. "
-            "Channels are configured (%d active) but all destination vaults are "
-            "empty or fully locked. This is normal on a fresh deployment — "
-            "submit content via the bot and approve it through moderation.",
-            total_active_channels,
+            "no_eligible_content_this_cycle",
             extra={"ctx_active_channels": total_active_channels},
         )
 

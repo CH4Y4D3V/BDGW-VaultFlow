@@ -7,7 +7,6 @@ Resolves vault references from multiple schema versions for backwards compatibil
 
 from __future__ import annotations
 
-import asyncio
 from typing import List, Tuple
 
 from pyrogram.client import Client
@@ -62,7 +61,7 @@ def _resolve_vault_ref(job: dict) -> Tuple[str, int]:
             return resolved_channel, int(meta_msg_id)
         # Label unknown — log and fall through to content_id parse
         logger.warning(
-            "Unknown source_channel_id label, attempting content_id parse",
+            "unknown_source_label_attempting_parse",
             extra={"ctx_job_id": job_id, "ctx_label": source_label},
         )
 
@@ -78,7 +77,7 @@ def _resolve_vault_ref(job: dict) -> Tuple[str, int]:
                 parsed_msg_id = int(parts[1])
                 if parsed_chat_id.lstrip("-").isdigit():
                     logger.info(
-                        "Resolved vault ref from content_id",
+                        "vault_ref_resolved_from_content_id",
                         extra={
                             "ctx_job_id": job_id,
                             "ctx_chat_id": parsed_chat_id,
@@ -119,7 +118,7 @@ async def execute_telegram_delivery(job_docs: List[dict], target_id: str) -> Non
         raise FloodWaitError(seconds=int(e.value))
     except RPCError as e:
         logger.error(
-            "Telegram RPC error during delivery",
+            "telegram_rpc_error_delivery",
             extra={"ctx_target": target_id, "ctx_error": str(e)},
         )
         raise DispatcherError(f"RPC error: {e}")
@@ -127,7 +126,7 @@ async def execute_telegram_delivery(job_docs: List[dict], target_id: str) -> Non
         raise
     except Exception as e:
         logger.error(
-            "Unexpected delivery failure",
+            "unexpected_delivery_failure",
             extra={"ctx_target": target_id, "ctx_error": str(e)},
             exc_info=True,
         )
@@ -145,7 +144,7 @@ async def _send_single(bot: Client, job: dict, target_id: str) -> None:
         caption=job.get("caption") or None,
     )
     logger.info(
-        "Single message delivered",
+        "single_message_delivered",
         extra={
             "ctx_target": target_id,
             "ctx_from_chat": from_chat_id,
@@ -170,13 +169,13 @@ async def _send_album(bot: Client, sorted_jobs: List[dict], target_id: str) -> N
             message_id=first_msg_id,
         )
         logger.info(
-            "Album delivered via copy_media_group",
+            "album_delivered_copy_media_group",
             extra={"ctx_target": target_id, "ctx_from_chat": from_chat_id},
         )
         return
     except (RPCError, Exception) as e:
         logger.warning(
-            "copy_media_group failed, falling back to sequential copy_message",
+            "copy_media_group_failed_using_fallback",
             extra={"ctx_target": target_id, "ctx_error": str(e)},
         )
 
@@ -191,6 +190,6 @@ async def _send_album(bot: Client, sorted_jobs: List[dict], target_id: str) -> N
         )
 
     logger.info(
-        "Album delivered via sequential fallback",
+        "album_delivered_sequential_fallback",
         extra={"ctx_target": target_id, "ctx_count": len(sorted_jobs)},
     )

@@ -239,6 +239,15 @@ async def archive_to_vault(
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
     
+    logger.info(
+        "vault_insert_started",
+        extra={
+            "ctx_submitter": submitter_user_id,
+            "ctx_dest": dest,
+            "ctx_count": len(messages)
+        }
+    )
+
     for i, msg in enumerate(messages):
         media = getattr(msg, str(msg.media.value), None) if msg.media else None
         file_unique_id = getattr(media, "file_unique_id", None) if media else None
@@ -301,6 +310,15 @@ async def archive_to_vault(
         }
 
         await vault_col.update_one({"content_id": content_id}, update_doc, upsert=True)
+
+    logger.info(
+        "vault_insert_completed",
+        extra={
+            "ctx_submitter": submitter_user_id,
+            "ctx_dest": dest,
+            "ctx_vault_ids": vault_message_ids
+        }
+    )
 
     return vault_message_ids
 
@@ -410,6 +428,16 @@ async def execute_approve(
     """
     display_name = _destination_display_name(dest)
 
+    logger.info(
+        "moderation_approved",
+        extra={
+            "ctx_moderator_id": moderator_id,
+            "ctx_submitter_id": submitter_user_id,
+            "ctx_dest": dest,
+            "ctx_action": "approve_immediate"
+        }
+    )
+
     vault_ids = await archive_to_vault(
         client, messages, dest,
         submitter_user_id=submitter_user_id,
@@ -503,6 +531,16 @@ async def execute_queue(
     6. Write audit log
     """
     display_name = _destination_display_name(dest)
+
+    logger.info(
+        "moderation_approved",
+        extra={
+            "ctx_moderator_id": moderator_id,
+            "ctx_submitter_id": submitter_user_id,
+            "ctx_dest": dest,
+            "ctx_action": "queue_for_distribution"
+        }
+    )
 
     vault_ids = await archive_to_vault(
         client, messages, dest,

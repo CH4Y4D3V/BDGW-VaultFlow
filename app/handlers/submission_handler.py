@@ -72,6 +72,16 @@ async def handle_anonymous_toggle(client: Client, callback: CallbackQuery) -> No
 async def handle_media_submission(client: Client, message: Message) -> None:
     user_id = message.from_user.id
     
+    logger.info(
+        "submission_received",
+        extra={
+            "ctx_user_id": user_id,
+            "ctx_msg_id": message.id,
+            "ctx_media_group_id": message.media_group_id,
+            "ctx_media_type": message.media.value if message.media else "unknown"
+        }
+    )
+    
     # B-06 Guard: Skip if in payment flow
     redis = get_redis()
     if await redis.exists(f"pay_session:{user_id}"):
@@ -142,8 +152,9 @@ async def _finalize_submission(client: Client, messages: list[Message], user_id:
         await redis.expire(cap_key, 86400)
 
         # Forward to verification topic
-        topic_service = get_topic_service()
-        topic_id = await topic_service.get_or_create_user_topic(client, user_id, TOPIC_CONTENT)
+        from app.services.topic_manager import get_topic_manager, TOPIC_CONTENT
+        topic_manager = get_topic_manager()
+        topic_id = await topic_manager.get_or_create_user_topic(client, user_id, TOPIC_CONTENT)
         
         success = await forward_to_verification(
             client=client,

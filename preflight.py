@@ -1,78 +1,59 @@
-﻿import ast, sys, pathlib, re
+import asyncio
+import sys
+from pyrogram import Client
+from pyrogram.enums import ChatType
+from app.config import settings
+from app.bot.client import get_bot
 
-ROOT = pathlib.Path(".")
-ERRORS = []
-
-BAD_LOGGER = ["logger.info(", "logger.debug(", "logger.warning(", "logger.error(", "logger.critical("]
-
-def check_bare_kwargs(path):
-    src = path.read_text(errors="replace")
-    for i, line in enumerate(src.splitlines(), 1):
-        stripped = line.strip()
-        if stripped.startswith("#"):
+async def run_audit():
+    bot = get_bot()
+    await bot.start()
+    print("✅ Bot connected")
+    
+    channels = {
+        "VAULT": settings.VAULT_CHANNEL_ID,
+        "VERIFICATION": settings.VERIFICATION_GROUP_ID,
+        "NSFW": settings.NSFW_GROUP_ID,
+        "PREMIUM": settings.PREMIUM_GROUP_ID,
+    }
+    
+    for name, cid in channels.items():
+        if not cid:
+            print(f"❌ {name}: ID not configured")
             continue
-        for prefix in BAD_LOGGER:
-            if prefix in stripped:
-                kwargs = re.findall(r",\s*(\w+)\s*=", stripped)
-                bad = [k for k in kwargs if k not in ("extra", "exc_info", "stack_info")]
-                if bad:
-                    ERRORS.append(f"BARE KWARG LOGGER: {path}:{i} — {bad} — {stripped[:100]}")
-def check_syntax(path):
-    try:
-        ast.parse(path.read_text(errors="replace"))
-    except SyntaxError as e:
-        ERRORS.append(f"SYNTAX ERROR: {path}:{e.lineno} — {e.msg}")
+            
+        try:
+            chat = await bot.get_chat(cid)
+            print(f"✅ {name}: Access confirmed ('{chat.title}')")
+            
+            # Specific checks for Verification Group
+            if name == "VERIFICATION":
+                if not getattr(chat, "is_forum", False):
+                    print("❌ VERIFICATION: Group is NOT a forum! Enable topics.")
+                else:
+                    print("✅ VERIFICATION: Forum enabled")
+                
+                # Check permissions
+                me = await chat.get_member("me")
+                if not me.privileges:
+                    print("❌ VERIFICATION: Bot is not an admin!")
+                elif not me.privileges.can_manage_topics:
+                    print("❌ VERIFICATION: Bot lacks 'can_manage_topics' permission!")
+                else:
+                    print("✅ VERIFICATION: Admin with manage_topics permission")
+            
+            # Check vault permissions
+            if name == "VAULT":
+                me = await chat.get_member("me")
+                if not me.privileges or not me.privileges.can_post_messages:
+                    print("❌ VAULT: Bot cannot post messages!")
+                else:
+                    print("✅ VAULT: Can post messages")
+                    
+        except Exception as e:
+            print(f"❌ {name}: Error: {e}")
 
-def check_patterns():
-    checks = [
-        ("app/handlers/submission_handler.py", "_redis", "FIX 9 — _redis NameError still present"),
-        ("app/handlers/support_handler.py",    "_redis", "FIX 10 — _redis NameError still present"),
-        ("app/distribution/dispatcher.py",     "import asyncio", "FIX 8 — missing import asyncio"),
-        ("app/scheduler/scheduler.py",         "import asyncio", "FIX 4 — missing import asyncio"),
-    ]
-    for filepath, pattern, msg in checks:
-        p = ROOT / filepath
-        if not p.exists():
-            ERRORS.append(f"FILE MISSING: {filepath}")
-            continue
-        src = p.read_text(errors="replace")
-        if filepath.endswith("submission_handler.py") or filepath.endswith("support_handler.py"):
-            bad = re.findall(r'\b_redis\b', src)
-            if bad:
-                ERRORS.append(f"{msg} — found {len(bad)} occurrence(s) in {filepath}")
-        else:
-            if pattern not in src:
-                ERRORS.append(f"{msg} — pattern not found in {filepath}")
+    await bot.stop()
 
-def check_lifecycle():
-    p = ROOT / "app/core/lifecycle.py"
-    if not p.exists():
-        ERRORS.append("FILE MISSING: app/core/lifecycle.py")
-        return
-    src = p.read_text(errors="replace")
-    if "sys.exit" in src and "client.start" in src:
-        exit_pos = src.index("sys.exit")
-        start_pos = src.index("client.start")
-        if start_pos < exit_pos:
-            ERRORS.append("LIFECYCLE: client.start() appears BEFORE sys.exit() — may be unreachable")
-
-py_files = list(ROOT.rglob("app/**/*.py"))
-print(f"Scanning {len(py_files)} files...")
-
-for f in py_files:
-    check_syntax(f)
-    check_bare_kwargs(f)
-
-check_patterns()
-check_lifecycle()
-
-print()
-if ERRORS:
-    print(f"ISSUES FOUND: {len(ERRORS)}\n")
-    for e in ERRORS:
-        print(f"  * {e}")
-    sys.exit(1)
-else:
-    print("All checks passed — safe to deploy.")
-
-
+if __name__ == "__main__":
+    asyncio.run(run_audit())

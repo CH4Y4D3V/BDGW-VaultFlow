@@ -182,14 +182,18 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     user_id = message.from_user.id
     
     # B-06 FIX: Redis-backed fast check
-    from app.core.redis_client import get_redis
-    redis = get_redis()
-    if redis:
-        try:
-            if not await redis.exists(f"pay_session:{user_id}"):
-                raise ContinuePropagation
-        except Exception as e:
-            logger.warning("Redis fast-path failed in handle_payment_inputs", extra={"ctx_error": str(e)})
+    from app.core.redis_client import RedisClient
+    try:
+        redis = await RedisClient.get_client()
+        if not await redis.exists(f"pay_session:{user_id}"):
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception as e:
+        logger.warning(
+            "Redis fast-path failed in handle_payment_inputs — falling back to DB",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)}
+        )
 
     service = get_payment_service()
     
@@ -225,13 +229,13 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
 
 
 async def _notify_admins_of_request(client: Client, session: PaymentSession, method: str) -> None:
-    from app.services.topic_service import get_topic_service
-    topic_service = get_topic_service()
+    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
+    topic_manager = get_topic_manager()
     
     try:
-        topic_id = await topic_service.get_or_create_payments_topic(client)
+        topic_id = await topic_manager.get_or_create_user_topic(client, session.user_id, TOPIC_PAYMENT)
     except Exception as e:
-        logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
+        logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
         topic_id = None
 
     text = (
@@ -427,13 +431,13 @@ async def handle_admin_manual_details_reply(client: Client, message: Message) ->
 
 
 async def _notify_admins_of_submission(client: Client, session: PaymentSession, txid: str, file_id: str) -> None:
-    from app.services.topic_service import get_topic_service
-    topic_service = get_topic_service()
+    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
+    topic_manager = get_topic_manager()
     
     try:
-        topic_id = await topic_service.get_or_create_payments_topic(client)
+        topic_id = await topic_manager.get_or_create_user_topic(client, session.user_id, TOPIC_PAYMENT)
     except Exception as e:
-        logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
+        logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
         topic_id = None
 
     text = (

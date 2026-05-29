@@ -18,38 +18,53 @@ class PaymentTimeoutMonitor:
 
     async def check_timeouts(self, client: Client) -> None:
         """Scan active timeouts and send progressive warnings or expire sessions."""
-        now = datetime.now(timezone.utc)
-        
-        # We query the repository for timeouts that need attention
-        # This is a bit high-level, let's assume we can get them from repo
-        db = self.repository._db
-        timeouts_col = db["payment_timeouts"]
-        
-        # 1. Expire sessions (>= 30 mins)
-        expired_cursor = timeouts_col.find({"expires_at": {"$lte": now}})
-        async for doc in expired_cursor:
-            await self.expire_session(client, doc["payment_id"])
+        try:
+            now = datetime.now(timezone.utc)
+            
+            # We query the repository for timeouts that need attention
+            db = self.repository._db
+            timeouts_col = db["payment_timeouts"]
+            
+            # 1. Expire sessions (>= 30 mins)
+            expired_cursor = timeouts_col.find({"expires_at": {"$lte": now}})
+            async for doc in expired_cursor:
+                try:
+                    await self.expire_session(client, doc["payment_id"])
+                except Exception as e:
+                    logger.exception(
+                        "Failed to expire session",
+                        extra={
+                            "ctx_payment_id": doc.get("payment_id"),
+                            "ctx_user_id": doc.get("user_id"),
+                            "ctx_error": str(e)
+                        }
+                    )
 
-        # 2. Progressive warnings
-        # Warning 1: +5 mins (25 mins left)
-        # Warning 2: +10 mins (20 mins left)
-        # Warning 3: +20 mins (10 mins left)
-        # Note: session expires at now + 30 mins.
-        
-        # +5 mins warning (25 mins remaining)
-        w1_cutoff = now + timedelta(minutes=25)
-        await self._send_warnings(client, timeouts_col, w1_cutoff, "five_minute_warning_sent", 
-                                "⚠️ <b>Payment reminder:</b> Your session will expire in 25 minutes.")
+            # 2. Progressive warnings
+            
+            # +5 mins warning (25 mins remaining)
+            w1_cutoff = now + timedelta(minutes=25)
+            await self._send_warnings(client, timeouts_col, w1_cutoff, "five_minute_warning_sent", 
+                                    "⚠️ <b>Payment reminder:</b> Your session will expire in 25 minutes.")
 
-        # +10 mins warning (20 mins remaining)
-        w2_cutoff = now + timedelta(minutes=20)
-        await self._send_warnings(client, timeouts_col, w2_cutoff, "ten_minute_warning_sent", 
-                                "⚠️ <b>Payment reminder:</b> Your session will expire in 20 minutes.")
-        
-        # +20 mins warning (10 mins remaining)
-        w3_cutoff = now + timedelta(minutes=10)
-        await self._send_warnings(client, timeouts_col, w3_cutoff, "twenty_minute_warning_sent", 
-                                "⚠️ <b>URGENT:</b> Your payment session will expire in 10 minutes!")
+            # +10 mins warning (20 mins remaining)
+            w2_cutoff = now + timedelta(minutes=20)
+            await self._send_warnings(client, timeouts_col, w2_cutoff, "ten_minute_warning_sent", 
+                                    "⚠️ <b>Payment reminder:</b> Your session will expire in 20 minutes.")
+            
+            # +20 mins warning (10 mins remaining)
+            w3_cutoff = now + timedelta(minutes=10)
+            await self._send_warnings(client, timeouts_col, w3_cutoff, "twenty_minute_warning_sent", 
+                                    "⚠️ <b>URGENT:</b> Your payment session will expire in 10 minutes!")
+        except Exception as e:
+            logger.exception(
+                "PaymentTimeoutMonitor.check_timeouts failed",
+                extra={
+                    "ctx_error_type": type(e).__name__,
+                    "ctx_error_message": str(e),
+                }
+            )
+            raise
 
     async def _send_warnings(self, client: Client, col, cutoff, flag, text):
         cursor = col.find({

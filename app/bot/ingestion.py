@@ -85,10 +85,14 @@ class MediaIngestionPipeline:
             local_path = None
             if msg.has_protected_content and media:
                 try:
-                    logger.info("Downloading protected content", extra={"ctx_msg": msg.id})
+                    logger.info("protected_content_download_start", extra={"ctx_msg_id": msg.id})
                     local_path = await bot.download_media(message=msg)
                 except Exception as e:
-                    logger.error("Failed to download protected content", exc_info=e)
+                    logger.error(
+                        "protected_content_download_failed",
+                        extra={"ctx_msg_id": msg.id, "ctx_error": str(e)},
+                        exc_info=True
+                    )
                     continue
 
             # Media normalization
@@ -126,11 +130,15 @@ class MediaIngestionPipeline:
         if operations:
             try:
                 result = await vault.bulk_write(operations, ordered=False)
-                logger.info("Album archived", extra={"ctx_inserted": result.upserted_count})
+                logger.info("album_archived_vault", extra={"ctx_inserted": result.upserted_count})
             except BulkWriteError:
-                logger.warning("Duplicate media ignored during archival")
+                logger.warning("duplicate_media_ignored_archival")
             except Exception as e:
-                logger.error("Vault archival failure", exc_info=e)
+                logger.error(
+                    "vault_archival_failed",
+                    extra={"ctx_error": str(e)},
+                    exc_info=True
+                )
 
     async def recover_partial_albums(self) -> None:
         """
