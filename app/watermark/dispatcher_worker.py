@@ -101,7 +101,8 @@ class DispatcherWorker:
 
                 groups = {}
                 for job in jobs:
-                    gid = job.get("metadata", {}).get("media_group_id") or str(job["_id"])
+                    meta = job.get("metadata") or {}
+                    gid = job.get("media_group_id") or meta.get("media_group_id") or str(job["_id"])
                     if gid not in groups:
                         groups[gid] = []
                     groups[gid].append(job)
@@ -127,7 +128,8 @@ class DispatcherWorker:
     async def _handle_job_group(self, job_docs: list[dict]) -> None:
         primary_job = job_docs[0]
         primary_id = str(primary_job["_id"])
-        group_id = primary_job.get("metadata", {}).get("media_group_id") or primary_id
+        meta = primary_job.get("metadata") or {}
+        group_id = primary_job.get("media_group_id") or meta.get("media_group_id") or primary_id
 
         corr_token = set_correlation_id(f"grp_{group_id}")
         try:
