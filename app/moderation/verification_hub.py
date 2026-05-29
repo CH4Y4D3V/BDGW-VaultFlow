@@ -6,7 +6,7 @@ from typing import Optional
 from pyrogram.client import Client
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, User
 
 from app.config import settings
 from app.utils.logger import get_logger
@@ -15,14 +15,32 @@ logger = get_logger(__name__)
 
 _MAX_RETRIES = 3
 
-# ── Callback data format ──────────────────────────────────────────────────────
-#
-# Step 1 — moderator picks action:
-#   mod_app_nsfw:{submitter_id}:{msg_id}
-#   mod_app_prem:{submitter_id}:{msg_id}
-#   mod_reject:{submitter_id}:{msg_id}
-# ─────────────────────────────────────────────────────────────────────────────
-
+async def post_user_info_card(client: Client, user: User, chat_id: int, topic_id: Optional[int] = None) -> bool:
+    """Sends a formatted HTML user-info message to chat_id / topic_id."""
+    text = (
+        f"👤 <b>User Info</b>\n\n"
+        f"ID: <code>{user.id}</code>\n"
+        f"Name: {user.first_name or ''} {user.last_name or ''}\n"
+    )
+    if user.username:
+        text += f"Username: @{user.username}"
+        
+    for attempt in range(_MAX_RETRIES):
+        try:
+            await client.send_message(
+                chat_id=chat_id,
+                text=text,
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+            return True
+        except FloodWait as e:
+            await asyncio.sleep(e.value + settings.FLOODWAIT_EXTRA_BUFFER)
+        except Exception as e:
+            if attempt == _MAX_RETRIES - 1:
+                logger.error("Failed to post user info card", extra={"ctx_user_id": user.id, "ctx_error": str(e)})
+            await asyncio.sleep(2 ** attempt)
+    return False
 
 async def forward_to_verification(
     client: Client,
@@ -32,7 +50,6 @@ async def forward_to_verification(
 ) -> bool:
     """
     Forward submission to the verification group and post the moderation card.
-    If topic_id is provided, it forwards to that specific forum topic.
     """
     if not messages:
         logger.warning(
@@ -55,7 +72,6 @@ async def forward_to_verification(
     count = len(messages)
     media_label = "album" if count > 1 else "item"
     
-    # Check if user is anonymous (F-02)
     from app.core.redis_client import get_redis
     redis = get_redis()
     is_anon = await redis.exists(f"user:anon:{submitter_user_id}")
@@ -99,8 +115,7 @@ async def forward_to_verification(
             return True
 
         except FloodWait as e:
-            wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-            await asyncio.sleep(wait)
+            await asyncio.sleep(e.value + settings.FLOODWAIT_EXTRA_BUFFER)
 
         except RPCError as e:
             if attempt == _MAX_RETRIES - 1:

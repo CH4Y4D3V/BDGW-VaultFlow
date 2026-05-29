@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 from app.payments.models import PaymentStatus
 from app.payments.repository import PaymentRepository
@@ -60,7 +61,7 @@ class PaymentTimeoutMonitor:
                 await client.send_message(doc["user_id"], text, parse_mode=ParseMode.HTML)
                 await col.update_one({"_id": doc["_id"]}, {"$set": {flag: True}})
             except Exception as e:
-                logger.warning(f"Failed to send {flag}", extra={"ctx_user_id": doc["user_id"], "ctx_error": str(e)})
+                logger.warning("Failed to send warning", extra={"ctx_user_id": doc["user_id"], "ctx_flag": flag, "ctx_error": str(e)})
 
     async def expire_session(self, client: Client, payment_id: str) -> bool:
         session = await self.repository.get_session(payment_id)

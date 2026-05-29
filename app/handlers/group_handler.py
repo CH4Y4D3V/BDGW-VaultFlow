@@ -12,6 +12,7 @@ from app.config import settings
 from app.bot.client import get_bot_id
 from app.moderation import verification_hub
 from app.services import submission_service
+from app.services.topic_service import get_topic_service, TOPIC_CONTENT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -65,8 +66,16 @@ async def _submit_for_review(
 ) -> None:
     reference = messages[0]
     try:
+        topic_service = get_topic_service()
+        topic_id = await topic_service.get_user_topic_id(submitter_id, TOPIC_CONTENT)
+
         await submission_service.register_pending(submitter_id, messages)
-        success = await verification_hub.forward_to_verification(client, messages, submitter_id)
+        success = await verification_hub.forward_to_verification(
+            client=client, 
+            messages=messages, 
+            submitter_user_id=submitter_id,
+            topic_id=topic_id
+        )
         if not success:
             await submission_service.reject_pending(reference.id)
             logger.error(

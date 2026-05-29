@@ -215,6 +215,7 @@ class DatabaseManager:
             payment_repo = PaymentRepository(cls._db)
             try:
                 await payment_repo.create_indexes()
+                logger.info("MongoDB initialization complete (Connection + Indices)")
             except Exception as e:
                 logger.error(
                     "non_core_index_setup_failed",
@@ -222,7 +223,6 @@ class DatabaseManager:
                     exc_info=True
                 )
             
-            logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
             logger.error(
                 "non_core_final_init_failed",
@@ -717,4 +717,3 @@ class DatabaseManager:
 
 async def get_database() -> AsyncIOMotorDatabase:
     return DatabaseManager.get_db()
-

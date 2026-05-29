@@ -1,5 +1,4 @@
 
-
 """
 app/watermark/worker_pool.py
 
@@ -194,6 +193,7 @@ class WatermarkWorker:
                 media_type = job.get("media_type")
                 watermark_config = job.get("watermark_config") or {}
                 watermark_path = watermark_config.get("watermark_image_path")
+                watermark_text = watermark_config.get("watermark_text", "BDGW")
 
                 # 1. Download via vault-first refresh
                 media_path = await self._resolve_media_path(job, job_id)
@@ -214,6 +214,7 @@ class WatermarkWorker:
                         position=position,
                         opacity=opacity,
                         scale=scale,
+                        watermark_text=watermark_text,
                     )
                 elif media_type == MediaType.PHOTO.value:
                     processed_path = await self._ffmpeg.apply_image_watermark(

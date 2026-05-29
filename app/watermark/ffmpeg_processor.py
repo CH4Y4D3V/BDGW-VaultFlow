@@ -6,15 +6,12 @@ from pathlib import Path
 from typing import Optional
 from app.config import settings
 from app.core.models import WatermarkPosition, MediaType
-from app.core.exceptions import (
-    FFmpegError,
-    FFmpegTimeoutError,
-    WatermarkAssetError,
-)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+MEDIA_TEMP_DIR = Path(getattr(settings, "PROCESSED_MEDIA_DIR", ".")) / "tmp"
+WATERMARK_OUTPUT_DIR = Path(getattr(settings, "PROCESSED_MEDIA_DIR", ".")) / "watermarked"
 
 class WatermarkCache:
     """In-memory cache for processed watermark assets or common frames."""
@@ -38,8 +35,8 @@ class FFmpegProcessor:
 
     def __init__(self):
         self._cache = WatermarkCache()
-        self._temp_dir = Path(settings.MEDIA_TEMP_DIR)
-        self._output_dir = Path(settings.WATERMARK_OUTPUT_DIR)
+        self._temp_dir = MEDIA_TEMP_DIR
+        self._output_dir = WATERMARK_OUTPUT_DIR
         
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -170,3 +167,11 @@ class FFmpegProcessor:
     @property
     def cache(self) -> WatermarkCache:
         return self._cache
+
+    async def apply_image_watermark(self, input_path: str, watermark_path: str, position: WatermarkPosition, opacity: float, scale: float) -> str:
+        output_path = self._generate_output_path(input_path)
+        return await self._process_photo(input_path, output_path, {"watermark_image_path": watermark_path})
+
+    async def apply_video_watermark(self, input_path: str, watermark_path: str, position: WatermarkPosition, opacity: float, scale: float, watermark_text: str = "BDGW") -> str:
+        output_path = self._generate_output_path(input_path)
+        return await self._process_video(input_path, output_path, {"watermark_text": watermark_text})

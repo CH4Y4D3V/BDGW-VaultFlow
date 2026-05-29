@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pyrogram.client import Client
@@ -43,6 +43,7 @@ class SubscriptionWorker:
         self._bot: Optional[Client] = None
         self._running = False
         self._task: Optional[asyncio.Task] = None
+        self._warned: dict[int, set[str]] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -92,40 +93,41 @@ class SubscriptionWorker:
             # 7-day warning
             seven_days_docs = await self._service.get_expiring_soon(within_hours=168)
             for sub in seven_days_docs:
-                if not sub.metadata.get("seven_day_warned"):
+                if sub.user_id not in self._warned:
+                    self._warned[sub.user_id] = set()
+                if "seven_day_warned" not in self._warned[sub.user_id]:
                     await self._notify(
                         sub.user_id,
                         f"⏰ <b>Your subscription expires in 7 days.</b>\n\n"
                         f"Renew now to keep your premium access uninterrupted."
                     )
-                    sub.metadata["seven_day_warned"] = True
-                    await self._service._repo.upsert(sub)
+                    self._warned[sub.user_id].add("seven_day_warned")
 
             # 3-day warning (twice, 24h apart)
-            three_days_docs = await self._service.get_expiring_soon(within_hours(72))
+            three_days_docs = await self._service.get_expiring_soon(within_hours=72)
             for sub in three_days_docs:
+                if sub.user_id not in self._warned:
+                    self._warned[sub.user_id] = set()
                 # First 3-day warning (between 48h and 72h)
-                if not sub.metadata.get("three_day_warned_1"):
+                if "three_day_warned_1" not in self._warned[sub.user_id]:
                     await self._notify(
                         sub.user_id,
                         f"⏰ <b>Your subscription expires in 3 days.</b>\n\n"
                         f"Renew now to keep your premium access uninterrupted."
                     )
-                    sub.metadata["three_day_warned_1"] = True
-                    await self._service._repo.upsert(sub)
+                    self._warned[sub.user_id].add("three_day_warned_1")
                 
                 # Second 3-day warning (between 24h and 48h)
-                elif not sub.metadata.get("three_day_warned_2"):
+                elif "three_day_warned_2" not in self._warned[sub.user_id]:
                     # Only send if at least 24h passed since first warning
                     # (Simplified: check if expires_at is < now + 48h)
-                    if sub.expires_at < now + timedelta(hours=48):
+                    if sub.expires_at and sub.expires_at < now + timedelta(hours=48):
                         await self._notify(
                             sub.user_id,
                             f"⚠️ <b>Your subscription expires in less than 48 hours!</b>\n\n"
                             f"Renew now to avoid losing access."
                         )
-                        sub.metadata["three_day_warned_2"] = True
-                        await self._service._repo.upsert(sub)
+                        self._warned[sub.user_id].add("three_day_warned_2")
         except Exception as e:
             logger.error("Pre-expiry notification sweep failed", exc_info=e)
 
@@ -162,6 +164,7 @@ class SubscriptionWorker:
                     "Your access has been removed. To resubscribe, contact an admin.",
                 )
                 await self._remove_from_chats(sub.user_id)
+                self._warned.pop(sub.user_id, None)
                 logger.info(
                     "Subscription fully expired",
                     extra={"ctx_user_id": sub.user_id, "ctx_plan": sub.plan.value},

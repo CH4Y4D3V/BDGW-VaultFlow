@@ -149,9 +149,7 @@ async def _finalize_submission(client: Client, messages: list[Message], user_id:
             client=client,
             messages=messages,
             submitter_user_id=user_id,
-            # Pass topic_id if your forward_to_verification supports it, 
-            # otherwise ensure it uses the topic_router logic.
-            # I will update forward_to_verification next.
+            topic_id=topic_id
         )
         
         if success:

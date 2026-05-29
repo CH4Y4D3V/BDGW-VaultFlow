@@ -160,6 +160,9 @@ class AppLifecycle:
             # 4. Membership Handler bridge
             init_membership_handler(ref_service)
 
+        except Exception as e:
+            logger.error("Referral system startup failed (non-fatal)", extra={"ctx_error": str(e)})
+
         # 7. Payment Timeout Monitor
         try:
             from app.payments.repository import PaymentRepository
@@ -181,7 +184,7 @@ class AppLifecycle:
                 )
                 logger.info("Payment timeout monitor registered")
         except Exception as e:
-            logger.error("Failed to register payment timeout monitor", exc_info=e)
+            logger.error("Failed to register payment timeout monitor", extra={"ctx_error": str(e)}, exc_info=True)
 
         self._running = True
         logger.info("VaultFlow fully started — all systems operational.")
