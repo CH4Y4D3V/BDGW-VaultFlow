@@ -117,6 +117,12 @@ class PaymentRepository:
             await self._collection.create_index([("user_id", ASCENDING)], name="pay_user_id")
             await self._collection.create_index([("status", ASCENDING)], name="pay_status")
             await self._collection.create_index([("expires_at", ASCENDING)], name="pay_expires_at")
+            await self._collection.create_index(
+                [("txid", ASCENDING)], 
+                name="pay_txid_unique", 
+                unique=True, 
+                sparse=True
+            )
             await self._audit_collection.create_index([("payment_id", ASCENDING)], name="pay_audit_id")
             await self._topics_collection.create_index([("payment_id", ASCENDING)], name="pay_topic_id")
             await self._timeouts_collection.create_index([("expires_at", ASCENDING)], name="pay_timeout_expiry")

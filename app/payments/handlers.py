@@ -180,7 +180,22 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             await message.reply_text("Please send your Transaction ID (TXID) as text.")
             return
         
-        await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
+        # B-06 FIX: Check for duplicate TXID before updating status
+        from pymongo.errors import DuplicateKeyError
+        try:
+            success = await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
+            if not success:
+                await message.reply_text("❌ Error processing request. Please try again.")
+                return
+        except DuplicateKeyError:
+            await message.reply_text(
+                "❌ <b>Duplicate TXID detected.</b>\n\n"
+                "This Transaction ID has already been submitted for another payment. "
+                "If you believe this is an error, contact support.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+            
         await message.reply_text("✅ TXID received. Now please send a screenshot of the payment proof.")
         
     elif session.status == PaymentStatus.WAITING_SCREENSHOT:

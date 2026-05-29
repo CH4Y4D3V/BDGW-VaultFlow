@@ -27,10 +27,12 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+from weakref import WeakValueDictionary
+
 # ── Album Collector State ───────────────────────────────────────────────────
 
 _album_cache: dict[str, list[Message]] = {}
-_album_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_album_locks = WeakValueDictionary()
 _ALBUM_WAIT_SECONDS = 2.0
 
 
@@ -122,7 +124,15 @@ async def handle_media_submission(client: Client, message: Message) -> None:
     # 3. Album Handling
     if message.media_group_id:
         group_id = message.media_group_id
-        async with _album_locks[group_id]:
+        
+        # RC-15: Lock from WeakValueDictionary ensures safe concurrent access 
+        # while preventing memory leaks (lock is GC'd when no longer referenced).
+        lock = _album_locks.get(group_id)
+        if not lock:
+            lock = asyncio.Lock()
+            _album_locks[group_id] = lock
+
+        async with lock:
             if group_id not in _album_cache:
                 _album_cache[group_id] = []
                 asyncio.create_task(_process_album(client, group_id, user_id, cap_key))
@@ -136,7 +146,12 @@ async def handle_media_submission(client: Client, message: Message) -> None:
 
 async def _process_album(client: Client, group_id: str, user_id: int, cap_key: str) -> None:
     await asyncio.sleep(_ALBUM_WAIT_SECONDS)
-    async with _album_locks[group_id]:
+    
+    lock = _album_locks.get(group_id)
+    if not lock:
+        return
+
+    async with lock:
         messages = _album_cache.pop(group_id, [])
         if not messages:
             return
@@ -150,6 +165,21 @@ async def _finalize_submission(client: Client, messages: list[Message], user_id:
         redis = get_redis()
         await redis.incr(cap_key)
         await redis.expire(cap_key, 86400)
+
+        # ── RC-15: Vault-First Ingestion ─────────────────────────────────────
+        # Archive to vault immediately as PENDING. 
+        # This ensures that even if the bot restarts, the content is safe in 
+        # the vault and can be recovered by moderators.
+        from app.moderation.moderation_actions import archive_to_vault
+        from app.core.models import ModerationState
+        
+        await archive_to_vault(
+            client=client,
+            messages=messages,
+            submitter_user_id=user_id,
+            dest="pending",
+            initial_status=ModerationState.PENDING
+        )
 
         # Forward to verification topic
         from app.services.topic_manager import get_topic_manager, TOPIC_CONTENT

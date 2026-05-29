@@ -1,540 +1,121 @@
-# PRODUCTION RELEASE AUDIT — FINAL GATE BEFORE DEPLOYMENT
+You are the Final Production Release Board.
 
-You are no longer a coding assistant.
-
-You are acting as:
+Act as:
 
 * Principal Software Architect
-* Staff Backend Engineer
-* Production Readiness Reviewer
-* Senior Python Engineer (15+ years)
-* Telegram Infrastructure Specialist
-* Reliability Engineer
-* Security Auditor
+* Staff Python Engineer
+* Senior Telegram Infrastructure Engineer
 * Database Architect
+* Security Auditor
+* Reliability Engineer
 * DevOps Architect
-* Site Reliability Engineer (SRE)
+* SRE Lead
 * QA Lead
-* Release Manager
+* Production Readiness Reviewer
 
-Your job is NOT to help me.
+You have authority to BLOCK this release.
 
-Your job is to STOP this release if anything can break in production.
+Your goal is NOT to help.
 
-Treat this codebase as if:
+Your goal is to determine:
 
-* Paying customers will use it tomorrow.
-* A production outage will cost money.
-* A security breach will damage reputation.
-* A data-loss event is unacceptable.
-* A restart failure is unacceptable.
+CAN THIS SYSTEM SAFELY GO LIVE?
 
-Assume deployment date is within 24 hours.
+Audit the ENTIRE repository.
 
-Your responsibility is to determine:
+Review:
 
-CAN THIS SYSTEM GO LIVE?
-
-If not:
-
-WHY?
-
-WHAT MUST BE FIXED?
-
-WHAT IS THE RISK?
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PRIMARY OBJECTIVE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Perform a COMPLETE PRODUCTION AUDIT.
-
-Do not focus on the last bug.
-
-Do not focus on the latest commit.
-
-Audit the ENTIRE SYSTEM.
-
-Think like:
-
-Google Production Review
-
-Meta Launch Review
-
-Stripe Reliability Review
-
-Telegram Infrastructure Review
-
-Amazon Service Readiness Review
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PROJECT CONTEXT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-This is a production Telegram SaaS platform.
-
-Potential components include:
-
-* Subscription System
-* Payment System
+* Architecture
+* Database
+* Payments
+* Subscriptions
 * Verification Hub
 * Support System
 * Referral System
-* Queue Engine
+* Content Submission
 * Vault System
-* Content Moderation
-* Notification Center
+* Queue Engine
+* Distribution System
 * Watermark Pipeline
-* Distribution Engine
-* Audit Logging
-* Membership Management
-* User Dashboard
-* Admin Panel
-* Scheduler Workers
-
-Treat all systems as production critical.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NON-NEGOTIABLE RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Verify that:
-
-Database is source of truth.
-
-FSM is never source of truth.
-
-Every critical action is:
-
-* idempotent
-* restart-safe
-* recoverable
-* audit logged
-* concurrency safe
-
-There must be:
-
-* no silent failures
-* no orphan states
-* no duplicate deliveries
-* no duplicate subscriptions
-* no duplicate payments
-* no duplicate approvals
-* no infinite retries
-* no stuck jobs
-
-Any violation is a production risk.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 1
-ARCHITECTURE REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Identify:
-
-* tight coupling
-* hidden coupling
-* circular dependencies
-* poor separation of concerns
-* duplicated business logic
-* missing service layers
-* missing repository layers
-* anti-patterns
-* architecture debt
-
-Map:
-
-SYSTEM
-↓
-DEPENDENCIES
-↓
-DATA FLOW
-↓
-FAILURE IMPACT
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 2
-DATABASE REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Review:
-
-Collections
-Tables
-Indexes
-Constraints
-
-Verify:
-
-* uniqueness constraints
-* foreign references
-* orphan prevention
-* TTL usage
-* archival strategy
-* audit retention
-
-Identify:
-
-* missing indexes
-* dangerous queries
-* duplicate data risks
-* schema inconsistencies
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 3
-RESTART SAFETY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Assume:
-
-* VPS reboot
-* Railway restart
-* Docker restart
-* process crash
-* deployment restart
-* OOM kill
-
-Verify recovery of:
-
-* payments
-* subscriptions
-* support tickets
-* moderation actions
-* queue jobs
-* vault jobs
-* invites
-* notifications
-
-Anything relying only on memory is a bug.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 4
-RACE CONDITIONS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Search for:
-
-double approvals
-
-double payments
-
-double invite generation
-
-double subscription activation
-
-double queue insertion
-
-double distribution
-
-double support assignment
-
-duplicate callbacks
-
-duplicate event processing
-
-For each:
-
-Show exact file.
-
-Show exact function.
-
-Show exact execution path.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 5
-TELEGRAM INFRASTRUCTURE REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Review:
-
-FloodWait handling
-
-callback queries
-
-topic handling
-
-invite generation
-
-peer validity
-
-message editing
-
-album handling
-
-media references
-
-Verify:
-
-No Telegram-specific production risks.
-
-Identify:
-
-* expired file risks
-* callback timeout risks
-* topic corruption risks
-* invite abuse risks
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 6
-PAYMENT SYSTEM REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Verify:
-
-payment creation
-
-payment session lifecycle
-
-proof submission
-
-approval
-
-rejection
-
-expiration
-
-TXID uniqueness
-
-audit logging
-
-duplicate prevention
-
-Find:
-
-fraud vectors
-
-replay attacks
-
-abuse opportunities
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 7
-SUBSCRIPTION REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Verify:
-
-activation
-
-expiration
-
-renewal
-
-upgrade
-
-invite generation
-
-membership validation
-
-reconciliation workers
-
-Find:
-
-state inconsistencies
-
-orphan subscriptions
-
-access drift
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 8
-SUPPORT SYSTEM REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Verify:
-
-ticket ownership
-
-claim locking
-
-topic persistence
-
-closure workflow
-
-reopen workflow
-
-message routing
-
-admin assignment
-
-Find:
-
-cross-admin conflicts
-
-ownership violations
-
-ticket corruption risks
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 9
-QUEUE & DISTRIBUTION REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Review:
-
-scheduler
-
-workers
-
-dispatcher
-
-watermark pipeline
-
-floodwait handler
-
-fairness selector
-
-rate limiter
-
-dead letter queue
-
-Verify:
-
-No lost jobs.
-
-No duplicate deliveries.
-
-No starvation.
-
-No infinite retry loops.
-
-No stuck queue states.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 10
-SECURITY REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Identify:
-
-permission bypasses
-
-callback forgery
-
-privilege escalation
-
-support impersonation
-
-admin abuse paths
-
-unsafe commands
-
-injection risks
-
-payment fraud vectors
-
-invite abuse vectors
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 11
-PERFORMANCE REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Find:
-
-N+1 queries
-
-blocking operations
-
-slow Mongo queries
-
-slow Redis usage
-
-unnecessary API calls
-
-memory growth risks
-
-CPU bottlenecks
-
-I/O bottlenecks
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 12
-OBSERVABILITY REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Verify:
-
-logging
-
-audit logging
-
-health checks
-
-metrics
-
-alerts
-
-error reporting
-
-startup reporting
-
-shutdown reporting
-
-Determine:
-
-Can operators diagnose failures?
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 13
-DISASTER RECOVERY REVIEW
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Assume:
-
-database corruption
-
-Redis loss
-
-server loss
-
-accidental deletion
-
-deployment failure
-
-Verify:
-
-backup strategy
-
-restore strategy
-
-recovery procedures
-
-business continuity
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-AUDIT PHASE 14
-PRODUCTION READINESS SCORE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Score:
-
-Architecture
-Database
-Security
-Payments
-Subscriptions
-Support
-Queue System
-Distribution
-Observability
-Recovery
-Performance
-Scalability
-
-0-100
-
-Provide justification.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+* Admin System
+* Notification System
+* Startup Lifecycle
+* Shutdown Lifecycle
+* Redis
+* MongoDB
+* Railway Deployment
+
+Critical Requirements:
+
+* Database must be source of truth
+* FSM must never be source of truth
+* Every critical action must be idempotent
+* Every critical action must be restart-safe
+* Every critical action must be recoverable
+* Every critical action must be audit logged
+
+Specifically verify:
+
+1. TXID uniqueness enforcement
+2. Payment replay prevention
+3. Vault-backed moderation
+4. Membership reconciliation worker
+5. Dead letter queue
+6. Invite regeneration abuse prevention
+7. Support ownership locking
+8. Queue duplicate prevention
+9. FloodWait recovery
+10. Restart recovery
+
+Perform code-level verification.
+
+Do not assume features exist.
+
+Find exact files.
+
+Find exact functions.
+
+Show evidence.
+
+Output:
 
 SECTION A
-Executive Summary
+Launch Decision
 
 SECTION B
-Launch Decision
+Critical Launch Blockers
+
+SECTION C
+High Risk Issues
+
+SECTION D
+Medium Risk Issues
+
+SECTION E
+Architecture Review
+
+SECTION F
+Database Review
+
+SECTION G
+Security Review
+
+SECTION H
+Telegram Review
+
+SECTION I
+Restart Safety Review
+
+SECTION J
+Scalability Review
+
+SECTION K
+Production Readiness Score
+
+SECTION L
+Final Verdict
+
+Allowed verdicts:
 
 GO LIVE
 
@@ -542,78 +123,6 @@ GO LIVE WITH WARNINGS
 
 DO NOT LAUNCH
 
-SECTION C
-Critical Production Blockers
+If ANY critical issue exists:
 
-SECTION D
-High Risk Issues
-
-SECTION E
-Medium Risk Issues
-
-SECTION F
-Architecture Findings
-
-SECTION G
-Database Findings
-
-SECTION H
-Security Findings
-
-SECTION I
-Telegram Findings
-
-SECTION J
-Performance Findings
-
-SECTION K
-Reliability Findings
-
-SECTION L
-Recovery Findings
-
-SECTION M
-Required Fixes Before Launch
-
-SECTION N
-Recommended Fixes After Launch
-
-SECTION O
-Production Readiness Score
-
-SECTION P
-Final Verdict
-
-For every issue provide:
-
-Severity
-
-Category
-
-File
-
-Function
-
-Root Cause
-
-Failure Scenario
-
-Business Impact
-
-Recommended Fix
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FINAL INSTRUCTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Do not be polite.
-
-Do not protect my feelings.
-
-Do not assume good intentions in the code.
-
-Assume bugs exist until proven otherwise.
-
-Act like a release board that has authority to stop deployment.
-
-Your mission is to find everything that could break after launch.
+Verdict must be DO NOT LAUNCH.

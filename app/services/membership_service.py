@@ -288,5 +288,6 @@ class MembershipService:
         return await self._repo.get_stale_memberships(chat_id, before)
 
     async def count_active_members(self, chat_id: int) -> int:
-        members = await self._repo.get_chat_members(chat_id, MembershipStatus.ACTIVE)
-        return len(members)
+        return await self._repo.collection.count_documents(
+            {"chat_id": chat_id, "status": MembershipStatus.ACTIVE.value}
+        )

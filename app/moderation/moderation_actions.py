@@ -678,14 +678,33 @@ async def execute_reject(
     mod_card_message_id: int,
     moderator_name: str,
     moderator_id: int,
+    messages: Optional[list] = None,
 ) -> None:
     """
     Reject flow:
-    - Content not archived to vault, not distributed
+    - Update vault status to REJECTED (if messages provided)
     - Moderation card updated
     - Uploader notified
     - Audit log written
     """
+    if messages:
+        try:
+            db = DatabaseManager.get_db()
+            vault_col = db[settings.VAULT_COLLECTION]
+            now = datetime.now(timezone.utc)
+            
+            for msg in messages:
+                media = getattr(msg, str(msg.media.value), None) if msg.media else None
+                file_unique_id = getattr(media, "file_unique_id", None) if media else None
+                content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
+                
+                await vault_col.update_one(
+                    {"content_id": content_id},
+                    {"$set": {"status": ModerationState.REJECTED, "updated_at": now}}
+                )
+        except Exception as e:
+            logger.warning("Failed to update vault status to REJECTED", extra={"ctx_error": str(e)})
+
     await safe_edit_message(
         client,
         mod_card_chat_id,

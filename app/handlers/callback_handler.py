@@ -26,6 +26,12 @@ async def _recover_pending_from_db(
     client: Client,
     msg_id: int,
 ) -> Optional[tuple[int, list]]:
+    """
+    RC-15: Robust recovery from Vault.
+    Instead of re-fetching from the source chat (which might be deleted),
+    we fetch from the Vault channel where the content was archived 
+    during submission.
+    """
     try:
         from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
@@ -41,19 +47,40 @@ async def _recover_pending_from_db(
     message_ids = pending_doc.get("message_ids", [])
     submitter_user_id = pending_doc.get("submitter_user_id", 0)
 
-    if not chat_id or not message_ids:
+    if not message_ids:
         return None
 
     try:
-        messages = await client.get_messages(chat_id=chat_id, message_ids=message_ids)
-        if not isinstance(messages, list):
-            messages = [messages]
-        messages = [m for m in messages if m and m.id]
-        if not messages:
-            return None
-        return (submitter_user_id, messages)
+        vault_col = db[settings.VAULT_COLLECTION]
+        vault_messages = []
+        
+        for mid in message_ids:
+            # Match by source Chat ID and Message ID
+            v_doc = await vault_col.find_one({
+                "source_chat_id": str(chat_id),
+                "source_message_id": mid
+            })
+            
+            if v_doc and v_doc.get("vault_message_id"):
+                v_msg = await client.get_messages(
+                    chat_id=settings.VAULT_CHANNEL_ID,
+                    message_ids=v_doc["vault_message_id"]
+                )
+                if v_msg and not v_msg.empty:
+                    vault_messages.append(v_msg)
+
+        if not vault_messages:
+            # Fallback to source chat if vault lookup failed (e.g. legacy submissions)
+            logger.info("Recovery: Vault lookup failed, falling back to source chat", extra={"ctx_msg_id": msg_id})
+            messages = await client.get_messages(chat_id=chat_id, message_ids=message_ids)
+            if not isinstance(messages, list):
+                messages = [messages]
+            return (submitter_user_id, [m for m in messages if m and not m.empty])
+
+        return (submitter_user_id, vault_messages)
+
     except Exception as e:
-        logger.warning("_recover_pending_from_db: Telegram re-fetch failed", extra={"ctx_msg_id": msg_id, "ctx_error": str(e)})
+        logger.warning("_recover_pending_from_db: Recovery failed", extra={"ctx_msg_id": msg_id, "ctx_error": str(e)})
         return None
 
 
@@ -111,6 +138,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 mod_card_message_id=callback.message.id,
                 moderator_name=moderator_name,
                 moderator_id=moderator_id,
+                messages=messages,
             )
         else:
             dest = "nsfw" if action == "app_nsfw" else "premium"
