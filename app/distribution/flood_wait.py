@@ -75,32 +75,19 @@ class FloodWaitHandler:
         )
 
     def is_blocked(self, target_id: str) -> bool:
+        """
+        Check if a target is currently blocked by a FloodWait.
+        Relies on in-memory state which is pre-populated from Redis at startup.
+        """
         until = self._blocked_until.get(target_id)
 
-        # FIX 13: if not in memory (e.g. after restart), check Redis.
         if until is None:
-            async def _check():
-                try:
-                    val = await self._redis.get(f"fw:{target_id}")
-                    if val:
-                        wall_expiry = float(val)
-                        remaining = wall_expiry - time.time()
-                        if remaining > 0:
-                            self._blocked_until[target_id] = time.monotonic() + remaining
-                except Exception as e:
-                    logger.warning(
-                        "FloodWait: Redis check failed — treating target as unblocked",
-                        extra={"ctx_target": target_id, "ctx_error": str(e)},
-                    )
-            import asyncio
-            asyncio.create_task(_check())
-            # Return False immediately, background task will update memory for next time
             return False
 
         if time.monotonic() >= until:
             del self._blocked_until[target_id]
             return False
-        return True
+        
         return True
 
     def seconds_until_available(self, target_id: str) -> float:
@@ -118,49 +105,44 @@ class FloodWaitHandler:
             if until > now
         }
 
-    def load_from_redis(self) -> None:
+    async def load_from_redis(self) -> None:
         """
         FIX 13: Pre-populate in-memory state from Redis on worker startup.
-        Call this once after constructing FloodWaitHandler before starting workers.
-        Never raises — failures are logged only.
         """
-        async def _load():
-            try:
-                keys = await self._redis.keys("fw:*")
-                if not keys:
-                    return
+        try:
+            keys = await self._redis.keys("fw:*")
+            if not keys:
+                return
 
-                now_wall = time.time()
-                now_mono = time.monotonic()
-                loaded = 0
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            loaded = 0
 
-                for key in keys:
-                    try:
-                        val = await self._redis.get(key)
-                        if not val:
-                            continue
-                        wall_expiry = float(val)
-                        remaining = wall_expiry - now_wall
-                        if remaining > 0:
-                            target_id = key if isinstance(key, str) else key.decode()
-                            target_id = target_id.removeprefix("fw:")
-                            self._blocked_until[target_id] = now_mono + remaining
-                            loaded += 1
-                    except (ValueError, AttributeError):
-                        pass
+            for key in keys:
+                try:
+                    val = await self._redis.get(key)
+                    if not val:
+                        continue
+                    wall_expiry = float(val)
+                    remaining = wall_expiry - now_wall
+                    if remaining > 0:
+                        target_id = key if isinstance(key, str) else key.decode()
+                        target_id = target_id.removeprefix("fw:")
+                        self._blocked_until[target_id] = now_mono + remaining
+                        loaded += 1
+                except (ValueError, AttributeError):
+                    pass
 
-                if loaded:
-                    logger.info(
-                        "FloodWait: in-memory state restored from Redis",
-                        extra={"ctx_count": loaded},
-                    )
-            except Exception as e:
-                logger.warning(
-                    "FloodWait: could not load state from Redis — starting with empty state",
-                    extra={"ctx_error": str(e)},
+            if loaded:
+                logger.info(
+                    "FloodWait: in-memory state restored from Redis",
+                    extra={"ctx_count": loaded},
                 )
-        import asyncio
-        asyncio.create_task(_load())
+        except Exception as e:
+            logger.warning(
+                "FloodWait: could not load state from Redis — starting with empty state",
+                extra={"ctx_error": str(e)},
+            )
 
 
 def calculate_retry_delay(

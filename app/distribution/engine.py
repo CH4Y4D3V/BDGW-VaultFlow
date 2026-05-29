@@ -67,9 +67,6 @@ class DistributionEngine:
         self._balancer = TargetBalancer()
         self._supervisor = SystemSupervisor()
 
-        # FIX: Ensure persistent floodwaits are loaded before workers start
-        self._flood_handler.load_from_redis()
-
         self._running = False
 
     async def start(self) -> None:
@@ -78,6 +75,9 @@ class DistributionEngine:
             return
 
         logger.info("Distribution engine starting")
+
+        # FIX: Ensure persistent floodwaits are loaded before workers start
+        await self._flood_handler.load_from_redis()
 
         # Bug 7 fix: do NOT call DatabaseManager.connect() here.
         # AppLifecycle.start() already called it before engine.start().

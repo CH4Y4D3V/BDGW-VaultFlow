@@ -96,6 +96,7 @@ class SubscriptionService:
             updated_at=now,
             notes=notes,
             granted_by=granted_by,
+            metadata=existing.metadata if existing else {},
         )
         await self._repo.upsert(sub)
         logger.info(
@@ -158,6 +159,11 @@ class SubscriptionService:
         if sub.is_in_grace and sub.grace_until and sub.grace_until <= now:
             return await self.expire(sub)
         return sub
+
+    async def update_subscription(self, sub: Subscription) -> None:
+        """Persist a modified subscription object."""
+        sub.updated_at = datetime.now(timezone.utc)
+        await self._repo.upsert(sub)
 
     # ── Worker helpers ────────────────────────────────────────────────────────
 

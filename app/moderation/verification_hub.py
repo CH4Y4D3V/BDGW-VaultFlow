@@ -72,19 +72,52 @@ async def forward_to_verification(
     )
 
     forwarded_ids: list[int] = []
-    for msg in messages:
-        fwd = await _forward_single(client, msg, group_id, submitter_user_id, topic_id)
-        if fwd is None:
-            logger.error(
-                "submission_forward_failed",
-                extra={
-                    "ctx_user_id": submitter_user_id,
-                    "ctx_msg_id": msg.id,
-                    "ctx_group_id": group_id
-                }
+    
+    # ── RC-12: Atomic Album Forwarding ──────────────────────────────────────
+    # Preserve album integrity in verification group by using copy_media_group.
+    # Falling back to sequential copy_message only if necessary.
+    
+    is_album = len(messages) > 1 and all(m.media_group_id for m in messages)
+    
+    if is_album:
+        try:
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    fwd_messages = await client.copy_media_group(
+                        chat_id=group_id,
+                        from_chat_id=messages[0].chat.id,
+                        message_id=messages[0].id,
+                        message_thread_id=topic_id
+                    )
+                    forwarded_ids = [m.id for m in fwd_messages]
+                    break
+                except FloodWait as e:
+                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                except RPCError:
+                    if attempt == _MAX_RETRIES - 1:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+        except Exception as e:
+            logger.warning(
+                "copy_media_group_failed_in_verification_fallback_to_sequential",
+                extra={"ctx_error": str(e), "ctx_user_id": submitter_user_id}
             )
-            return False
-        forwarded_ids.append(fwd.id)
+            forwarded_ids = [] # Force sequential fallback
+
+    if not forwarded_ids:
+        for msg in messages:
+            fwd = await _forward_single(client, msg, group_id, submitter_user_id, topic_id)
+            if fwd is None:
+                logger.error(
+                    "submission_forward_failed",
+                    extra={
+                        "ctx_user_id": submitter_user_id,
+                        "ctx_msg_id": msg.id,
+                        "ctx_group_id": group_id
+                    }
+                )
+                return False
+            forwarded_ids.append(fwd.id)
 
     logger.info(
         "submission_forward_completed",

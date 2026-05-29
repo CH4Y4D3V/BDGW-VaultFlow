@@ -164,15 +164,40 @@ async def post_to_destination(
 ) -> bool:
     """
     Bug 1 fix: use copy_message() instead of forward_messages().
-    forward_messages() attaches a visible "Forwarded from" header that exposes
-    the submitter's private chat ID and username to all public channel subscribers.
     copy_message() produces a clean copy with no metadata leak.
+    
+    RC-12: Use copy_media_group for albums to prevent fragmentation.
     """
     group_id = _destination_group_id(dest)
     if not group_id:
         logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
         return False
 
+    is_album = len(messages) > 1 and all(m.media_group_id for m in messages)
+    
+    if is_album:
+        try:
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    await client.copy_media_group(
+                        chat_id=group_id,
+                        from_chat_id=messages[0].chat.id,
+                        message_id=messages[0].id,
+                    )
+                    return True
+                except FloodWait as e:
+                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                except RPCError:
+                    if attempt == _MAX_RETRIES - 1:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+        except Exception as e:
+            logger.warning(
+                "copy_media_group_failed_in_post_to_destination_fallback_to_sequential",
+                extra={"ctx_error": str(e), "ctx_dest": dest}
+            )
+
+    # Sequential Fallback
     for msg in messages:
         for attempt in range(_MAX_RETRIES):
             try:
@@ -248,6 +273,61 @@ async def archive_to_vault(
         }
     )
 
+    # ── RC-12: Atomic Vault Archival ────────────────────────────────────────
+    # Attempt to copy as an album to preserve media group integrity in the vault.
+    
+    is_album = len(messages) > 1 and all(m.media_group_id for m in messages)
+    copied_messages: list = []
+    
+    if is_album:
+        try:
+            for attempt in range(_MAX_RETRIES):
+                try:
+                    copied_messages = await client.copy_media_group(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        from_chat_id=messages[0].chat.id,
+                        message_id=messages[0].id,
+                    )
+                    break
+                except FloodWait as e:
+                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                except RPCError:
+                    if attempt == _MAX_RETRIES - 1:
+                        raise
+                    await asyncio.sleep(2 ** attempt)
+        except Exception as e:
+            logger.warning(
+                "copy_media_group_failed_in_vault_archival_fallback_to_sequential",
+                extra={"ctx_error": str(e), "ctx_submitter": submitter_user_id}
+            )
+            copied_messages = []
+
+    # If not an album or album copy failed, copy individually
+    if not copied_messages:
+        for msg in messages:
+            copied_msg = None
+            if settings.VAULT_CHANNEL_ID:
+                for attempt in range(_MAX_RETRIES):
+                    try:
+                        copied_msg = await client.copy_message(
+                            chat_id=settings.VAULT_CHANNEL_ID,
+                            from_chat_id=msg.chat.id,
+                            message_id=msg.id,
+                        )
+                        break
+                    except FloodWait as e:
+                        await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
+                    except RPCError:
+                        if attempt == _MAX_RETRIES - 1:
+                            break
+                        await asyncio.sleep(2 ** attempt)
+            
+            # Even if copy failed (copied_msg is None), we still add it to keep indices aligned
+            copied_messages.append(copied_msg)
+
+    vault_message_ids = [m.id if m else 0 for m in copied_messages]
+
+    # Now update MongoDB for each message
     for i, msg in enumerate(messages):
         media = getattr(msg, str(msg.media.value), None) if msg.media else None
         file_unique_id = getattr(media, "file_unique_id", None) if media else None
@@ -257,49 +337,8 @@ async def archive_to_vault(
 
         content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
         checksum = _compute_checksum(file_unique_id, file_size or 0)
-
-        copied_msg = None
-        if settings.VAULT_CHANNEL_ID:
-            logger.info(
-                "copying_to_vault",
-                extra={
-                    "ctx_vault_chat_id": settings.VAULT_CHANNEL_ID,
-                    "ctx_from_chat_id": msg.chat.id,
-                    "ctx_message_id": msg.id
-                }
-            )
-            for attempt in range(_MAX_RETRIES):
-                try:
-                    copied_msg = await client.copy_message(
-                        chat_id=settings.VAULT_CHANNEL_ID,
-                        from_chat_id=msg.chat.id,
-                        message_id=msg.id,
-                    )
-                    logger.info(
-                        "vault_copy_success",
-                        extra={
-                            "ctx_vault_msg_id": copied_msg.id,
-                            "ctx_attempt": attempt + 1
-                        }
-                    )
-                    break
-                except FloodWait as e:
-                    await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
-                except RPCError as e:
-                    logger.error(
-                        "vault_copy_failed_rpc",
-                        extra={
-                            "ctx_error": str(e),
-                            "ctx_error_type": type(e).__name__,
-                            "ctx_attempt": attempt + 1
-                        }
-                    )
-                    await asyncio.sleep(2 ** attempt)
-        else:
-            logger.error("vault_channel_id_not_configured")
-
-        vault_msg_id = copied_msg.id if copied_msg else 0
-        vault_message_ids.append(vault_msg_id)
+        
+        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
 
         update_doc = {
             "$setOnInsert": {

@@ -51,6 +51,7 @@ class Subscription:
     updated_at: datetime
     notes: Optional[str] = None
     granted_by: Optional[int] = None
+    metadata: dict = None
 
     # ── State predicates ──────────────────────────────────────────────────────
 
@@ -115,6 +116,7 @@ class Subscription:
             "updated_at": self.updated_at,
             "notes": self.notes,
             "granted_by": self.granted_by,
+            "metadata": self.metadata or {},
         }
 
     @classmethod
@@ -131,4 +133,5 @@ class Subscription:
             updated_at=data.get("updated_at") or now,
             notes=data.get("notes"),
             granted_by=data.get("granted_by"),
+            metadata=data.get("metadata") or {},
         )
