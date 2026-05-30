@@ -8,9 +8,9 @@ registers the payment callbacks without broadening the plugin root to app.
 """
 
 from app.payments.handlers import (  # noqa: F401
+    handle_admin_back_to_main,
     handle_admin_cancel_send,
     handle_admin_decision,
-    handle_admin_manual_details_reply,
     handle_admin_reject_request,
     handle_admin_send_details,
     handle_payment_cancel,
