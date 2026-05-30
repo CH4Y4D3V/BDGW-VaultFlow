@@ -1,605 +1,437 @@
 ====================================================================
-GEMINI CLI — MASTER AUDIT & FIX PROMPT
-BDGW VAULTFLOW — PRODUCTION DELIVERY
+GEMINI DELIVERY CROSS-CHECK REPORT
+BDGW VAULTFLOW — POST-AUDIT VERIFICATION
 ====================================================================
-READ THIS ENTIRE PROMPT BEFORE TOUCHING A SINGLE FILE.
-DO NOT SKIP ANY STEP. DO NOT ASSUME ANYTHING IS ALREADY DONE.
-====================================================================
-
-You are auditing and fixing a production-grade Telegram bot project
-called BDGW VaultFlow. This is a SaaS Telegram infrastructure for
-the BD Gone Wild community. The deadline is NOW. Work fast, work
-correctly, do not break anything that already works.
-
-Your job has 6 phases. Complete every phase fully before moving on.
-
-====================================================================
-PHASE 1 — SCAN & UNDERSTAND THE CODEBASE
+Comparing Gemini's completion report against MASTER REFERENCE v1.0
 ====================================================================
 
-1. List every file and folder in the repo recursively.
-
-2. Identify and DELETE the following immediately (no backup needed):
-   - Any __pycache__ folders
-   - Any *.pyc files
-   - Any .DS_Store files
-   - Any test_*.py files that are empty or contain placeholder code
-   - Any duplicate files (same logic, different names)
-   - Any files named temp*, draft*, old*, backup*, copy*, unused*
-   - Any file that is not imported or referenced anywhere
-   - Any TODO files, NOTE files, SCRATCH files
-   - Any example or sample files not part of core logic
-
-3. After deletion, list what remains. This is your working codebase.
-
-4. Read every remaining file fully. Understand:
-   - What each handler does
-   - What each router does
-   - What each DB model does
-   - What each worker/task does
-   - What each utility does
-
-5. Map the full event flow in your head:
-   User message → router → handler → DB → admin hub → user response
+VERDICT LEGEND:
+  ✅ CONFIRMED — Gemini explicitly reported this as done
+  ⚠️  VAGUE     — Gemini mentioned it but gave no proof of correctness
+  ❌ MISSING   — Not mentioned at all in Gemini's report
+  🔴 CRITICAL  — Missing AND directly affects delivery/user experience
 
 ====================================================================
-PHASE 2 — AUDIT EVERY SYSTEM (CHECK ALL 13)
+SYSTEM-BY-SYSTEM GAPS
 ====================================================================
 
-Go through each system one by one. For each system check:
-  A. Is it implemented?
-  B. Is it complete?
-  C. Are there bugs?
-  D. Is the DB model correct?
-  E. Are edge cases handled?
-  F. Is error handling present?
+SYSTEM 1 — USER REGISTRATION & ONBOARDING
+  ✅ UserRepository created
+  ✅ join_date and metadata stored
+  ⚠️  "Onboarding shown once" — mentioned but no confirmation that
+      the check is DB-based not FSM-based. If FSM: breaks on restart.
+  ❌ No mention of what the onboarding message actually says
+     (Community purpose, rules, submission rules, reporting system)
 
---- SYSTEM 1: USER REGISTRATION & ONBOARDING ---
+ACTION NEEDED:
+  Verify: users table has `onboarded` boolean column.
+  Verify: /start checks DB row, not FSM state, for first-time check.
 
-CHECK:
-  [ ] /start handler exists
-  [ ] First-time user detection works (check DB, not FSM)
-  [ ] Onboarding message shown ONLY once per user
-  [ ] After onboarding, main menu is shown
-  [ ] Returning users go directly to main menu
-  [ ] User record created in DB on first /start
-  [ ] User record stores: user_id, name, username, join_date
+--------------------------------------------------------------------
 
-FIX IF BROKEN:
-  - Onboarding must check users table, not FSM state
-  - If user exists in DB → skip onboarding → show main menu
-  - If user does not exist → show onboarding → create DB record → show main menu
+SYSTEM 2 & 3 — MENUS & COMMANDS
+  ✅ 4-row main menu layout restored
+  ✅ /start, /takedown, /help registered
+  ⚠️  "Professional layout" — need to verify button text matches spec:
+      💎 Premium Access
+      📤 Submit Content Anonymously
+      🎁 Referral Program  |  📊 My Status
+      🆘 Need Help
+  ❌ No confirmation that /main was REMOVED (old command)
+  ❌ No confirmation command descriptions are user-friendly text
 
---- SYSTEM 2: MAIN MENU ---
+ACTION NEEDED:
+  Verify set_my_commands has exactly 3 entries, no /main leftover.
+  Verify descriptions shown in Telegram menu are plain English.
 
-CHECK:
-  [ ] Main menu keyboard layout is correct:
-        Row 1: [ 💎 Premium Access ]
-        Row 2: [ 📤 Submit Content Anonymously ]
-        Row 3: [ 🎁 Referral Program ] [ 📊 My Status ]
-        Row 4: [ 🆘 Need Help ]
-  [ ] /start opens main menu
-  [ ] Each button routes to correct handler
-  [ ] Menu is clean, no extra buttons
+--------------------------------------------------------------------
 
---- SYSTEM 3: BOT COMMAND MENU (Telegram slash menu) ---
+SYSTEM 4 — DOT-SLASH AUTO-DELETE
+  ✅ Implemented, 10-second delay, silent, private chat only
+  ⚠️  "Private chats" — spec says bot chat, confirm it does not
+      accidentally fire in group chats or the hub
 
-CHECK:
-  [ ] Exactly 3 commands registered via set_my_commands:
-        /start     — Main Menu
-        /takedown  — Remove Content
-        /help      — Support
-  [ ] /start works
-  [ ] /takedown opens takedown FSM flow
-  [ ] /help opens or reopens support ticket
+ACTION NEEDED:
+  Verify filter is: message.chat.type == "private" AND
+  message.text.startswith("./")
 
-FIX IF BROKEN:
-  - Remove any old /main command if it exists
-  - Register exactly these 3 commands, no more, no less
-  - Descriptions must be user-friendly plain English
+--------------------------------------------------------------------
 
---- SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ---
+SYSTEM 5 — PREMIUM & PAYMENT
+  ❌ NOT MENTIONED in Gemini's report at all
+  🔴 CRITICAL — This is the core revenue system
 
-CHECK:
-  [ ] Middleware or message handler exists that catches any message
-      starting with "./" (dot followed by slash)
-  [ ] Such messages are scheduled for deletion after exactly 10 seconds
-  [ ] Deletion is silent — no notification to user
-  [ ] Works in private chat with the bot
+  Not confirmed:
+    - Package selection flow
+    - Payment method selection
+    - Payment request DB record creation
+    - Hub topic card creation
+    - Admin "Send Payment Details" button
+    - Session activates ONLY after delivery confirmation
+    - 20-minute session timeout worker
+    - TXID proof collection flow
+    - Admin ✅ Approve | ❌ Reject buttons
+    - Atomic subscription activation (9-step)
+    - One-time invite generation (30 min expiry)
+    - Invite delivery to user
 
-FIX IF MISSING:
-  - Add a middleware that intercepts all incoming messages
-  - If message.text starts with "./" → asyncio.sleep(10) → delete message
-  - This must NOT interfere with any other handler
+ACTION NEEDED:
+  This system must be manually verified in full before sign-off.
+  Ask Gemini or inspect code directly.
 
---- SYSTEM 5: PREMIUM & PAYMENT SYSTEM ---
+--------------------------------------------------------------------
 
-CHECK:
-  [ ] Package selection handler (1 month / 3 months / 6 months)
-  [ ] Payment method selection handler
-  [ ] Payment request written to DB with status PENDING
-  [ ] Topic created in Verification Hub under Payments thread
-  [ ] Admin sees formatted payment request card in topic
-  [ ] Admin has "Send Payment Details" button
-  [ ] Bot does NOT auto-send any payment number — ever
-  [ ] Payment session activates ONLY after admin sends details
-      AND delivery is confirmed by Telegram API success
-  [ ] Session stored in DB (not FSM)
-  [ ] Session timeout = 20 minutes from activation
-  [ ] Timeout worker cancels session after 20 min if no proof sent
-  [ ] User submits: TXID + transaction digits + optional screenshot
-  [ ] TXID checked for global uniqueness before accepting
-  [ ] Duplicate TXID → auto-reject with clear message
-  [ ] Proof forwarded to Verification Hub topic
-  [ ] Admin buttons: ✅ Approve | ❌ Reject
-  [ ] Approval triggers atomic subscription activation:
-        1. Check session active
-        2. Check not already processed
-        3. Acquire lock
-        4. Activate subscription in DB
-        5. Generate one-time invite (30 min expiry)
-        6. Save invite metadata
-        7. Save payment history
-        8. Save invite history
-        9. Clear session
-  [ ] Invite link delivered to user
+SYSTEM 6 — SUBSCRIPTION LIFECYCLE
+  ❌ NOT MENTIONED
+  🔴 CRITICAL
 
-FIX IF BROKEN:
-  - Session must be DB row, not Redis key only
-  - Atomicity must use DB transaction + Redis lock together
-  - If invite generation fails → rollback subscription → notify admin
-  - Payment history must store: amount, method, txid, approved_by, timestamp
+  Not confirmed:
+    - 7-day / 3-day / expiry-day notification worker
+    - Auto-removal from premium groups on expiry
+    - Group removal notification sent (this one IS allowed)
+    - Subscription status updated to EXPIRED
 
---- SYSTEM 6: SUBSCRIPTION LIFECYCLE ---
+ACTION NEEDED:
+  Check if a scheduler/APScheduler/asyncio task exists for expiry.
 
-CHECK:
-  [ ] Background worker runs on schedule
-  [ ] Sends notification 7 days before expiry
-  [ ] Sends notification 3 days before expiry
-  [ ] Sends notification on expiry day
-  [ ] On expiry: user removed from all premium groups automatically
-  [ ] Group removal sends notification to user (this one IS allowed)
-  [ ] Bot ban/mute notifications are NOT sent (silent)
-  [ ] Subscription status updated to EXPIRED in DB
+--------------------------------------------------------------------
 
---- SYSTEM 7: TXID PROTECTION ---
+SYSTEM 7 — TXID PROTECTION
+  ❌ NOT MENTIONED explicitly
+  🔴 CRITICAL — Fraud prevention
 
-CHECK:
-  [ ] txid_registry table or unique constraint exists in DB
-  [ ] Before accepting proof, TXID looked up globally
-  [ ] Duplicate found → reject immediately → log to audit
-  [ ] First-use TXID → insert into registry atomically with approval
+  Not confirmed:
+    - txid_registry table or unique constraint exists
+    - Duplicate TXID auto-rejected before admin sees proof
+    - TXID inserted atomically with approval
 
---- SYSTEM 8: VERIFICATION HUB ---
+ACTION NEEDED:
+  Check DB schema for txid_registry or unique index on payments.txid
 
-CHECK:
-  [ ] Bot is configured with hub group ID and all 7 thread IDs:
-        1. Payments
-        2. Content Review
-        3. Support
-        4. Takedown Requests
-        5. User Moderation
-        6. Broadcasts
-        7. Audit Logs
-  [ ] All events route to correct topic thread
-  [ ] Admin hub commands work:
-        /userinfo  — show full user profile
-        /warn      — warn a user
-        /mute      — mute a user
-        /ban       — ban a user
-        /kick      — kick a user
-        /approve   — approve pending item
-        /reject    — reject pending item
-        /broadcast        — text broadcast to all users
-        /broadcast_media  — single media with caption
-        /broadcast_album  — album (multi-photo/video) with caption
-        /broadcast_file   — document/file with caption
-        /broadcast_caption — edit/resend caption only
+--------------------------------------------------------------------
 
-FIX IF BROKEN:
-  - Hub commands must check sender is admin before executing
-  - Each command must log action to audit topic
+SYSTEM 8 — VERIFICATION HUB
+  ✅ 7 forum threads configured
+  ✅ Hub logging for critical actions
+  ⚠️  "Real-time logging" — not confirmed which events are logged
+  ❌ Admin hub commands not confirmed (/userinfo /warn /mute /ban
+     /kick /approve /reject and all /broadcast_* variants)
+  ❌ No confirmation admin role check on hub commands
 
---- SYSTEM 9: BROADCAST SYSTEM ---
+ACTION NEEDED:
+  Verify all 11 hub commands are implemented and gated by admin check.
 
-THIS IS CRITICAL — AUDIT VERY CAREFULLY.
+--------------------------------------------------------------------
 
-CHECK:
-  [ ] Broadcast supports ALL of the following content types:
-        • Plain text message
-        • Photo with caption
-        • Video with caption
-        • Voice message
-        • Audio file
-        • Document / file with caption
-        • GIF / animation
-        • Single media with caption
-        • Album (media group) — multiple photos/videos together with caption
-        • Sticker
-        • Poll
-        • Any combination admin wants to send
+SYSTEM 9 — BROADCAST
+  ✅ Text, photos, albums, files supported
+  ✅ FloodWait protection
+  ✅ Progress tracking
+  ⚠️  FSM-based — confirm FSM state is not the only record
+      (broadcast job should be DB-backed for restart safety)
+  ❌ Video NOT confirmed
+  ❌ Voice NOT confirmed
+  ❌ Audio NOT confirmed
+  ❌ GIF/animation NOT confirmed
+  ❌ Sticker NOT confirmed
+  ❌ Caption preservation on ALL types NOT confirmed
+  ❌ Album (media_group) collection window (1-2 sec) NOT confirmed
+  🔴 CRITICAL — "text, photos, albums, files" is only 4 types.
+      Spec requires ALL content types admin may want to send.
 
-  [ ] Admin can initiate broadcast from hub with /broadcast commands
-  [ ] Bot asks admin: "Send the content you want to broadcast"
-  [ ] Admin sends any content type → bot previews it back to admin
-  [ ] Admin confirms → broadcast begins
-  [ ] Broadcast is sent to ALL registered users (or specific targets)
-  [ ] FloodWait handling is active during broadcast
-  [ ] Failed deliveries are retried
-  [ ] Broadcast progress logged to audit topic
+ACTION NEEDED:
+  Inspect broadcast handler. Must handle:
+  text, photo, video, voice, audio, document, animation,
+  sticker, media_group — each with correct API method.
+  Caption must be preserved on every media type.
 
-FIX IF MISSING:
-  - Handle media_group (album) by collecting all messages in group
-    before forwarding — use a short collection window (1-2 seconds)
-  - Caption must be preserved on all media types
-  - Use copy_message or forward_message depending on content type
-  - Never use send_photo for video, never use send_document for audio
-  - Detect content type from message object and route to correct API method:
-      text        → send_message
-      photo       → send_photo
-      video       → send_video
-      voice       → send_voice
-      audio       → send_audio
-      document    → send_document
-      animation   → send_animation
-      sticker     → send_sticker
-      media_group → send_media_group
-      poll        → forward (polls cannot be re-sent via API, only forwarded)
+--------------------------------------------------------------------
 
---- SYSTEM 10: SUPPORT TICKET SYSTEM ---
+SYSTEM 10 — SUPPORT TICKET
+  ✅ Accept Support flow implemented
+  ✅ Admins blocked from bridging until acceptance
+  ✅ 5-minute inactivity monitor
+  ✅ User stats on support card (Plan, Submissions, Bans)
+  ⚠️  Support card — spec requires MORE fields:
+      Name, Username, User ID, Join Date, Premium Status,
+      Referral Stats, Submission Stats, Ban History, Mute History
+      "Plan, Submissions, Bans" is incomplete
+  ❌ Ticket closure flow not mentioned:
+      - User-side messages deleted on closure
+      - Topic preserved permanently
+      - Closure summary saved to DB
+  ❌ Auto-open support from unhandled user text not confirmed
 
-CHECK:
-  [ ] /help command creates or reopens support ticket
-  [ ] 🆘 Need Help button does the same
-  [ ] Any unhandled text message from user opens support
-  [ ] Dedicated topic created per ticket in Support thread of Hub
-  [ ] First message in topic shows full user profile:
-        Name, Username, User ID, Join Date, Premium Status,
-        Referral Stats, Submission Stats, Ban History, Mute History
-  [ ] Admin sees ✅ Accept Support button
-  [ ] Ticket status = PENDING until accepted
-  [ ] If no admin accepts within 5 minutes:
-        User receives: "No admin available currently. Your ticket
-        is still open and an admin will respond soon."
-  [ ] After accept: full two-way bridge active
-        Admin types in topic → forwarded to user
-        User types to bot → forwarded to topic
-  [ ] On closure:
-        User-side messages deleted silently
-        Topic preserved permanently
-        Closure summary saved to DB
-  [ ] If ticket was opened from takedown rejection:
-        First topic message includes rejection context and reason
+ACTION NEEDED:
+  Verify support card has ALL required fields.
+  Verify closure handler deletes user-side messages silently.
+  Verify unhandled text opens support ticket.
 
---- SYSTEM 11: TAKEDOWN REQUEST SYSTEM ---
+--------------------------------------------------------------------
 
-CHECK:
-  [ ] /takedown command triggers FSM flow
-  [ ] Step 1: Bot asks for reason (user must type, cannot skip)
-  [ ] Step 2: Bot asks for content link (user must type, cannot skip)
-  [ ] /cancel at any step → silent cancel, return to main menu
-  [ ] After both collected:
-        Confirm message sent to user
-        Request saved to DB with status PENDING
-        Formatted card sent to Verification Hub → Takedown topic:
-          🗑 TAKEDOWN REQUEST
-          User   : [Name] (@username)
-          User ID: [id]
-          Reason : [reason]
-          Link   : [link]
-          Time   : [timestamp]
-        Buttons: [ ✅ Approve & Delete ] [ ❌ Reject ]
-  [ ] Approve & Delete:
-        Bot attempts auto-deletion of content
-        If auto-delete succeeds → user notified, DB updated APPROVED
-        If auto-delete fails → admin sees "Confirm Manual Deletion" button
-        Admin manually deletes → clicks confirm → user notified, DB updated
-  [ ] Reject:
-        Bot prompts admin to TYPE rejection reason (mandatory)
-        Admin sends reason
-        User notified with reason text
-        DB updated REJECTED, reason stored
-        Support session automatically opened for user
-        Rejection reason included as first message in support topic
-  [ ] DB record stores:
-        takedown_id, user_id, reason, content_link, status,
-        submitted_at, reviewed_at, reviewed_by, rejection_reason,
-        support_ticket_id
+SYSTEM 11 — TAKEDOWN
+  ✅ /takedown FSM implemented
+  ✅ Validates Content IDs
+  ✅ Collects reason and link
+  ⚠️  "Validates Content IDs" — spec does not require ID validation,
+      only free-text reason + content link. Confirm this is not
+      blocking users who submit URLs instead of IDs.
+  ❌ Admin card format not confirmed (formatted box with all fields)
+  ❌ Approve & Delete → auto-delete attempt not confirmed
+  ❌ Manual deletion confirm button not confirmed
+  ❌ Reject → admin must TYPE reason (mandatory) not confirmed
+  ❌ Reject → auto-open support session not confirmed
+  ❌ takedown_id, support_ticket_id linkage in DB not confirmed
 
---- SYSTEM 12: CONTENT SUBMISSION SYSTEM ---
+ACTION NEEDED:
+  Verify reject flow forces admin to type reason before completing.
+  Verify rejection auto-opens support with rejection context.
 
-CHECK:
-  [ ] User must join main channel before submitting
-  [ ] User must accept terms before submitting
-  [ ] Membership verified via Telegram API (getChatMember)
-  [ ] Supported types: photo, video, album, document, audio,
-      voice, GIF, files
-  [ ] Duplicate detection via content hash
-  [ ] Content forwarded to Content Review topic in Hub
-  [ ] Admin moderation buttons:
-        🔞 Approve (Standard)
-        🔥 Approve NSFW
-        ⭐ Approve Premium
-        ❌ Reject (mandatory reason)
-  [ ] On approval → Vault → Queue → Distribution
-  [ ] On rejection → archived in Hub, reason stored, user notified
+--------------------------------------------------------------------
 
---- SYSTEM 13: VAULT & QUEUE ENGINE ---
+SYSTEM 12 — CONTENT SUBMISSION
+  ❌ NOT MENTIONED in Gemini's report
+  ⚠️  System 13 mentions "Reject with Reason → Auto-Support" which
+      overlaps — but full submission system not confirmed
 
-CHECK:
-  [ ] Approved content saved to vault DB table
-  [ ] Queue job created with status PENDING
-  [ ] Queue worker processes PENDING → PROCESSING → SENT
-  [ ] Failed jobs → retry up to configured max → DEAD_LETTER
-  [ ] Dead letter queue exists and admin can review
-  [ ] Daily limits enforced via ENV variables:
-        PREMIUM_DAILY_LIMIT
-        NSFW_DAILY_LIMIT
-  [ ] When fresh queue empty → vault content used
-  [ ] Vault distribution: randomized, no repeat spam, fair rotation
+  Not confirmed:
+    - Channel membership gate
+    - Terms acceptance
+    - All 8 content types supported
+    - Duplicate hash detection
+    - Moderation buttons (🔞 🔥 ⭐ ❌)
+    - Vault + Queue on approval
+    - User notified on rejection with reason
 
---- SYSTEM 14: WATERMARK PIPELINE ---
+ACTION NEEDED:
+  Verify submission handler and all 4 moderation button callbacks.
 
-CHECK:
-  [ ] Photo watermark: PNG overlay, random position, opacity 90
-  [ ] Video watermark: two text layers, random position, random
-      timing, opacity 110-130
-  [ ] Watermark applied before distribution, not before vault storage
+--------------------------------------------------------------------
 
---- SYSTEM 15: REFERRAL SYSTEM ---
+SYSTEM 13 — VAULT & QUEUE ENGINE
+  ⚠️  "Standardized distribution delays to 1-5 minutes" — mentioned
+      under watermark section, not queue engine directly
+  ❌ Queue states (PENDING → PROCESSING → SENT → FAILED → DEAD_LETTER)
+     not confirmed
+  ❌ Dead letter queue not confirmed
+  ❌ Daily limits (PREMIUM_DAILY_LIMIT, NSFW_DAILY_LIMIT) not confirmed
+  ❌ Vault random reposting / fair rotation not confirmed
+  🔴 CRITICAL — Queue engine drives all content distribution
 
-CHECK:
-  [ ] Every user gets personal referral link on registration
-  [ ] Referral only counted if:
-        New user joins via link AND membership verified AND no duplicate
-  [ ] Points: 1 referral = 1 point, 3 approved content = 1 point
-  [ ] 1 point = ৳1 discount
-  [ ] Dashboard shows: total, active, blocked referrals + points
+ACTION NEEDED:
+  Verify queue_jobs table has status column with all states.
+  Verify dead_letters table exists.
+  Verify ENV variables for daily limits are read.
 
---- SYSTEM 16: USER STATUS DASHBOARD ---
+--------------------------------------------------------------------
 
-CHECK:
-  [ ] /My Status button shows full dashboard:
-        Name, Username, User ID, Join Date, Premium Status,
-        Active Package, Expiry Date, Remaining Days,
-        Referral Count, Referral Points,
-        Total/Approved/Rejected/Queued Submissions,
-        Payment History, Warnings, Mutes, Bans, Kicks,
-        Punishment Reasons
-  [ ] All data pulled from DB, not FSM
-  [ ] Formatted cleanly — readable on mobile
+SYSTEM 14 — WATERMARK PIPELINE
+  ✅ FFmpeg specs fixed (BOTTOM_RIGHT, 15% scale, 0.8 opacity)
+  ⚠️  Spec says: random position, NOT fixed BOTTOM_RIGHT
+      Spec says: opacity 90 for photos (not 0.8 which is same thing,
+      but video opacity should be 110-130 — confirm video watermark
+      has TWO text layers at random position and random timing)
+  ❌ Photo watermark: PNG overlay confirmed but random position
+     contradicts Gemini's "BOTTOM_RIGHT" fix
 
---- SYSTEM 17: MESSAGE CLEANUP ---
+ACTION NEEDED:
+  Clarify with client: fixed position or random position?
+  Spec says random. If client wants fixed, update spec.
+  Verify video has TWO text watermark layers, not one.
 
-CHECK:
-  [ ] General bot messages → auto-delete after 60 minutes
-  [ ] Payment session messages → auto-delete after 20 minutes
-  [ ] Bangladesh phone numbers detected → auto-delete after 7 minutes
-      Pattern: 01[3-9]\d{8} (11 digit BD mobile numbers)
-      This covers payment numbers admins send manually
-  [ ] Messages starting with "./" → auto-delete after 10 seconds
-  [ ] Support user-side messages → deleted on ticket closure
-  [ ] ALL deletions are silent — zero notifications
+--------------------------------------------------------------------
 
---- SYSTEM 18: TRUST & FRAUD SYSTEM ---
+SYSTEM 15 — REFERRAL SYSTEM
+  ❌ NOT MENTIONED in Gemini's report
+  
+  Not confirmed:
+    - Personal referral link generated on registration
+    - Referral counted only after join + membership verify
+    - Duplicate prevention
+    - Points: 1 referral = 1 point, 3 approvals = 1 point
+    - ৳1 discount per point
+    - Dashboard: total / active / blocked / points
 
-CHECK:
-  [ ] trust_score column exists in users table
-  [ ] fraud_score column exists in users table
-  [ ] Trust increases on: content approved
-  [ ] Trust decreases on: content rejected, warnings
-  [ ] Trust increases with: account age
-  [ ] Fraud increases on: duplicate TXID, fake proof, invite abuse
+ACTION NEEDED:
+  Verify referrals table and referral_link column in users table.
 
---- SYSTEM 19: AUDIT LOGGING ---
+--------------------------------------------------------------------
 
-CHECK:
-  [ ] All the following events are logged to audit_logs table
-      AND forwarded to Verification Hub → Audit Logs topic:
-        Payments, Subscriptions, Support, Moderation actions,
-        Invite generation, Broadcasts, Queue actions,
-        Trust/Fraud changes, Takedown actions
-  [ ] Each log has: event_type, user_id, admin_id, details, timestamp
+SYSTEM 16 — USER STATUS DASHBOARD
+  ❌ NOT MENTIONED in Gemini's report
 
---- SYSTEM 20: RESTART SAFETY ---
+  Not confirmed: all 19 display fields from spec Section 17
 
-CHECK:
-  [ ] None of these live in FSM only:
-        Payment sessions, Support sessions, Queue jobs,
-        Invite metadata, TXID history, Referrals, Punishments,
-        Moderation states, Subscription data, Expiry timers,
-        Ticket states, Takedown request states
-  [ ] On bot startup: all active sessions restored from DB
-  [ ] Pending payments resumed
-  [ ] Active support tickets reloaded
-  [ ] Queue workers restarted
+ACTION NEEDED:
+  Verify My Status handler returns all required fields.
+
+--------------------------------------------------------------------
+
+SYSTEM 17 — MESSAGE CLEANUP
+  ✅ ./prefix → 10 seconds (System 4)
+  ❌ 60-minute general cleanup NOT confirmed
+  ❌ 20-minute payment session cleanup NOT confirmed
+  ❌ 7-minute BD phone number cleanup NOT confirmed
+     Pattern: 01[3-9]\d{8}
+  ❌ Support closure cleanup NOT confirmed
+
+ACTION NEEDED:
+  Check for a cleanup worker / scheduled task that handles
+  all 5 cleanup rules. This is likely completely missing.
+
+--------------------------------------------------------------------
+
+SYSTEM 18 — TRUST & FRAUD SYSTEM
+  ⚠️  "Atomic reward point locking" mentioned under System 14
+      (Gemini's numbering) — this maps to payment/rewards, not
+      trust score system
+  ❌ trust_score column in users table not confirmed
+  ❌ fraud_score column in users table not confirmed
+  ❌ Score update triggers not confirmed
+
+ACTION NEEDED:
+  Check DB schema for trust_score and fraud_score columns.
+
+--------------------------------------------------------------------
+
+SYSTEM 19 — AUDIT LOGGING
+  ✅ Hub logging implemented for critical actions
+  ⚠️  "Critical actions" is vague — need all events covered:
+      Payments, Subscriptions, Support, Moderation, Invites,
+      Broadcasts, Queue actions, Trust/Fraud changes, Takedowns
+  ❌ audit_logs DB table not confirmed (only hub forwarding mentioned)
+
+ACTION NEEDED:
+  Verify audit_logs table exists in DB schema.
+  Verify events are written to DB AND forwarded to hub topic.
+
+--------------------------------------------------------------------
+
+SYSTEM 20 — RESTART SAFETY
+  ❌ NOT MENTIONED in Gemini's report
+  🔴 CRITICAL — Core principle of entire platform
+
+  Not confirmed:
+    - On startup: active sessions restored from DB
+    - Pending payments resumed
+    - Active support tickets reloaded
+    - Queue workers restarted from DB state
+
+ACTION NEEDED:
+  Check startup/on_startup hook in main.py or bot lifecycle.
+  Must query DB for active sessions and restore them.
 
 ====================================================================
-PHASE 3 — FIX ALL FOUND ISSUES
+SUMMARY OF CRITICAL GAPS
 ====================================================================
 
-After auditing all 20 systems above:
+🔴 CRITICAL — Must verify/fix before accepting delivery:
 
-1. List every issue found with:
-   - File name and line number
-   - What is wrong
-   - What the fix is
+  1. System 5  — Payment system (entire flow) — NOT reported
+  2. System 6  — Subscription lifecycle — NOT reported
+  3. System 7  — TXID protection — NOT reported
+  4. System 9  — Broadcast missing: video, voice, audio, GIF,
+                 sticker, caption preservation on all types
+  5. System 12 — Content submission — NOT reported
+  6. System 13 — Vault/Queue/Dead letter — NOT reported
+  7. System 17 — Message cleanup (4 of 5 rules) — NOT reported
+  8. System 20 — Restart safety — NOT reported
 
-2. Apply every fix one by one.
+⚠️  VERIFY BEFORE SIGN-OFF:
 
-3. After each fix, verify it does not break anything else.
-
-4. Recheck the fixed system after applying the fix.
-
-5. Do not leave any system in a broken state.
-
-====================================================================
-PHASE 4 — TEXT & DESCRIPTION QUALITY PASS
-====================================================================
-
-Go through EVERY user-facing message in the entire codebase.
-Rewrite any that are:
-  - Robotic or technical
-  - Confusing to a regular user
-  - Missing context
-  - Too short to understand
-  - Using developer language (e.g. "FSM state invalid", "DB error")
-
-USER-FRIENDLY RULES:
-  ✓ Write in plain, warm, clear English
-  ✓ Tell the user what happened and what to do next
-  ✓ Never expose internal errors to users
-  ✓ Use emoji sparingly where it adds clarity
-  ✓ Keep messages short but complete
-
-EXAMPLES OF BAD → GOOD:
-  BAD: "Session expired."
-  GOOD: "Your payment session has timed out (20 minutes). 
-         Please start a new payment request from the main menu."
-
-  BAD: "TXID duplicate detected."
-  GOOD: "This transaction ID has already been used. 
-         If you believe this is an error, please contact support."
-
-  BAD: "User not found."
-  GOOD: "We couldn't find your account. Please send /start to register."
-
-  BAD: "Error processing request."
-  GOOD: "Something went wrong on our end. Please try again in a moment,
-         or contact support if this keeps happening."
-
-Go through EVERY admin-facing message in the hub.
-Rewrite any that are:
-  - Unclear about what action is needed
-  - Missing context about the user
-  - Not showing enough information to make a decision
-
-ADMIN-FRIENDLY RULES:
-  ✓ Show full context (who, what, when, why)
-  ✓ Make action buttons obvious
-  ✓ Confirm what happened after admin takes action
-  ✓ Never make admin guess what a request is about
+  9.  Onboarding check is DB-based not FSM-based
+  10. /main command removed from command list
+  11. Support card has ALL required fields (not just 3)
+  12. Takedown reject forces typed reason + auto-opens support
+  13. Watermark is random position (spec) vs BOTTOM_RIGHT (Gemini)
+  14. Referral system exists
+  15. User dashboard returns all 19 fields
+  16. audit_logs written to DB (not just hub forwarding)
 
 ====================================================================
-PHASE 5 — FINAL CLEANUP
+NEXT PROMPT TO SEND GEMINI
 ====================================================================
 
-1. Run through the repo one more time:
-   - Delete any file that was created as a placeholder and is empty
-   - Delete any handler that is defined but never registered
-   - Delete any import that is unused
-   - Delete any commented-out code blocks longer than 5 lines
-   - Delete any print() debug statements
-   - Delete any TODO comments (fix them or delete the comment)
-   - Delete any duplicate router registrations
+Paste this to Gemini now:
 
-2. Check requirements.txt or pyproject.toml:
-   - Remove any package that is imported nowhere in the code
-   - Ensure all packages actually used are listed
-   - Pin versions for production stability
+---
 
-3. Check .env.example or config template:
-   - All required ENV variables must be documented
-   - No real secrets in any committed file
-   - Add any missing variables:
-       BOT_TOKEN
-       HUB_GROUP_ID
-       HUB_TOPIC_PAYMENTS
-       HUB_TOPIC_CONTENT_REVIEW
-       HUB_TOPIC_SUPPORT
-       HUB_TOPIC_TAKEDOWN
-       HUB_TOPIC_MODERATION
-       HUB_TOPIC_BROADCASTS
-       HUB_TOPIC_AUDIT_LOGS
-       PREMIUM_GROUP_ID
-       MAIN_CHANNEL_ID
-       DATABASE_URL
-       REDIS_URL
-       PREMIUM_DAILY_LIMIT
-       NSFW_DAILY_LIMIT
-       ADMIN_IDS (comma-separated)
-       WATERMARK_IMAGE_PATH
+Your report shows 8 critical systems were either not implemented
+or not reported. Before this delivery is accepted, you must address
+each item below. Do not skip any.
 
-4. Check README.md:
-   - If it does not exist, create a simple one
-   - Must include: project name, setup steps, ENV vars, how to run
-   - Must be written in plain English that a non-developer can follow
+CRITICAL FIXES NEEDED:
 
-====================================================================
-PHASE 6 — COMMIT & PUSH TO GITHUB
-====================================================================
+1. PAYMENT SYSTEM (System 5)
+   Confirm or implement the full payment flow end-to-end:
+   package selection → method → DB record → hub topic card →
+   admin "Send Payment Details" button → session activates on
+   delivery success only → 20-min timeout → TXID proof collection →
+   admin approve/reject → atomic 9-step subscription activation →
+   one-time invite (30min expiry) → delivery to user.
 
-After ALL phases above are 100% complete:
+2. SUBSCRIPTION LIFECYCLE (System 6)
+   Confirm or implement: expiry notification worker sending
+   messages at 7 days, 3 days, and expiry day.
+   Auto-remove user from premium group on expiry.
+   Update DB status to EXPIRED.
 
-1. Stage all changes:
-   git add -A
+3. TXID PROTECTION (System 7)
+   Confirm or implement: txid_registry table with unique constraint.
+   Duplicate TXID auto-rejected before admin sees proof.
 
-2. Write a clear, detailed commit message:
+4. BROADCAST — MISSING CONTENT TYPES (System 9)
+   Current broadcast handles: text, photos, albums, files.
+   Add support for: video, voice, audio, GIF/animation, sticker.
+   Confirm caption is preserved on every content type.
+   Confirm album (media_group) uses a 1-2 second collection
+   window to gather all group messages before forwarding.
 
-   git commit -m "fix: full production audit and delivery pass
+5. CONTENT SUBMISSION (System 12)
+   Confirm or implement: channel membership gate, terms acceptance,
+   all 8 content types, duplicate hash detection, moderation
+   buttons (🔞 🔥 ⭐ ❌), vault + queue on approval, user
+   notified on rejection with reason.
 
-   - Removed all unused, duplicate, and placeholder files
-   - Fixed all 20 systems: registration, payments, subscriptions,
-     support, takedown, content submission, vault, queue, watermark,
-     referral, dashboard, cleanup, trust/fraud, audit, broadcast
-   - Broadcast now supports: text, photo, video, voice, audio,
-     document, GIF, album (media group), sticker, poll with captions
-   - /takedown full FSM flow with admin approve/reject/auto-support
-   - ./prefix messages now auto-deleted after 10 seconds
-   - Bot command menu set to exactly 3 commands: /start /takedown /help
-   - All user-facing messages rewritten to be clear and friendly
-   - All admin hub messages rewritten with full context
-   - Restart safety verified: all sessions DB-backed
-   - Dead letter queue enabled
-   - Cleanup workers verified for all message types
-   - .env.example updated with all required variables
-   - Unused imports and debug prints removed
-   - README updated"
+6. VAULT & QUEUE ENGINE (System 13)
+   Confirm or implement: queue_jobs table with status column
+   (PENDING/PROCESSING/SENT/FAILED/DEAD_LETTER), dead_letters table,
+   daily limits from ENV (PREMIUM_DAILY_LIMIT, NSFW_DAILY_LIMIT),
+   vault random reposting with fair rotation and cooldown.
 
-3. Push to main branch:
-   git push origin main
+7. MESSAGE CLEANUP (System 17)
+   Implement all 5 cleanup rules:
+   - General messages → auto-delete after 60 minutes
+   - Payment session messages → auto-delete after 20 minutes
+   - BD phone numbers (01[3-9]\d{8}) → auto-delete after 7 minutes
+   - ./prefix → already done (10 seconds)
+   - Support user-side messages → delete on ticket closure
+   All deletions must be completely silent.
 
-4. Confirm push succeeded. If it fails:
-   - Check remote URL: git remote -v
-   - Check branch: git branch
-   - If diverged: git pull --rebase origin main, then push again
-   - If auth fails: check git credentials, do NOT store token in code
+8. RESTART SAFETY (System 20)
+   Implement on_startup hook that:
+   - Queries DB for all active payment sessions and resumes timers
+   - Queries DB for all open support tickets and reloads bridges
+   - Restarts queue worker from last DB state
+   - Logs restart recovery to audit
 
-5. After successful push, print the final commit hash and confirm:
-   "All changes have been pushed to GitHub successfully."
+VERIFY AND REPORT BACK ON:
+   - Onboarding check uses DB column, not FSM state
+   - /main command does NOT appear in bot command list
+   - Support card shows all fields: Name, Username, User ID,
+     Join Date, Premium Status, Referral Stats, Submission Stats,
+     Ban History, Mute History
+   - Takedown reject: admin must TYPE reason (bot prompts and waits),
+     then rejection auto-opens support session with rejection context
+   - Referral system exists with referral_link in users table
+   - My Status dashboard returns all 19 required fields
+   - audit_logs table exists in DB (not just hub forwarding)
+
+After completing all of the above, push again with commit message
+describing exactly what was added, and provide the new commit hash.
+
+---
 
 ====================================================================
-FINAL CHECKLIST BEFORE PUSHING
-====================================================================
-
-Run through this list. Every item must be YES before you push.
-
-  [ ] All unused files deleted
-  [ ] All 3 bot commands registered correctly
-  [ ] ./prefix 10-second delete working
-  [ ] Onboarding shows once only
-  [ ] Payment flow complete end-to-end
-  [ ] TXID uniqueness enforced
-  [ ] Support bridge two-way working
-  [ ] Takedown FSM complete with reject→auto-support
-  [ ] Broadcast handles ALL content types including albums
-  [ ] Watermark pipeline in place
-  [ ] Message cleanup all 5 rules in place
-  [ ] Vault and queue engine with dead letter queue
-  [ ] Restart safety: all sessions DB-backed
-  [ ] All user messages are friendly and clear
-  [ ] All admin messages show full context
-  [ ] No debug prints in code
-  [ ] No unused imports
-  [ ] No empty files
-  [ ] .env.example complete
-  [ ] README exists and is readable
-  [ ] git status clean after commit
-
-====================================================================
-END OF PROMPT
-====================================================================
-DO NOT RUSH. DO NOT SKIP. DO NOT ASSUME.
-IF SOMETHING IS UNCLEAR, MAKE THE SAFEST PRODUCTION DECISION
-AND DOCUMENT WHAT YOU CHOSE AND WHY IN THE COMMIT MESSAGE.
+END OF CROSS-CHECK REPORT
 ====================================================================

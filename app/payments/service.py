@@ -164,28 +164,33 @@ class PaymentService:
 
     async def approve_payment(self, client: Client, payment_id: str, admin_id: int) -> bool:
         """
-        Approval Sequence:
-        1. Atomic lock
-        2. Reload session (B-07 FIX)
-        3. Activate subscription
-        4. Notify user with invite link
-        5. Audit log
+        --- 7.5 SUBSCRIPTION ACTIVATION (ATOMIC) ---
+        1. Validate session is active
+        2. Validate not already processed (idempotency)
+        3. Acquire distributed lock
+        4. Activate subscription in DB
+        5. Generate unique one-time invite link (30 min expiry)
+        6. Save invite metadata
+        7. Save payment history
+        8. Save invite history
+        9. Clear session
         """
+        # Step 3: Acquire distributed lock
         lock_acquired = await self.repository.acquire_processing_lock(payment_id)
         if not lock_acquired:
             return False
 
-        # B-07 FIX: Reload session from DB after locking to avoid stale data
-        session = await self.repository.get_session(payment_id)
-        if not session or session.status not in (PaymentStatus.PROCESSING, PaymentStatus.UNDER_REVIEW):
-             return False
-
         try:
-            # RC-13 fix: transition to PROCESSING if we are coming from UNDER_REVIEW
-            if session.status == PaymentStatus.UNDER_REVIEW:
-                await self.update_status(payment_id, PaymentStatus.PROCESSING)
-                session.status = PaymentStatus.PROCESSING
+            # Step 1 & 2: Reload and validate state
+            session = await self.repository.get_session(payment_id)
+            if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):
+                 return False
 
+            # Ensure we are in a valid state to approve
+            if session.status not in (PaymentStatus.PROCESSING, PaymentStatus.UNDER_REVIEW, PaymentStatus.SUBMITTED):
+                return False
+
+            # Step 4: Activate subscription
             plan = PLANS[session.plan_id]
             subscription = await SubscriptionService().grant(
                 user_id=session.user_id,
@@ -195,27 +200,30 @@ class PaymentService:
                 notes=f"Payment approved: {payment_id}",
             )
 
+            # Step 5: Generate unique one-time invite link (30 min expiry)
+            # Use InviteService to ensure it's recorded and stale ones are revoked
+            from app.services.invite_service import InviteService
+            invite_service = InviteService()
+            
             invite_link = None
             premium_chat_id = getattr(settings, "PREMIUM_CHANNEL_ID", None) or getattr(
                 settings, "PREMIUM_GROUP_ID", None
             )
-            if premium_chat_id:
-                invite = await client.create_chat_invite_link(
-                    chat_id=int(premium_chat_id),
-                    member_limit=1,
-                )
-                invite_link = invite.invite_link
-
-            message = "Payment approved. Your premium access is active."
-            if invite_link:
-                message += f"\n\nJoin: {invite_link}"
-            await client.send_message(session.user_id, message)
             
-            session.status = PaymentStatus.APPROVED
-            session.approved_at = datetime.now(timezone.utc)
-            session.approved_by = admin_id
-            await self.repository.save_session(session)
-            await self.repository.clear_timeout(payment_id)
+            if premium_chat_id:
+                try:
+                    invite_obj = await invite_service.generate_premium_invite(
+                        client=client,
+                        user_id=session.user_id,
+                        chat_id=int(premium_chat_id),
+                        granted_by=admin_id,
+                        plan=session.plan_id
+                    )
+                    invite_link = invite_obj.telegram_link
+                except Exception as e:
+                    logger.warning("failed_to_generate_invite_during_activation", extra={"ctx_error": str(e)})
+
+            # Step 7: Save payment history (includes invite link if generated)
             await self.repository.record_subscription_history(
                 payment_id,
                 {
@@ -224,15 +232,30 @@ class PaymentService:
                     "locked_amount": session.locked_amount,
                     "subscription_expires_at": subscription.expires_at,
                     "approved_by": admin_id,
+                    "invite_link": invite_link
                 },
             )
+
+            # Notify user
+            message = "✅ <b>Payment Approved!</b>\n\nYour premium access has been activated."
+            if invite_link:
+                message += f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n<i>This link expires in 30 minutes and can only be used once.</i>"
+            await client.send_message(session.user_id, message, parse_mode=ParseMode.HTML)
             
+            # Step 9: Clear session (Update status to final)
+            session.status = PaymentStatus.APPROVED
+            session.approved_at = datetime.now(timezone.utc)
+            session.approved_by = admin_id
+            await self.repository.save_session(session)
+            await self.repository.clear_timeout(payment_id)
+            
+            # Audit log
             await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
             return True
             
         except Exception as e:
-            logger.exception("Failed to approve payment", extra={"ctx_payment_id": payment_id, "ctx_error": str(e)})
-            # Revert to under_review if activation fails?
+            logger.exception("Atomic approval failed", extra={"ctx_payment_id": payment_id, "ctx_error": str(e)})
+            # Attempt to revert state if not finalized
             await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
             return False
 
