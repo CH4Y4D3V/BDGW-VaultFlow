@@ -20,7 +20,6 @@ from app.core.redis_client import get_redis
 from app.core.database import DatabaseManager
 from app.moderation.verification_hub import forward_to_verification
 from app.services.submission_service import register_pending
-from app.services.topic_service import get_topic_service, TOPIC_CONTENT
 from app.services.subscription_service import SubscriptionService
 from app.models.subscription import Plan
 from app.utils.logger import get_logger

@@ -169,10 +169,15 @@ class PaymentService:
 
         # B-07 FIX: Reload session from DB after locking to avoid stale data
         session = await self.repository.get_session(payment_id)
-        if not session or session.status != PaymentStatus.PROCESSING:
+        if not session or session.status not in (PaymentStatus.PROCESSING, PaymentStatus.UNDER_REVIEW):
              return False
 
         try:
+            # RC-13 fix: transition to PROCESSING if we are coming from UNDER_REVIEW
+            if session.status == PaymentStatus.UNDER_REVIEW:
+                await self.update_status(payment_id, PaymentStatus.PROCESSING)
+                session.status = PaymentStatus.PROCESSING
+
             plan = PLANS[session.plan_id]
             subscription = await SubscriptionService().grant(
                 user_id=session.user_id,

@@ -104,7 +104,6 @@ class Settings(BaseSettings):
 
     # ── Media Group ───────────────────────────────────────────────────────────
     MEDIA_GROUP_TIMEOUT_SECONDS: float = 3.0
-    MEDIA_GROUP_TIMEOUT: float = 3.0
     MEDIA_GROUP_MAX_SIZE: int = 10
 
     # ── Media Processing ──────────────────────────────────────────────────────
@@ -118,7 +117,6 @@ class Settings(BaseSettings):
     # ── Watermark assets — per-destination logos ──────────────────────────────
     WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"
     WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
-    WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
 
     WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"

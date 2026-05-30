@@ -44,6 +44,7 @@ def build_user_status_card(
     
     buttons = [
         [InlineKeyboardButton("💎 Upgrade Premium", callback_data="menu:premium")],
+        [InlineKeyboardButton("👥 Referral Program", callback_data="menu:referrals")],
         [InlineKeyboardButton("🆘 Get Support", callback_data="menu:support")],
         [InlineKeyboardButton("← Back", callback_data="menu:home")]
     ]

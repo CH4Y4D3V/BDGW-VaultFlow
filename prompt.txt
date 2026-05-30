@@ -1,128 +1,371 @@
-You are the Final Production Release Board.
+# EMERGENCY PRODUCTION FIX PROMPT
 
-Act as:
+You are acting as:
 
 * Principal Software Architect
-* Staff Python Engineer
-* Senior Telegram Infrastructure Engineer
-* Database Architect
-* Security Auditor
-* Reliability Engineer
-* DevOps Architect
-* SRE Lead
+* Senior Python Backend Engineer
+* Telegram Infrastructure Engineer
+* Production Incident Response Engineer
 * QA Lead
-* Production Readiness Reviewer
+* Reliability Engineer
+* Release Manager
 
-You have authority to BLOCK this release.
+This repository was recently deployed and several critical production workflows are now broken.
 
-Your goal is NOT to help.
+Your mission is NOT to review.
 
-Your goal is to determine:
+Your mission is to:
 
-CAN THIS SYSTEM SAFELY GO LIVE?
+1. Find root causes.
+2. Fix all issues.
+3. Verify all flows.
+4. Update code.
+5. Remove regressions.
+6. Prepare a production-ready commit.
 
-Audit the ENTIRE repository.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL PRODUCTION ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Issue #1
+
+Support System Broken After Deployment
+
+Expected:
+
+User creates support request
+↓
+Topic created
+↓
+Admin accepts
+↓
+User ↔ Admin communication works
+↓
+Support closes
+
+Current:
+
+Support system is broken after deployment.
+
+Tasks:
+
+* Trace support workflow end-to-end
+* Verify topic creation
+* Verify topic routing
+* Verify topic persistence
+* Verify admin acceptance
+* Verify message forwarding
+* Verify support closure
+* Fix all broken paths
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Issue #2
+
+Payment Number Delivery Broken
+
+Expected:
+
+User requests payment
+↓
+Verification Hub topic created
+↓
+Admin clicks Send Payment Details
+↓
+Admin sends payment number manually
+↓
+User receives payment instructions
+↓
+Payment session starts
+
+Current:
+
+Admin cannot properly send payment numbers.
+
+Tasks:
+
+* Audit payment delivery flow
+* Trace callback handlers
+* Trace FSM
+* Trace topic routing
+* Trace admin actions
+* Fix payment-number delivery
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Issue #3
+
+Payment Approval Flow Broken
+
+Expected:
+
+User sends proof
+↓
+Admin reviews
+↓
+Approve
+↓
+Subscription activated
+↓
+Invite generated
+↓
+Audit logged
+
+Current:
+
+Approval workflow is not functioning correctly.
+
+Tasks:
+
+* Trace approval workflow
+* Trace callback handlers
+* Trace repositories
+* Trace subscription activation
+* Trace invite generation
+* Fix broken approval paths
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Issue #4
+
+/start UI Broken
+
+Expected:
+
+Professional main menu
+
+💎 Premium Access
+
+📤 Submit Content
+
+📊 My Status
+
+🆘 Need Help
+
+Current:
+
+UI broken after deployment.
+
+Tasks:
+
+* Audit start command
+* Audit menu builders
+* Audit callback routing
+* Audit keyboard generation
+* Audit translations
+* Restore production UI
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BUSINESS RULE CORRECTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Referral System
+
+Current:
+
+Incorrect logic.
+
+Required:
+
+1 Referral = 1 Point
+
+NOT
+
+1 Referral = 10 Points
+
+Fix:
+
+* Config
+* Constants
+* Database updates
+* Dashboard calculations
+* Reward calculations
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Content Contributor Rewards
+
+Current:
+
+Incorrect logic.
+
+Required:
+
+User receives:
+
+1 Point
+
+after
+
+2 APPROVED ALBUM SUBMISSIONS
+
+NOT
+
+5 approved albums
+
+Fix:
+
+* Submission reward logic
+* Dashboard calculations
+* Contributor score calculations
+* Historical calculations if necessary
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRODUCTION VALIDATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After fixes:
+
+Perform full validation.
+
+Verify:
+
+Support Flow
+
+User
+↓
+Topic
+↓
+Admin Accept
+↓
+Conversation
+↓
+Close
+
+Payment Flow
+
+User
+↓
+Payment Request
+↓
+Admin Sends Number
+↓
+User Receives Number
+↓
+Proof
+↓
+Approval
+
+Subscription Flow
+
+Approval
+↓
+Subscription
+↓
+Invite
+↓
+Membership
+
+Start Menu Flow
+
+/start
+↓
+Correct UI
+↓
+Correct callbacks
+
+Referral Flow
+
+1 Referral
+↓
+1 Point
+
+Album Reward Flow
+
+2 Approved Albums
+↓
+1 Point
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+REPOSITORY CLEANUP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Audit:
+
+* dead code
+* duplicate handlers
+* obsolete callbacks
+* unused services
+* broken imports
+* unreachable code
+
+Only remove files that are proven unused.
+
+Before deleting:
+
+Verify:
+
+* imports
+* references
+* runtime usage
+
+Generate list:
+
+FILES_REMOVED.md
+
+Explain why each file was removed.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENV CLEANUP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Review:
 
-* Architecture
-* Database
-* Payments
-* Subscriptions
-* Verification Hub
-* Support System
-* Referral System
-* Content Submission
-* Vault System
-* Queue Engine
-* Distribution System
-* Watermark Pipeline
-* Admin System
-* Notification System
-* Startup Lifecycle
-* Shutdown Lifecycle
-* Redis
-* MongoDB
-* Railway Deployment
+.env
+.env.example
+settings.py
 
-Critical Requirements:
+Remove:
 
-* Database must be source of truth
-* FSM must never be source of truth
-* Every critical action must be idempotent
-* Every critical action must be restart-safe
-* Every critical action must be recoverable
-* Every critical action must be audit logged
+* duplicate variables
+* obsolete variables
+* unused variables
 
-Specifically verify:
+Generate:
 
-1. TXID uniqueness enforcement
-2. Payment replay prevention
-3. Vault-backed moderation
-4. Membership reconciliation worker
-5. Dead letter queue
-6. Invite regeneration abuse prevention
-7. Support ownership locking
-8. Queue duplicate prevention
-9. FloodWait recovery
-10. Restart recovery
+ENV_AUDIT.md
 
-Perform code-level verification.
+Show:
 
-Do not assume features exist.
+Used Variables
 
-Find exact files.
+Unused Variables
 
-Find exact functions.
+Removed Variables
 
-Show evidence.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FINAL DELIVERY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Output:
+Update code.
 
-SECTION A
-Launch Decision
+Apply fixes.
 
-SECTION B
-Critical Launch Blockers
+Run validation.
 
-SECTION C
-High Risk Issues
+Then generate:
 
-SECTION D
-Medium Risk Issues
+FIX_REPORT.md
 
-SECTION E
-Architecture Review
+CHANGELOG.md
 
-SECTION F
-Database Review
+FILES_REMOVED.md
 
-SECTION G
-Security Review
+ENV_AUDIT.md
 
-SECTION H
-Telegram Review
+PRODUCTION_VERIFICATION.md
 
-SECTION I
-Restart Safety Review
+Finally provide:
 
-SECTION J
-Scalability Review
+1. Exact files changed
+2. Exact functions changed
+3. Root cause of each issue
+4. Verification results
 
-SECTION K
-Production Readiness Score
+Do not stop after identifying problems.
 
-SECTION L
-Final Verdict
+Implement fixes and verify them.
 
-Allowed verdicts:
+Goal:
 
-GO LIVE
-
-GO LIVE WITH WARNINGS
-
-DO NOT LAUNCH
-
-If ANY critical issue exists:
-
-Verdict must be DO NOT LAUNCH.
+Repository must be deployable to Railway and ready for client testing.

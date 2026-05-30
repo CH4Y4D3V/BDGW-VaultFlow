@@ -17,7 +17,7 @@ from pyrogram.errors import FloodWait, RPCError, UserIsBlocked, PeerIdInvalid
 
 from app.config import settings
 from app.repositories.support_repository import SupportRepository
-from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
+from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -80,15 +80,15 @@ class SupportService:
             return False
 
         user_id = message.from_user.id
-        topic_service = get_topic_service()
+        topic_manager = get_topic_manager()
 
         try:
             # Check if topic already existed before calling get_or_create
             # (get_user_topic_id is a read-only check)
-            existing_topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)
+            existing_topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
             is_first = existing_topic_id is None
 
-            topic_id = await topic_service.get_or_create_user_topic(
+            topic_id = await topic_manager.get_or_create_user_topic(
                 client, user_id, TOPIC_SUPPORT
             )
         except Exception as e:

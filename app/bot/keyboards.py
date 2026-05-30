@@ -27,16 +27,10 @@ class KeyboardBuilder:
 
         # Streamlined layout
         buttons = [
-            [InlineKeyboardButton("💎 PREMIUM ACCESS", callback_data="menu:premium")],
-            [
-                InlineKeyboardButton("📨 SUBMIT", callback_data="menu:submit"),
-                InlineKeyboardButton("👤 ANONYMOUS", callback_data="menu:anonymous"),
-            ],
-            [
-                InlineKeyboardButton("👥 REFERRAL", callback_data="menu:referrals"),
-                InlineKeyboardButton("📊 MY STATUS", callback_data="menu:mystatus")
-            ],
-            [InlineKeyboardButton("🆘 CUSTOMER SUPPORT", callback_data="menu:support")]
+            [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
+            [InlineKeyboardButton("📤 Submit Content", callback_data="menu:submit")],
+            [InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")],
+            [InlineKeyboardButton("🆘 Need Help", callback_data="menu:support")]
         ]
 
         return InlineKeyboardMarkup(buttons)

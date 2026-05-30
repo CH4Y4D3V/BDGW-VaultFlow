@@ -28,7 +28,7 @@ from app.core.redis_client import get_redis
 from app.core.permissions import is_support_admin
 from app.repositories.support_repository import SupportRepository
 from app.services.support_service import get_support_service
-from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
+from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,9 +114,9 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
         await callback.answer()
 
         user_id = callback.from_user.id
-        topic_service = get_topic_service()
+        topic_manager = get_topic_manager()
         try:
-            await topic_service.get_or_create_user_topic(
+            await topic_manager.get_or_create_user_topic(
                 client, user_id, TOPIC_SUPPORT
             )
         except Exception as e:
@@ -206,8 +206,8 @@ async def handle_private_message_support(client: Client, message: Message) -> No
             logger.warning("Redis fast-path failed in handle_private_message_support", extra={"ctx_error": str(e)})
 
     try:
-        topic_service = get_topic_service()
-        topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)
+        topic_manager = get_topic_manager()
+        topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
 
         if topic_id is None:
             # No support topic — this is not a support conversation
@@ -242,6 +242,91 @@ async def handle_private_message_support(client: Client, message: Message) -> No
 # This handler is removed to centralize routing logic.
 
 
+# ── Admin callbacks: support:reply, resolve, close ────────────────────────────
+
+@Client.on_callback_query(filters.regex(r"^support:reply:(?P<uid>\d+)$"))
+async def handle_support_reply_callback(client: Client, callback: CallbackQuery) -> None:
+    """Alerts the admin that they should reply directly in the topic."""
+    await callback.answer(
+        "💬 Type your reply directly in this topic to send it to the user.",
+        show_alert=True
+    )
+
+
+@Client.on_callback_query(filters.regex(r"^support:(resolve|close):(?P<tid>.+)$"))
+async def handle_support_closure_callback(client: Client, callback: CallbackQuery) -> None:
+    """Closes the ticket and notifies the user."""
+    action = callback.matches[0].group(1)
+    
+    # Extract user_id from the card text or via topic_manager
+    # Card usually has "User ID: 123456"
+    import re
+    user_id_match = re.search(r"User ID: (\d+)", callback.message.text or "")
+    user_id = int(user_id_match.group(1)) if user_id_match else None
+
+    if not user_id:
+        # Fallback to topic mapping
+        thread_id = (
+            getattr(callback.message, "message_thread_id", None)
+            or getattr(callback.message, "reply_to_top_message_id", None)
+        )
+        if thread_id:
+            topic_manager = get_topic_manager()
+            topic_doc = await topic_manager.get_user_by_topic(thread_id)
+            if topic_doc:
+                user_id = topic_doc["user_id"]
+
+    if not user_id:
+        await callback.answer("❌ Could not identify user to notify.", show_alert=True)
+        return
+
+    # Notify user
+    try:
+        status_text = "resolved" if action == "resolve" else "closed"
+        await client.send_message(
+            chat_id=user_id,
+            text=(
+                f"✅ <b>Your support ticket has been {status_text}.</b>\n\n"
+                "If you have further questions, start a new conversation via /start."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.warning(
+            "handle_support_closure_callback: could not notify user",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+
+    # Close topic
+    try:
+        thread_id = (
+            getattr(callback.message, "message_thread_id", None)
+            or getattr(callback.message, "reply_to_top_message_id", None)
+        )
+        if thread_id:
+            await client.close_forum_topic(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                message_thread_id=thread_id,
+            )
+    except Exception as e:
+        logger.warning(
+            "handle_support_closure_callback: could not close forum topic",
+            extra={"ctx_error": str(e)},
+        )
+
+    # Update admin card
+    try:
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n✅ <b>Ticket {action.capitalize()}d</b> by {callback.from_user.first_name}",
+            reply_markup=None,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+        
+    await callback.answer(f"Ticket {action}d.")
+
+
 # ── Admin command: /close_ticket ──────────────────────────────────────────────
 
 @Client.on_message(
@@ -272,8 +357,8 @@ async def handle_close_ticket(client: Client, message: Message) -> None:
             )
             return
 
-        topic_service = get_topic_service()
-        topic_doc = await topic_service.get_user_by_topic(thread_id)
+        topic_manager = get_topic_manager()
+        topic_doc = await topic_manager.get_user_by_topic(thread_id)
         if not topic_doc or topic_doc.get("topic_type") != TOPIC_SUPPORT:
             await message.reply_text("❌ This is not a support topic.")
             return

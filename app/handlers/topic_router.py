@@ -38,7 +38,7 @@ from pyrogram.errors import (
 from pyrogram.types import Message
 
 from app.config import settings
-from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
+from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -188,9 +188,9 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
             return
 
         # ── Gate 4: look up user for this topic ──────────────────────────────
-        topic_service = get_topic_service()
+        topic_manager = get_topic_manager()
         try:
-            topic_doc = await topic_service.get_user_by_topic(thread_id)
+            topic_doc = await topic_manager.get_user_by_topic(thread_id)
         except Exception as e:
             logger.error(
                 "route_admin_reply_to_user: get_user_by_topic raised",
@@ -232,6 +232,28 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
             # RC-6 fix: persist support message after successful delivery
             if topic_type == TOPIC_SUPPORT:
                 await _persist_support_message(user_id, thread_id, message)
+            
+            # RC-12 fix: automatically advance payment session on admin reply
+            elif topic_type == "payment":
+                try:
+                    from app.payments import get_payment_service
+                    from app.payments.models import PaymentStatus
+                    
+                    payment_service = get_payment_service()
+                    session = await payment_service.get_active_session(user_id)
+                    
+                    if session and session.status == PaymentStatus.PENDING_DETAILS:
+                        await payment_service.update_status(session.id, PaymentStatus.AWAITING_PAYMENT)
+                        await payment_service.start_timeout(session.id)
+                        logger.info(
+                            "Payment session advanced via admin reply",
+                            extra={"ctx_payment_id": session.id, "ctx_user_id": user_id}
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to advance payment session in topic_router",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(e)}
+                    )
         else:
             logger.warning(
                 "Admin reply could not be delivered to user",

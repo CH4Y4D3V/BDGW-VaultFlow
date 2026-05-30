@@ -69,14 +69,14 @@ class ReferralService:
             if await self.check_membership(referred_id, channel_id):
                 success = await self._repo.qualify_referral(referred_id)
                 if success:
-                    # F-06: 10 points for qualified referral
-                    await self._repo.increment_balance(referrer_id, 10)
+                    # F-06: 1 point for qualified referral (RC-12 FIX: was 10)
+                    await self._repo.increment_balance(referrer_id, 1)
                     qualified_count += 1
             await asyncio.sleep(0.1)
         return qualified_count
 
     async def reward_approved_content(self, referred_id: int) -> None:
-        """F-06: Every 5 approved pieces from referred user = 1 point for referrer."""
+        """F-06: Every 2 approved pieces from referred user = 1 point for referrer (RC-12 FIX: was 5)."""
         ref = await self._repo.get_referral_by_referred(referred_id)
         if not ref or ref['status'] != ReferralStatus.QUALIFIED:
             return
@@ -85,6 +85,7 @@ class ReferralService:
         
         # We need to track approved count per referral.
         # For now, let's use the DB to increment and check.
+        from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
         res = await db['referrals'].find_one_and_update(
             {"referred_user_id": referred_id},
@@ -92,7 +93,7 @@ class ReferralService:
             return_document=True
         )
         
-        if res and res.get("approved_content_count", 0) % 5 == 0:
+        if res and res.get("approved_content_count", 0) % 2 == 0:
             await self._repo.increment_balance(referrer_id, 1)
             logger.info("referral_content_reward", extra={"ctx_referrer": referrer_id, "ctx_referred": referred_id})
 
