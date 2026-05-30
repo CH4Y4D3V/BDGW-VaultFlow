@@ -209,62 +209,6 @@ async def handle_warn_command(client: Client, message: Message) -> None:
         await message.reply_text(f"❌ Error: {str(e)}")
 
 
-@Client.on_message(filters.command("ban") & filters.chat(settings.VERIFICATION_GROUP_ID))
-@permission_required(Role.ADMIN)
-async def handle_ban_command(client: Client, message: Message) -> None:
-    """/ban {user_id} {reason} — Permanent bot ban."""
-    try:
-        if len(message.command) < 2:
-            await message.reply_text("❌ Usage: `/ban {user_id} [reason]`")
-            return
-
-        target_id = int(message.command[1])
-        reason = " ".join(message.command[2:]) if len(message.command) > 2 else "Banned by admin"
-        
-        from app.repositories.user_repository import UserRepository
-        user_repo = UserRepository()
-        success = await user_repo.ban_user(target_id, reason)
-        
-        if success:
-            await message.reply_text(f"🚫 User <code>{target_id}</code> has been permanently banned.\nReason: {reason}")
-            try:
-                await client.send_message(target_id, "🚫 <b>Account Banned</b>\n\nYou have been permanently banned from using this bot.")
-            except:
-                pass
-        else:
-            await message.reply_text("❌ Failed to ban user. User might not exist.")
-
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
-
-
-@Client.on_message(filters.command("unban") & filters.chat(settings.VERIFICATION_GROUP_ID))
-@permission_required(Role.ADMIN)
-async def handle_unban_command(client: Client, message: Message) -> None:
-    """/unban {user_id} — Removes bot ban."""
-    try:
-        if len(message.command) < 2:
-            await message.reply_text("❌ Usage: `/unban {user_id}`")
-            return
-
-        target_id = int(message.command[1])
-        from app.repositories.user_repository import UserRepository
-        user_repo = UserRepository()
-        success = await user_repo.unban_user(target_id)
-        
-        if success:
-            await message.reply_text(f"✅ User <code>{target_id}</code> has been unbanned.")
-            try:
-                await client.send_message(target_id, "✅ <b>Ban Removed</b>\n\nYour access to the bot has been restored.")
-            except:
-                pass
-        else:
-            await message.reply_text("❌ Failed to unban user.")
-
-    except Exception as e:
-        await message.reply_text(f"❌ Error: {str(e)}")
-
-
 @Client.on_message(filters.command("kick") & filters.chat(settings.VERIFICATION_GROUP_ID))
 @permission_required(Role.MODERATOR)
 async def handle_kick_command(client: Client, message: Message) -> None:
@@ -393,14 +337,24 @@ _pending_broadcasts: dict[int, dict] = {}
 
 
 async def _safe_send_broadcast(client: Client, user_id: int, message: Message) -> bool:
-    """Send a copy of a message with FloodWait handling."""
+    """Send a copy of a message with FloodWait handling (System 9 FIX)."""
     try:
-        await message.copy(chat_id=user_id)
+        # --- GAP 4 FIX: Use client.copy_message with full metadata ---
+        # pyrogram.Client.copy_message preserves caption and all media types
+        await client.copy_message(
+            chat_id=user_id,
+            from_chat_id=message.chat.id,
+            message_id=message.id
+        )
         return True
     except FloodWait as e:
         await asyncio.sleep(e.value + settings.FLOODWAIT_EXTRA_BUFFER)
         try:
-            await message.copy(chat_id=user_id)
+            await client.copy_message(
+                chat_id=user_id,
+                from_chat_id=message.chat.id,
+                message_id=message.id
+            )
             return True
         except Exception:
             return False

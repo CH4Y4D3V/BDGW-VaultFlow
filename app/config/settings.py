@@ -132,6 +132,7 @@ class Settings(BaseSettings):
     WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
     WATERMARK_ROTATION: int = 0
+    WATERMARK_POSITION: str = "BOTTOM_RIGHT"
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15
 

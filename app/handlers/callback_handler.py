@@ -8,6 +8,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, ForceReply
 
 from app.config import settings
+from app.core.redis_client import get_redis
 from app.core.permissions import is_moderator
 from app.moderation.verification_hub import parse_callback_data
 from app.moderation.moderation_actions import (

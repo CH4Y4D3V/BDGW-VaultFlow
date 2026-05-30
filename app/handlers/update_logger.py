@@ -64,8 +64,10 @@ async def handle_ban_guard(client: Client, update: Message | CallbackQuery):
     # ── SYSTEM 20: PHONE CLEANUP (GLOBAL) ──
     if isinstance(update, Message) and update.chat and update.chat.type == ChatType.PRIVATE:
         text = update.text or update.caption or ""
-        # BD Phone number regex
-        if any(p in text for p in ["017", "018", "019", "014", "013"]):
+        # --- GAP 7 FIX: Use strict regex instead of simple prefix check ---
+        from app.services.cleanup_service import BD_PHONE_REGEX
+        import re
+        if re.search(BD_PHONE_REGEX, text):
             try:
                 from app.services.cleanup_service import get_cleanup_service
                 await get_cleanup_service().log_message(user_id, update.id, text, category="phone")

@@ -112,20 +112,22 @@ class SubscriptionWorker:
                         f"Renew now to keep your premium access uninterrupted."
                     )
                     sub.metadata["three_day_warned_1"] = True
+                    sub.metadata["warned_3d_1_at"] = now.isoformat()
                     await self._service.update_subscription(sub)
                 
-                # Second 3-day warning (between 24h and 48h)
+                # Second 3-day warning (exactly 24h after first)
                 elif "three_day_warned_2" not in sub.metadata:
-                    # Only send if at least 24h passed since first warning
-                    # (Simplified: check if expires_at is < now + 48h)
-                    if sub.expires_at and sub.expires_at < now + timedelta(hours=48):
-                        await self._notify(
-                            sub.user_id,
-                            f"⚠️ <b>Your subscription expires in less than 48 hours!</b>\n\n"
-                            f"Renew now to avoid losing access."
-                        )
-                        sub.metadata["three_day_warned_2"] = True
-                        await self._service.update_subscription(sub)
+                    warn_1_at_str = sub.metadata.get("warned_3d_1_at")
+                    if warn_1_at_str:
+                        warn_1_at = datetime.fromisoformat(warn_1_at_str)
+                        if now >= warn_1_at + timedelta(hours=24):
+                            await self._notify(
+                                sub.user_id,
+                                f"⚠️ <b>Your subscription expires in less than 48 hours!</b>\n\n"
+                                f"Renew now to avoid losing access."
+                            )
+                            sub.metadata["three_day_warned_2"] = True
+                            await self._service.update_subscription(sub)
         except Exception as e:
             logger.error("Pre-expiry notification sweep failed", exc_info=e)
 

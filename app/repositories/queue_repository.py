@@ -458,21 +458,24 @@ class QueueRepository:
         )
 
     async def move_to_dead_letter(self, job_id: str, final_error: str) -> str:
-        """Move job to DLQ."""
+        """Move job to DLQ with robust upsert."""
         job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
         if not job_doc:
             raise JobNotFoundError(f"Job {job_id} not found")
 
+        # --- GAP 6 FIX: Use a unique key that allows multiple failures per content_id ---
+        # but prevents duplicate DLQ entries for the same execution attempt.
         dlq_doc = {
             "original_job_id": job_id,
             "content_id": job_doc["content_id"],
-            "failure_reason": "max_retries_exceeded",
+            "failure_reason": "max_retries_exceeded" if final_error != "deadline_exceeded" else "deadline_exceeded",
             "final_error": final_error,
             "dead_at": datetime.now(timezone.utc),
             "metadata": job_doc.get("metadata", {}),
         }
 
-        result = await self._dlq.update_one(
+        # Atomic upsert on original_job_id to prevent duplicate DLQ records for same job
+        await self._dlq.update_one(
             {"original_job_id": job_id},
             {"$set": dlq_doc},
             upsert=True
@@ -480,10 +483,14 @@ class QueueRepository:
 
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
-            {"$set": {"status": JobStatus.DEAD, "updated_at": datetime.now(timezone.utc)}}
+            {"$set": {
+                "status": JobStatus.DEAD, 
+                "error": final_error,
+                "updated_at": datetime.now(timezone.utc)
+            }}
         )
 
-        return str(result.upserted_id or job_id)
+        return job_id
 
     async def move_to_quarantine(self, job_id: str, reason: str) -> None:
         """Move unrecoverable job to quarantine."""
@@ -555,8 +562,9 @@ class QueueRepository:
 
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
         """Return jobs whose deadline has passed and are still pending."""
+        # --- GAP 6 FIX: Use correct model field 'queue_deadline' ---
         cursor = self._queue.find(
-            {"status": "pending", "scheduled_at": {"$lte": cutoff}}
+            {"status": "pending", "queue_deadline": {"$lte": cutoff}}
         )
         result = await cursor.to_list(length=None)
         return result if result is not None else []

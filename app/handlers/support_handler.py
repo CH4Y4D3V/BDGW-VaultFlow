@@ -355,11 +355,12 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
         
         # ── SYSTEM 18: AUDIT LOG ──
         from app.services.audit_service import get_audit
+        # --- GAP 7 FIX: Use the actual tid from matches ---
         await get_audit().log(
             action=f"support_{action}",
             performed_by=callback.from_user.id,
             target_user_id=user_id,
-            details={"ticket_id": tid}
+            details={"ticket_id": callback.matches[0].group("tid")}
         )
 
         await client.send_message(
@@ -371,7 +372,7 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
             parse_mode=ParseMode.HTML,
         )
         
-        # ── SYSTEM 15.5: USER-SIDE DELETION ──
+        # ── SYSTEM 15.5: USER-SIDE DELETION (GAP 7 FIX) ──
         try:
             from app.services.cleanup_service import get_cleanup_service
             await get_cleanup_service().delete_user_support_history(user_id)

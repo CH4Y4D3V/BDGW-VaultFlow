@@ -26,13 +26,15 @@ class CleanupService:
         self._db = DatabaseManager.get_db()
         self._history = self._db["message_history"]
 
-    async def log_message(self, user_id: int, message_id: int, text: str = "", category: str = "general"):
+    async def log_message(self, chat_id: int, message_id: int, text: str = "", category: str = "general"):
         """Records a message to be cleaned up later."""
         expiry_mins = 60
         if category == "payment":
             expiry_mins = 20
+        elif category == "support":
+            expiry_mins = 1440 # Default 24h for support unless closed
         
-        # Check for BD phone numbers in text
+        # Check for BD phone numbers in text (Section 20: 7 mins)
         if re.search(BD_PHONE_REGEX, text):
             category = "phone"
             expiry_mins = 7
@@ -40,10 +42,10 @@ class CleanupService:
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=expiry_mins)
         
         await self._history.update_one(
-            {"user_id": user_id, "message_id": message_id},
+            {"chat_id": chat_id, "message_id": message_id},
             {
                 "$set": {
-                    "user_id": user_id,
+                    "chat_id": chat_id,
                     "message_id": message_id,
                     "category": category,
                     "expires_at": expires_at,
@@ -63,17 +65,17 @@ class CleanupService:
             })
 
             async for record in cursor:
-                user_id = record["user_id"]
+                chat_id = record["chat_id"]
                 msg_id = record["message_id"]
 
                 try:
-                    await self._bot.delete_messages(user_id, msg_id)
+                    await self._bot.delete_messages(chat_id, msg_id)
                 except Exception:
                     pass # Already deleted or blocked
 
                 await self._history.update_one(
                     {"_id": record["_id"]},
-                    {"$set": {"deleted": True}}
+                    {"$set": {"deleted": True, "deleted_at": datetime.now(timezone.utc)}}
                 )
 
         except Exception as e:
@@ -82,7 +84,7 @@ class CleanupService:
     async def delete_user_support_history(self, user_id: int):
         """Rule 15.5: Delete all user-side support messages on closure."""
         try:
-            cursor = self._history.find({"user_id": user_id, "category": "support", "deleted": False})
+            cursor = self._history.find({"chat_id": user_id, "category": "support", "deleted": False})
             msg_ids = []
             async for r in cursor:
                 msg_ids.append(r["message_id"])
@@ -90,8 +92,8 @@ class CleanupService:
             if msg_ids:
                 await self._bot.delete_messages(user_id, msg_ids)
                 await self._history.update_many(
-                    {"user_id": user_id, "category": "support"},
-                    {"$set": {"deleted": True}}
+                    {"chat_id": user_id, "category": "support"},
+                    {"$set": {"deleted": True, "deleted_at": datetime.now(timezone.utc)}}
                 )
         except Exception:
             pass

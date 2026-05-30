@@ -15,7 +15,7 @@ from pyrogram.types import (
 from app.config import settings
 from app.core.permissions import is_support_admin
 from app.payments import get_payment_service
-from app.payments.models import PaymentStatus
+from app.payments.models import PaymentStatus, PaymentSession
 from app.payments.service import PLANS
 from app.utils.logger import get_logger
 
@@ -161,22 +161,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         return
     user_id = message.from_user.id
     
-    # B-06 FIX: Redis-backed fast check
-    from app.core.redis_client import RedisClient
-    try:
-        redis = await RedisClient.get_client()
-        if not await redis.exists(f"pay_session:{user_id}"):
-            raise ContinuePropagation
-    except ContinuePropagation:
-        raise
-    except Exception as e:
-        logger.warning(
-            "Redis fast-path failed in handle_payment_inputs — falling back to DB",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)}
-        )
-
     service = get_payment_service()
-    
     session = await service.get_active_session(user_id)
     if not session or session.status not in [PaymentStatus.AWAITING_PAYMENT, PaymentStatus.WAITING_SCREENSHOT]:
         raise ContinuePropagation
@@ -186,7 +171,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             await message.reply_text("Please send your Transaction ID (TXID) as text.")
             return
         
-        # B-06 FIX: Check for duplicate TXID before updating status
+        # --- GAP 3 FIX: Import and use DuplicateKeyError ---
         from pymongo.errors import DuplicateKeyError
         try:
             success = await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
@@ -195,11 +180,15 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 return
         except DuplicateKeyError:
             # ── SYSTEM 20: FRAUD PREVENTION ──
-            # Reject session and BAN user
             from app.repositories.user_repository import UserRepository
             user_repo = UserRepository()
             await user_repo.ban_user(user_id, reason=f"Fraud attempt: Duplicate TXID reuse ({message.text})")
-            await service.reject_payment(session.id, "Auto-rejected: Duplicate TXID (Fraud)", 0) # 0 for System
+            
+            # --- GAP 3 FIX: Direct status update to avoid lock mismatch ---
+            await service.repository._collection.update_one(
+                {"_id": session.id},
+                {"$set": {"status": PaymentStatus.REJECTED.value, "rejection_reason": "Auto-rejected: Duplicate TXID (Fraud)"}}
+            )
             
             await message.reply_text(
                 "❌ <b>FRAUD DETECTED</b>\n\n"

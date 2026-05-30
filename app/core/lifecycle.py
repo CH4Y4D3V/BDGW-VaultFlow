@@ -97,6 +97,10 @@ class AppLifecycle:
                 },
             )
 
+            # --- GAP 8 FIX: Restore topic mapping cache from DB ---
+            from app.services.topic_manager import get_topic_manager
+            await get_topic_manager().restore_cache()
+
         except Exception as e:
             logger.exception(
                 "lifecycle_bot_start_failed",

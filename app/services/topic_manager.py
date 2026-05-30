@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
 from pyrogram.client import Client
+from pyrogram.enums import ChatType
 from pyrogram.errors import FloodWait, RPCError, Forbidden
 from pyrogram import raw
 
@@ -54,6 +55,28 @@ class TopicManager:
 
     def __init__(self) -> None:
         self._local_cache: Dict[str, int] = {}
+        self._initialized = False
+
+    async def restore_cache(self) -> None:
+        """Loads all active topic mappings from MongoDB into memory (GAP 8 FIX)."""
+        if self._initialized:
+            return
+
+        try:
+            db = DatabaseManager.get_db()
+            cursor = db["user_topics"].find({})
+            async for doc in cursor:
+                u_id = doc["user_id"]
+                t_type = doc["topic_type"]
+                t_id = doc["topic_id"]
+                
+                cache_key = f"user:{u_id}:{t_type}"
+                self._local_cache[cache_key] = int(t_id)
+                
+            self._initialized = True
+            logger.info("TopicManager cache restored", extra={"ctx_count": len(self._local_cache)})
+        except Exception as e:
+            logger.error("Failed to restore TopicManager cache", extra={"ctx_error": str(e)})
 
     async def get_or_create_user_topic(
         self,

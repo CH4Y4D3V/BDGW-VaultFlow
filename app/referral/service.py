@@ -7,6 +7,7 @@ from typing import Optional
 from pyrogram import Client
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import UserNotParticipant, FloodWait
+from pymongo import ReturnDocument
 
 from app.referral.repository import ReferralRepository
 from app.referral.models import ReferralStatus

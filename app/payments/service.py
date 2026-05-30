@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import uuid
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 from app.config import settings
 from app.models.subscription import Plan
@@ -24,6 +26,7 @@ PLANS = {
 
 SESSION_TIMEOUT_MINUTES = 20
 
+# --- GAP 1 FIX: Correct FSM transitions ---
 ALLOWED_TRANSITIONS = {
     PaymentStatus.WAITING_PAYMENT_DETAILS: {
         PaymentStatus.REQUESTED,
@@ -37,9 +40,9 @@ ALLOWED_TRANSITIONS = {
     },
     PaymentStatus.PENDING_DETAILS: {
         PaymentStatus.AWAITING_PAYMENT,
+        PaymentStatus.REQUESTED, # Allow cancel send
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
-        PaymentStatus.REQUESTED,  # Back to requested if admin cancels send?
     },
     PaymentStatus.AWAITING_PAYMENT: {
         PaymentStatus.WAITING_SCREENSHOT,
@@ -47,9 +50,13 @@ ALLOWED_TRANSITIONS = {
         PaymentStatus.EXPIRED,
     },
     PaymentStatus.WAITING_SCREENSHOT: {
-        PaymentStatus.UNDER_REVIEW,
+        PaymentStatus.SUBMITTED,
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
+    },
+    PaymentStatus.SUBMITTED: {
+        PaymentStatus.UNDER_REVIEW,
+        PaymentStatus.CANCELLED,
     },
     PaymentStatus.UNDER_REVIEW: {
         PaymentStatus.PROCESSING,
@@ -82,14 +89,13 @@ class PaymentService:
         # ── SYSTEM 14: SNAPSHOT & LOCK POINTS ──
         if points > 0:
             from app.referral.service import ReferralService
-            # We use the repository directly to deduct to avoid circular imports if any
+            # We use the repository directly to deduct to avoid circular imports
             await self.referral_repo.deduct_points(user_id, points)
             logger.info("points_locked_for_session", extra={"ctx_user_id": user_id, "ctx_points": points})
 
         base_payable = max(0, base_price - points)
 
         # Unique identifying offset: ৳0.01 to ৳0.50
-        import random
         offset = round(random.uniform(0.01, 0.50), 2)
         locked_amount = float(base_payable) + offset
 
@@ -120,7 +126,9 @@ class PaymentService:
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
-        if status not in ALLOWED_TRANSITIONS.get(session.status, set()):
+        
+        # --- GAP 1: FSM VALIDATION ---
+        if status not in ALLOWED_TRANSITIONS.get(session.status, set()) and status != session.status:
             logger.warning(
                 "payment_state_transition_rejected",
                 extra={
@@ -142,15 +150,18 @@ class PaymentService:
         await self.repository.log_event(payment_id, f"status_changed_{status.value}", kwargs)
         return True
 
-    async def start_timeout(self, payment_id: str) -> bool:
-        """Start the payment timeout after payment instructions are delivered."""
+    async def start_timeout(self, payment_id: str, remaining_seconds: Optional[int] = None) -> bool:
+        """Start or resume the payment timeout."""
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
 
-        session.expires_at = datetime.now(timezone.utc) + timedelta(
-            minutes=SESSION_TIMEOUT_MINUTES
-        )
+        if remaining_seconds is not None:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=remaining_seconds)
+        else:
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+
+        session.expires_at = expires_at
         session.updated_at = datetime.now(timezone.utc)
 
         await self.repository.save_session(session)
@@ -165,15 +176,6 @@ class PaymentService:
     async def approve_payment(self, client: Client, payment_id: str, admin_id: int) -> bool:
         """
         --- 7.5 SUBSCRIPTION ACTIVATION (ATOMIC) ---
-        1. Validate session is active
-        2. Validate not already processed (idempotency)
-        3. Acquire distributed lock
-        4. Activate subscription in DB
-        5. Generate unique one-time invite link (30 min expiry)
-        6. Save invite metadata
-        7. Save payment history
-        8. Save invite history
-        9. Clear session
         """
         # Step 3: Acquire distributed lock
         lock_acquired = await self.repository.acquire_processing_lock(payment_id)
@@ -186,10 +188,6 @@ class PaymentService:
             if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):
                  return False
 
-            # Ensure we are in a valid state to approve
-            if session.status not in (PaymentStatus.PROCESSING, PaymentStatus.UNDER_REVIEW, PaymentStatus.SUBMITTED):
-                return False
-
             # Step 4: Activate subscription
             plan = PLANS[session.plan_id]
             subscription = await SubscriptionService().grant(
@@ -201,7 +199,6 @@ class PaymentService:
             )
 
             # Step 5: Generate unique one-time invite link (30 min expiry)
-            # Use InviteService to ensure it's recorded and stale ones are revoked
             from app.services.invite_service import InviteService
             invite_service = InviteService()
             
@@ -223,7 +220,7 @@ class PaymentService:
                 except Exception as e:
                     logger.warning("failed_to_generate_invite_during_activation", extra={"ctx_error": str(e)})
 
-            # Step 7: Save payment history (includes invite link if generated)
+            # Step 7: Save payment history
             await self.repository.record_subscription_history(
                 payment_id,
                 {
@@ -240,29 +237,35 @@ class PaymentService:
             message = "✅ <b>Payment Approved!</b>\n\nYour premium access has been activated."
             if invite_link:
                 message += f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n<i>This link expires in 30 minutes and can only be used once.</i>"
+            
+            # --- BUG F FIX: Import ParseMode ---
             await client.send_message(session.user_id, message, parse_mode=ParseMode.HTML)
             
-            # Step 9: Clear session (Update status to final)
+            # Step 9: Clear session
             session.status = PaymentStatus.APPROVED
             session.approved_at = datetime.now(timezone.utc)
             session.approved_by = admin_id
             await self.repository.save_session(session)
             await self.repository.clear_timeout(payment_id)
             
-            # Audit log
             await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
             return True
             
         except Exception as e:
             logger.exception("Atomic approval failed", extra={"ctx_payment_id": payment_id, "ctx_error": str(e)})
-            # Attempt to revert state if not finalized
             await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
             return False
 
     async def reject_payment(self, payment_id: str, reason: str, admin_id: int) -> bool:
-        lock_acquired = await self.repository.acquire_processing_lock(payment_id)
-        if not lock_acquired:
-            return False
+        # Bypass lock if coming from fraud check or other internal path
+        # But for admin manual reject, we want the lock
+        session = await self.repository.get_session(payment_id)
+        if not session: return False
+        
+        if session.status == PaymentStatus.UNDER_REVIEW:
+            lock_acquired = await self.repository.acquire_processing_lock(payment_id)
+            if not lock_acquired:
+                return False
 
         await self.update_status(
             payment_id, 
@@ -275,8 +278,7 @@ class PaymentService:
 
     async def resume_active_sessions(self) -> None:
         """
-        --- 7.4/25 RESTART SAFETY ---
-        Resumes timeouts for all active sessions on bot startup.
+        --- GAP 8 FIX: RESTART SAFE TIMER ---
         """
         try:
             active_sessions = await self.repository.get_sessions_by_status([
@@ -285,10 +287,20 @@ class PaymentService:
                 PaymentStatus.UNDER_REVIEW
             ])
             
+            now = datetime.now(timezone.utc)
             for session in active_sessions:
-                # Restart timeout timer
-                await self.start_timeout(session.id)
-                logger.info("Resumed payment session timeout", extra={"ctx_payment_id": session.id})
+                if not session.expires_at:
+                    await self.start_timeout(session.id)
+                    continue
+                
+                remaining = (session.expires_at.replace(tzinfo=timezone.utc) - now).total_seconds()
+                if remaining > 0:
+                    await self.start_timeout(session.id, remaining_seconds=int(remaining))
+                    logger.info("Resumed payment session timer", extra={"ctx_payment_id": session.id, "ctx_remaining": remaining})
+                else:
+                    # Session expired while bot was down
+                    await self.update_status(session.id, PaymentStatus.EXPIRED)
+                    logger.info("Closed expired session on startup", extra={"ctx_payment_id": session.id})
                 
         except Exception as e:
             logger.error("Failed to resume active sessions", extra={"ctx_error": str(e)})

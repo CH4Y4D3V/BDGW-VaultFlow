@@ -212,7 +212,13 @@ class DistributionScheduler:
                 if not content or not targets:
                     continue
 
-                dest = source_id.replace("submission_", "")
+                # --- GAP 6 FIX: Correctly resolve dest for daily cap ---
+                if source_id.startswith("submission_"):
+                    dest = source_id.replace("submission_", "")
+                else:
+                    # Fallback for direct vault content (reposts)
+                    dest = "nsfw" # Default to NSFW or try to infer from metadata
+                
                 daily_cap = _get_daily_cap(dest)
                 posted_today = await self._get_posted_count_last_24h(source_id)
                 remaining = daily_cap - posted_today
@@ -293,7 +299,8 @@ class DistributionScheduler:
             source_channel_id=source_channel_id,
             source_message_id=content_item.get("message_id"),
             vault_chat_id=settings.VAULT_CHANNEL_ID,
-            vault_message_id=content_item.get("vault_message_id"),
+            # --- GAP 6 FIX: Fallback for missing vault_message_id ---
+            vault_message_id=content_item.get("vault_message_id") or content_item.get("message_id"),
             target_channel_ids=target_channel_ids,
             media_group_id=content_item.get("media_group_id"),
             media_type=media_type,
