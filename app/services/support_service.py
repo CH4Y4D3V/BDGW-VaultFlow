@@ -116,6 +116,31 @@ class SupportService:
 
         if is_first:
             from app.ui.support_cards import build_admin_support_card, build_admin_support_actions
+            from app.repositories.user_repository import UserRepository
+            from app.services.subscription_service import SubscriptionService
+            from app.repositories.activity_repository import ActivityRepository
+            from app.models.activity import ActivityAction
+            
+            # Fetch Stats
+            user_repo = UserRepository()
+            user_doc = await user_repo.get_user(user_id)
+            join_date = user_doc.get("join_date").strftime("%Y-%m-%d") if user_doc and user_doc.get("join_date") else "N/A"
+            
+            sub_service = SubscriptionService()
+            sub = await sub_service.get_subscription(user_id)
+            plan = sub.plan.value if sub else "Free"
+            
+            activity_repo = ActivityRepository()
+            total_subs = await activity_repo.count_user_actions(user_id, ActivityAction.SUB_GRANT) # Or specific submission action
+            total_bans = 1 if user_doc and user_doc.get("is_banned") else 0 # Simple check
+            
+            stats = {
+                "join_date": join_date,
+                "subscription": plan,
+                "total_submissions": total_subs,
+                "ban_count": total_bans
+            }
+
             ticket_id = f"T-{user_id}-{topic_id}"
             
             # Use message text as issue summary if available
@@ -126,9 +151,11 @@ class SupportService:
             admin_text = build_admin_support_card(
                 user=message.from_user,
                 ticket_id=ticket_id,
-                issue_summary=issue_summary
+                issue_summary=issue_summary,
+                status="pending",
+                stats=stats
             )
-            admin_markup = build_admin_support_actions(ticket_id, user_id)
+            admin_markup = build_admin_support_actions(ticket_id, user_id, status="pending")
             
             try:
                 await client.send_message(

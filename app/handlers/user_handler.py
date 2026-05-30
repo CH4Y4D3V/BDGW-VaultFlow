@@ -261,7 +261,20 @@ async def handle_start(client: Client, message: Message) -> None:
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
-        # F-12: Auto-register user if not exists
+        # ── SYSTEM 1: USER REGISTRATION ──
+        try:
+            from app.repositories.user_repository import UserRepository
+            user_repo = UserRepository()
+            await user_repo.upsert_user(
+                user_id=user_id,
+                first_name=message.from_user.first_name,
+                last_name=message.from_user.last_name,
+                username=message.from_user.username
+            )
+        except Exception as e:
+            logger.warning("user_registration_failed", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+
+        # F-12: Ensure subscription exists
         sub_service = _get_sub_service()
         existing_sub = await sub_service.get_subscription(user_id)
         if not existing_sub:
@@ -273,7 +286,6 @@ async def handle_start(client: Client, message: Message) -> None:
                 granted_by=0,
                 notes="Auto-registered on /start"
             )
-            logger.info("New user registered", extra={"ctx_user_id": user_id})
 
         # ── Referral Payload Handling ──
         if len(message.command) > 1:
@@ -457,7 +469,8 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 user_id=user_id,
                 username=callback_query.from_user.username,
                 state=user_state.value,
-                subscription=sub_data
+                subscription=sub_data,
+                wallet=wallet
             )
 
         await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)

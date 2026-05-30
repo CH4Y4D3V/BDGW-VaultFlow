@@ -205,6 +205,22 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
         user_id: int = topic_doc["user_id"]
         topic_type: str = topic_doc.get("topic_type", "support")
 
+        # ── SYSTEM 10: SUPPORT BRIDGE GUARD ──
+        if topic_type == TOPIC_SUPPORT:
+            status = topic_doc.get("status", "pending")
+            if status != "accepted":
+                try:
+                    await client.send_message(
+                        chat_id=message.chat.id,
+                        text="⚠️ <b>Bridge Inactive</b>\n\nYou must click <code>✅ Accept Support</code> on the moderation card before replying to the user.",
+                        message_thread_id=thread_id,
+                        reply_to_message_id=message.id,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass
+                return
+
         logger.info(
             "HANDLER: route_admin_reply_to_user — routing",
             extra={

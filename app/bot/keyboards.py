@@ -25,11 +25,14 @@ class KeyboardBuilder:
                 [InlineKeyboardButton("🆘 Support & Appeal", callback_data="menu:support")]
             ])
 
-        # Streamlined layout
+        # ── SYSTEM 2: MAIN MENU ──
         buttons = [
             [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
-            [InlineKeyboardButton("📤 Submit Content", callback_data="menu:submit")],
-            [InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")],
+            [InlineKeyboardButton("📤 Submit Content Anonymously", callback_data="menu:submit")],
+            [
+                InlineKeyboardButton("🎁 Referral Program", callback_data="menu:referrals"),
+                InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")
+            ],
             [InlineKeyboardButton("🆘 Need Help", callback_data="menu:support")]
         ]
 

@@ -16,7 +16,8 @@ def build_user_status_card(
     username: Optional[str],
     state: str,
     membership: Optional[Dict[str, Any]] = None,
-    subscription: Optional[Dict[str, Any]] = None
+    subscription: Optional[Dict[str, Any]] = None,
+    wallet: Optional[Dict[str, Any]] = None
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Universal status card for the user."""
     header = format_header("My Status", "📊")
@@ -30,10 +31,15 @@ def build_user_status_card(
     if subscription:
         sub_text = f"💎 {subscription['plan_label']} (Expires: {subscription['expiry']})"
     
+    # ── SYSTEM 14: WALLET DATA ──
+    points = wallet.get("points_balance", 0) if wallet else 0
+    total_earned = wallet.get("total_earned", 0) if wallet else 0
+    
     body = (
         f"{user_line}\n"
         f"🏷 <b>Global Status:</b> {state_badge}\n"
         f"💳 <b>Subscription:</b> {sub_text}\n"
+        f"🎁 <b>Points Balance:</b> ৳{points} (Earned: ৳{total_earned})\n"
         f"{THIN_DIVIDER}\n"
     )
     

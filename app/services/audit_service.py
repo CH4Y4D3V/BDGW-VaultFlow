@@ -99,6 +99,32 @@ class AuditService:
 
         try:
             result = await db["moderation_audit"].insert_one(record)
+            
+            # ── SYSTEM 18: HUB LOGGING ──
+            from app.bot.client import get_bot
+            client = get_bot()
+            if settings.HUB_TOPIC_AUDIT and client.is_connected:
+                log_text = f"🛡 <b>[AUDIT]</b>\n"
+                log_text += f"┣ 🏷 <b>Action:</b> <code>{action}</code>\n"
+                log_text += f"┣ 👤 <b>Admin:</b> <code>{performed_by}</code>\n"
+                if target_user_id:
+                    log_text += f"┣ 🎯 <b>Target:</b> <code>{target_user_id}</code>\n"
+                if content_id:
+                    log_text += f"┣ 📦 <b>Content:</b> <code>{content_id}</code>\n"
+                import json
+                details_str = json.dumps(details, indent=2) if details else "{}"
+                log_text += f"┗ 📝 <b>Details:</b> <code>{details_str}</code>"
+                
+                try:
+                    await client.send_message(
+                        chat_id=settings.VERIFICATION_GROUP_ID,
+                        text=log_text,
+                        message_thread_id=settings.HUB_TOPIC_AUDIT,
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass # Don't block if TG logging fails
+
             return str(result.inserted_id)
         except Exception as e:
             logger.error(

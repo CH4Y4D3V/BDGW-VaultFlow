@@ -91,6 +91,19 @@ class PaymentTimeoutMonitor:
                 return False
 
             user_id = session.user_id
+            
+            # ── SYSTEM 14: REFUND POINTS ──
+            if session.points_used > 0:
+                try:
+                    from app.referral.repository import ReferralRepository
+                    from app.referral.service import ReferralService
+                    ref_repo = ReferralRepository(self.repository._db)
+                    ref_service = ReferralService(ref_repo, client)
+                    await ref_service.refund_points(user_id, session.points_used)
+                    logger.info("points_refunded_on_expiry", extra={"ctx_user_id": user_id, "ctx_points": session.points_used})
+                except Exception as e:
+                    logger.error("failed_to_refund_points_on_expiry", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+
             session.status = PaymentStatus.EXPIRED
             session.updated_at = datetime.now(timezone.utc)
             await self.repository.save_session(session)

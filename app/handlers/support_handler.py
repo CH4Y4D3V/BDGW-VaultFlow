@@ -244,6 +244,67 @@ async def handle_private_message_support(client: Client, message: Message) -> No
 
 # ── Admin callbacks: support:reply, resolve, close ────────────────────────────
 
+@Client.on_callback_query(filters.regex(r"^support:accept:(?P<uid>\d+)$"))
+async def handle_support_accept_callback(client: Client, callback: CallbackQuery) -> None:
+    """Updates ticket status to accepted and notifies the user."""
+    user_id = int(callback.matches[0].group("uid"))
+    admin_name = callback.from_user.first_name
+    
+    from app.repositories.support_repository import SupportRepository
+    repo = SupportRepository()
+    
+    # 1. Update DB
+    success = await repo.update_ticket_status(user_id, TOPIC_SUPPORT, "accepted")
+    if not success:
+        await callback.answer("❌ Failed to accept ticket. Already accepted or closed?", show_alert=True)
+        return
+
+    # ── SYSTEM 18: AUDIT LOG ──
+    from app.services.audit_service import get_audit
+    await get_audit().log(
+        action="support_accept",
+        performed_by=callback.from_user.id,
+        target_user_id=user_id,
+        details={"admin_name": admin_name}
+    )
+
+    # 2. Notify user
+    try:
+        await client.send_message(
+            chat_id=user_id,
+            text=(
+                f"✅ <b>Admin {admin_name} has accepted your support request.</b>\n\n"
+                "You can now chat directly with the support team here."
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
+    # 3. Update admin card
+    try:
+        # Extract ticket_id from message text (formatted as Ticket ID: abc-123)
+        import re
+        ticket_id_match = re.search(r"Ticket ID: ([\w-]+)", callback.message.text or "")
+        ticket_id = ticket_id_match.group(1) if ticket_id_match else "unknown"
+        
+        from app.ui.support_cards import build_admin_support_actions
+        await callback.message.edit_reply_markup(
+            reply_markup=build_admin_support_actions(ticket_id, user_id, status="accepted")
+        )
+        
+        # Also edit text to show who accepted
+        await callback.message.edit_text(
+            callback.message.text.replace("⏳ Awaiting Response", f"✅ <b>Accepted by {admin_name}</b>"),
+            reply_markup=build_admin_support_actions(ticket_id, user_id, status="accepted"),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning("Failed to update card after accept", extra={"ctx_error": str(e)})
+
+    await callback.answer("Ticket accepted.")
+
+
 @Client.on_callback_query(filters.regex(r"^support:reply:(?P<uid>\d+)$"))
 async def handle_support_reply_callback(client: Client, callback: CallbackQuery) -> None:
     """Alerts the admin that they should reply directly in the topic."""
@@ -283,6 +344,16 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
     # Notify user
     try:
         status_text = "resolved" if action == "resolve" else "closed"
+        
+        # ── SYSTEM 18: AUDIT LOG ──
+        from app.services.audit_service import get_audit
+        await get_audit().log(
+            action=f"support_{action}",
+            performed_by=callback.from_user.id,
+            target_user_id=user_id,
+            details={"ticket_id": tid}
+        )
+
         await client.send_message(
             chat_id=user_id,
             text=(

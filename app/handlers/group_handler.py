@@ -109,6 +109,21 @@ async def _flush_album(buffer_key: str, submitter_id: int, client: Client) -> No
         extra={"ctx_key": buffer_key, "ctx_submitter": submitter_id, "ctx_count": len(messages)},
     )
     await _submit_for_review(client, messages, submitter_id)
+    
+    # ── SYSTEM 12: USER CONFIRMATION ──
+    try:
+        await client.send_message(
+            chat_id=submitter_id,
+            text=(
+                "✅ <b>Album Submitted</b>\n\n"
+                f"Your album (<code>{len(messages)}</code> items) has been received and sent for review.\n"
+                "You will be notified once a decision is made.\n\n"
+                "<i>Thank you for contributing!</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
 
 
 # ── Handler ───────────────────────────────────────────────────────────────────
@@ -163,6 +178,21 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
             },
         )
         await _submit_for_review(client, [message], submitter_id)
+    
+    # ── SYSTEM 12: USER CONFIRMATION ──
+    try:
+        await client.send_message(
+            chat_id=submitter_id,
+            text=(
+                "✅ <b>Content Submitted</b>\n\n"
+                "Your media has been successfully received and sent to our moderators for review.\n"
+                "You will be notified once a decision is made.\n\n"
+                "<i>Thank you for contributing!</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
         return
 
     buffer_key = f"grp_{message.chat.id}_{media_group_id}"

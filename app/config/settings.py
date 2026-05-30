@@ -49,6 +49,15 @@ class Settings(BaseSettings):
     PREMIUM_CHANNEL_ID: int = 0
     LOG_CHANNEL_ID: int = 0
 
+    # ── Hub Topic IDs ──
+    HUB_TOPIC_PAYMENTS: int = 0
+    HUB_TOPIC_CONTENT_REVIEW: int = 0
+    HUB_TOPIC_SUPPORT: int = 0
+    HUB_TOPIC_TAKEDOWN: int = 0
+    HUB_TOPIC_USER_MOD: int = 0
+    HUB_TOPIC_BROADCASTS: int = 0
+    HUB_TOPIC_AUDIT: int = 0
+
     # ── Destination display names ─────────────────────────────────────────────
     NSFW_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"

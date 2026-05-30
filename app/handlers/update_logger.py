@@ -17,12 +17,26 @@ Rules:
     an update even when the downstream handler fails.
 """
 
-from pyrogram import Client
+import asyncio
+from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ──
+@Client.on_message(filters.private & filters.regex(r"^\./"), group=-1)
+async def handle_prefix_auto_delete(client: Client, message: Message):
+    """
+    Catch messages starting with ./ and delete them after 10 seconds.
+    Group -1 ensures this runs alongside tracing and doesn't block downstream.
+    """
+    await asyncio.sleep(10)
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 # ── Idempotency Cache ──
 # Prevents duplicate UPDATE_TRACE logs if the plugin is loaded multiple times

@@ -319,9 +319,13 @@ class DistributionScheduler:
             return False
 
     def _randomized_execute_time(self, index: int) -> datetime:
-        base_delay = random.uniform(0, settings.SCHEDULER_INTERVAL_SECONDS)
-        stagger = index * random.uniform(5, 15)
-        return datetime.now(timezone.utc) + timedelta(seconds=base_delay + stagger)
+        # ── SYSTEM 16: RANDOM DELAY 1-5 MINS ──
+        # index * random(5, 15) was too fast.
+        # We want 1-5 minutes (60-300 seconds) random delay.
+        # Plus we stagger based on index to avoid identical timestamps for same-group jobs
+        delay = random.uniform(60, 300)
+        stagger = index * 2 # 2 second gap between items in same cycle to maintain order
+        return datetime.now(timezone.utc) + timedelta(seconds=delay + stagger)
 
     async def _stale_lock_sweep(self) -> None:
         try:

@@ -548,6 +548,15 @@ async def execute_approve(
         return
 
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
+    
+    # ── SYSTEM 13: HUB CLEANUP ──
+    try:
+        hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]
+        if hub_msg_ids:
+            await client.delete_messages(mod_card_chat_id, hub_msg_ids)
+    except Exception:
+        pass
+
     await safe_dm(
         client,
         submitter_user_id,
@@ -645,6 +654,15 @@ async def execute_queue(
         return
 
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
+    
+    # ── SYSTEM 13: HUB CLEANUP ──
+    try:
+        hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]
+        if hub_msg_ids:
+            await client.delete_messages(mod_card_chat_id, hub_msg_ids)
+    except Exception:
+        pass
+
     await safe_dm(
         client,
         submitter_user_id,
@@ -679,10 +697,13 @@ async def execute_reject(
     moderator_name: str,
     moderator_id: int,
     messages: Optional[list] = None,
+    reason: str = "No reason provided",
 ) -> None:
     """
     Reject flow:
     - Update vault status to REJECTED (if messages provided)
+    - Open support ticket for user with rejection context (System 11/13)
+    - Delete Hub media messages (System 13 cleanup)
     - Moderation card updated
     - Uploader notified
     - Audit log written
@@ -692,12 +713,12 @@ async def execute_reject(
             db = DatabaseManager.get_db()
             vault_col = db[settings.VAULT_COLLECTION]
             now = datetime.now(timezone.utc)
-            
+
             for msg in messages:
                 media = getattr(msg, str(msg.media.value), None) if msg.media else None
                 file_unique_id = getattr(media, "file_unique_id", None) if media else None
                 content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
-                
+
                 await vault_col.update_one(
                     {"content_id": content_id},
                     {"$set": {"status": ModerationState.REJECTED, "updated_at": now}}
@@ -705,27 +726,49 @@ async def execute_reject(
         except Exception as e:
             logger.warning("Failed to update vault status to REJECTED", extra={"ctx_error": str(e)})
 
+    # ── SYSTEM 11/13: AUTO-SUPPORT ON REJECT ──
+    try:
+        from app.services.support_service import get_support_service
+        from app.services.topic_manager import TOPIC_SUPPORT
+
+        # Ensure topic exists and notify user
+        support_service = get_support_service()
+        # We simulate a "message" from admin to start the topic
+        await support_service.handle_user_message(
+            client, 
+            type("MockMsg", (), {"from_user": type("MockUser", (), {"id": submitter_user_id})(), "text": f"SYSTEM: Submission Rejected\nReason: {reason}"})()
+        )
+    except Exception as e:
+        logger.warning("Failed to open support ticket on reject", extra={"ctx_error": str(e)})
+
     await safe_edit_message(
         client,
         mod_card_chat_id,
         mod_card_message_id,
-        f"❌ <b>Rejected</b> by {moderator_name} (<code>{moderator_id}</code>)\n"
-        f"👤 Submitter: <code>{submitter_user_id}</code>",
+        f"❌ <b>Rejected</b> by {moderator_name}\n"
+        f"👤 Submitter: <code>{submitter_user_id}</code>\n"
+        f"📝 Reason: <i>{reason}</i>",
     )
+
+    # ── SYSTEM 13: HUB CLEANUP ──
+    try:
+        if messages:
+            hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]
+            if hub_msg_ids:
+                await client.delete_messages(mod_card_chat_id, hub_msg_ids)
+    except Exception:
+        pass
+
     await safe_dm(
         client,
         submitter_user_id,
-        "❌ Your submission was rejected by moderation.",
+        f"❌ <b>Your submission was rejected.</b>\n\n<b>Reason:</b> {reason}\n\n"
+        "A support ticket has been opened for you to discuss this decision.",
     )
 
     await get_audit().log(
         action=AuditAction.REJECT,
         performed_by=moderator_id,
         target_user_id=submitter_user_id,
-        details={"submitter_user_id": submitter_user_id},
-    )
-
-    logger.info(
-        "Reject flow complete",
-        extra={"ctx_submitter": submitter_user_id, "ctx_moderator": moderator_id},
+        details={"submitter_user_id": submitter_user_id, "reason": reason},
     )

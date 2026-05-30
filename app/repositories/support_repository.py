@@ -22,11 +22,15 @@ class SupportRepository(BaseRepository):
             sort=[("created_at", 1)],
         )
 
-    async def get_user_topic_mapping(self, user_id: int) -> Optional[dict]:
-        """Return the most recent topic mapping for a user (any topic type)."""
-        docs = await self.find_many(
-            {"user_id": user_id},
-            sort=[("created_at", -1)],
-            limit=1,
+    async def update_ticket_status(self, user_id: int, topic_type: str, status: str) -> bool:
+        """Update the status of a specific user topic."""
+        result = await self.db["user_topics"].update_one(
+            {"user_id": user_id, "topic_type": topic_type},
+            {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
         )
-        return docs[0] if docs else None
+        return result.modified_count > 0
+
+    async def get_ticket_status(self, user_id: int, topic_type: str) -> Optional[str]:
+        """Get the current status of a user topic."""
+        doc = await self.db["user_topics"].find_one({"user_id": user_id, "topic_type": topic_type})
+        return doc.get("status") if doc else None

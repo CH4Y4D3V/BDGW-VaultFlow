@@ -114,6 +114,14 @@ class ReferralService:
                 await self._repo.increment_balance(referrer_id, 1)
                 logger.info('referral_reactivated', extra={'ctx_user_id': user_id, 'ctx_referrer_id': referrer_id})
 
+    async def refund_points(self, user_id: int, points: int) -> bool:
+        """Restores points to user wallet (e.g. on session expiry)."""
+        if points <= 0:
+            return True
+        await self._repo.increment_balance(user_id, points)
+        logger.info('points_refunded', extra={'ctx_user_id': user_id, 'ctx_points': points})
+        return True
+
     async def get_wallet(self, user_id: int) -> Optional[dict]:
         return await self._repo.get_wallet(user_id)
 

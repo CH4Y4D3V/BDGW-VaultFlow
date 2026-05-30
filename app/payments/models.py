@@ -27,6 +27,7 @@ class PaymentSession:
     user_id: int
     plan_id: str
     locked_amount: float
+    points_used: int = 0
     currency: str = "BDT"
     status: PaymentStatus = PaymentStatus.WAITING_PAYMENT_DETAILS
     payment_method: Optional[str] = None
@@ -52,6 +53,7 @@ class PaymentSession:
             "user_id": self.user_id,
             "plan_id": self.plan_id,
             "locked_amount": self.locked_amount,
+            "points_used": self.points_used,
             "currency": self.currency,
             "status": self.status.value,
             "payment_method": self.payment_method,
@@ -80,6 +82,7 @@ class PaymentSession:
             user_id=data["user_id"],
             plan_id=data["plan_id"],
             locked_amount=data["locked_amount"],
+            points_used=data.get("points_used", 0),
             currency=data.get("currency", "BDT"),
             status=PaymentStatus(raw_status),
             payment_method=data.get("payment_method"),

@@ -22,7 +22,7 @@ PLANS = {
     "6months": {"label": "6 Months", "price": 2499, "days": 180},
 }
 
-SESSION_TIMEOUT_MINUTES = 30
+SESSION_TIMEOUT_MINUTES = 20
 
 ALLOWED_TRANSITIONS = {
     PaymentStatus.WAITING_PAYMENT_DETAILS: {
@@ -79,6 +79,13 @@ class PaymentService:
         wallet = await self.referral_repo.get_wallet(user_id)
         points = wallet.get("points_balance", 0) if wallet else 0
         
+        # ── SYSTEM 14: SNAPSHOT & LOCK POINTS ──
+        if points > 0:
+            from app.referral.service import ReferralService
+            # We use the repository directly to deduct to avoid circular imports if any
+            await self.referral_repo.deduct_points(user_id, points)
+            logger.info("points_locked_for_session", extra={"ctx_user_id": user_id, "ctx_points": points})
+
         base_payable = max(0, base_price - points)
 
         # Unique identifying offset: ৳0.01 to ৳0.50
@@ -91,6 +98,7 @@ class PaymentService:
             user_id=user_id,
             plan_id=plan_id,
             locked_amount=locked_amount,
+            points_used=points,
         )
 
         await self.repository.save_session(session)

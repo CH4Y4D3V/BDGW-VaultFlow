@@ -186,6 +186,25 @@ class AppLifecycle:
         except Exception as e:
             logger.error("lifecycle_payment_monitor_failed", extra={"ctx_error": str(e)}, exc_info=True)
 
+        # 8. Support Ticket Monitor
+        try:
+            from app.services.support_monitor import SupportMonitor
+            support_monitor = SupportMonitor(self._bot)
+            
+            if self._engine and self._engine.scheduler:
+                raw_scheduler = self._engine.scheduler._scheduler
+                raw_scheduler.add_job(
+                    support_monitor.check_inactivity,
+                    "interval",
+                    minutes=1,
+                    id="support_inactivity_monitor",
+                    replace_existing=True,
+                    coalesce=True
+                )
+                logger.info("lifecycle_support_monitor_registered")
+        except Exception as e:
+            logger.error("lifecycle_support_monitor_failed", extra={"ctx_error": str(e)})
+
         self._running = True
         logger.info("lifecycle_startup_complete")
 

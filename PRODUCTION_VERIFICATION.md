@@ -1,34 +1,50 @@
-# Production Verification Guide
+# Production Verification Guide (Master Audit Pass)
 
-## 1. Start UI Verification
-- [ ] Run `/start` in the bot.
-- [ ] Verify the following buttons appear vertically:
-    1. 💎 Premium Access
-    2. 📤 Submit Content
-    3. 📊 My Status
-    4. 🆘 Need Help
+## 1. Onboarding & Registration (System 1)
+- [ ] Run `/start`.
+- [ ] Verify onboarding message appears (only for first-time users).
+- [ ] Verify user is registered in MongoDB `users` collection with correct metadata.
 
-## 2. Support System Verification
-- [ ] Click "🆘 Need Help".
-- [ ] Send a message to the bot.
-- [ ] In the Verification Hub, verify a new topic was created.
-- [ ] As an admin, click "✅ Resolve" or "🚫 Close Ticket" in the topic.
-- [ ] Verify the user receives a closure notification.
-- [ ] Verify the topic thread is closed in the Verification Hub.
+## 2. Main Menu (System 2 & 3)
+- [ ] Verify 4-row layout:
+  1. 💎 Premium Access
+  2. 📤 Submit Content Anonymously
+  3. 🎁 Referral Program | 📊 My Status
+  4. 🆘 Need Help
+- [ ] Verify slash commands in Bot Menu: `/start`, `/takedown`, `/help`.
 
-## 3. Payment Workflow Verification
-- [ ] As a user, click "💎 Premium Access" and select a plan.
-- [ ] Request payment details for a method.
-- [ ] As an admin, click "📩 Send Payment Details" in the payment topic.
-- [ ] Reply to the moderation card with a payment number.
-- [ ] Verify the user receives the payment number.
-- [ ] Verify the user can now send a TXID (this means the session moved to `AWAITING_PAYMENT`).
-- [ ] After the user sends a screenshot, as an admin, click "✅ Approve".
-- [ ] Verify the user's premium access is activated and they receive an invite link.
+## 3. Auto-Delete (System 4)
+- [ ] Send any message starting with `./`.
+- [ ] Verify it is deleted automatically after 10 seconds.
 
-## 4. Referral & Rewards Verification
-- [ ] Refer a new user.
-- [ ] Verify exactly 1 point is granted after qualification.
-- [ ] Submit 2 albums and have them approved.
-- [ ] Verify 1 point is granted to the submitter (if they were referred).
-- [ ] Verify the "My Status" card shows the correctly earned points.
+## 4. Payments (System 5, 7, 14)
+- [ ] Initiate payment.
+- [ ] Verify reward points are snapshotted and locked (deducted from balance).
+- [ ] Let session expire (set timeout to 1 min for test).
+- [ ] Verify points are REFUNDED to wallet after expiration.
+
+## 5. Broadcast (System 9)
+- [ ] Run `/broadcast` in Verification Hub.
+- [ ] Send text/photo/album.
+- [ ] Preview and Confirm.
+- [ ] Verify delivery to all users and log in Audit thread.
+
+## 6. Support System (System 10)
+- [ ] Open a support ticket.
+- [ ] Verify admin card has user stats (Join Date, Plan, etc.).
+- [ ] Verify admin MUST click `✅ Accept Support` before they can reply.
+- [ ] Verify inactivity warning after 5 mins of `pending`.
+
+## 7. Takedown System (System 11)
+- [ ] Run `/takedown`.
+- [ ] Complete the FSM flow (Content ID -> Reason -> Link).
+- [ ] Reject the request with a reason.
+- [ ] Verify a support ticket is automatically opened for the user with rejection context.
+
+## 8. Moderation & Cleanup (System 13)
+- [ ] Approve or Reject a submission.
+- [ ] Verify the mod card AND the media messages in the Hub are deleted.
+
+## 9. Audit Logs (System 18)
+- [ ] Perform any admin action.
+- [ ] Verify a formatted audit log appears in the dedicated Hub Audit thread.

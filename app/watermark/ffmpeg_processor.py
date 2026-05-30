@@ -62,7 +62,6 @@ class FFmpegProcessor:
             return output_path
 
     async def _process_photo(self, input_path: str, output_path: str, config: dict) -> str:
-        import random
         from PIL import Image
 
         logo_path = config.get("watermark_image_path")
@@ -76,24 +75,26 @@ class FFmpegProcessor:
                 base = base.convert("RGBA")
                 logo = logo.convert("RGBA")
                 
-                # Random scale 10-20% of base width
-                scale = random.uniform(0.1, 0.2)
+                # ── SYSTEM 17: FIXED SCALE 15% ──
+                scale = settings.WATERMARK_SCALE # 0.15
                 logo_w = int(base.width * scale)
                 logo_h = int(logo.height * (logo_w / logo.width))
                 logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
                 
-                # Random corner
+                # ── SYSTEM 17: FIXED POSITION BOTTOM_RIGHT ──
                 margin = 20
-                positions = [
-                    (margin, margin), # Top Left
-                    (base.width - logo_w - margin, margin), # Top Right
-                    (margin, base.height - logo_h - margin), # Bottom Left
-                    (base.width - logo_w - margin, base.height - logo_h - margin) # Bottom Right
-                ]
-                pos = random.choice(positions)
+                pos = (base.width - logo_w - margin, base.height - logo_h - margin)
                 
+                # ── SYSTEM 17: FIXED OPACITY 0.8 ──
+                opacity = settings.WATERMARK_OPACITY # 0.8
+                # Apply opacity to logo
+                logo_with_opacity = logo.copy()
+                alpha = logo_with_opacity.getchannel('A')
+                alpha = alpha.point(lambda p: int(p * opacity))
+                logo_with_opacity.putalpha(alpha)
+
                 # Apply logo
-                base.alpha_composite(logo, dest=pos)
+                base.alpha_composite(logo_with_opacity, dest=pos)
                 
                 # Save as high quality JPEG
                 base.convert("RGB").save(output_path, "JPEG", quality=95)
@@ -105,20 +106,16 @@ class FFmpegProcessor:
             return output_path
 
     async def _process_video(self, input_path: str, output_path: str, config: dict) -> str:
-        import random
         text = config.get("watermark_text", "BDGW")
         
-        # F-08: Random position text watermark
-        # Choose random percentage for x and y
-        x_pct = random.randint(5, 85)
-        y_pct = random.randint(5, 85)
-        
-        # Build drawtext filter
-        # fontsize is 5% of height
+        # ── SYSTEM 17: FIXED BOTTOM_RIGHT TEXT ──
+        # x=(w-text_w)-20:y=(h-text_h)-20
+        # Opacity 0.8: fontcolor=white@0.8
         drawtext = (
             f"drawtext=text='{text}':"
-            f"x=(w-text_w)*{x_pct}/100:y=(h-text_h)*{y_pct}/100:"
-            f"fontsize=h/20:fontcolor=white@0.5:shadowcolor=black:shadowx=2:shadowy=2"
+            f"x=(w-text_w)-20:y=(h-text_h)-20:"
+            f"fontsize=h/20:fontcolor=white@{settings.WATERMARK_OPACITY}:"
+            f"shadowcolor=black:shadowx=2:shadowy=2"
         )
 
         cmd = [

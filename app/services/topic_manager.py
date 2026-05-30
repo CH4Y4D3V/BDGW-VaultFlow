@@ -111,6 +111,7 @@ class TopicManager:
                         "topic_id": topic_id,
                         "created_at": datetime.now(timezone.utc),
                         "hub_chat_id": settings.VERIFICATION_GROUP_ID,
+                        "status": "pending",
                     }
                 },
                 upsert=True,

@@ -5,7 +5,7 @@ from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import CallbackQuery
+from pyrogram.types import CallbackQuery, ForceReply
 
 from app.config import settings
 from app.core.permissions import is_moderator
@@ -131,15 +131,24 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
             _, messages = entry
 
         if action == "reject":
-            await execute_reject(
-                client=client,
-                submitter_user_id=submitter_id,
-                mod_card_chat_id=callback.message.chat.id,
-                mod_card_message_id=callback.message.id,
-                moderator_name=moderator_name,
-                moderator_id=moderator_id,
-                messages=messages,
+            # ── SYSTEM 13: REJECTION FLOW ──
+            # Instead of immediate reject, prompt moderator for reason
+            await client.send_message(
+                chat_id=callback.message.chat.id,
+                text=(
+                    f"📝 <b>Rejection Reason</b>\n\n"
+                    f"Please reply to this message with the reason for rejecting submission from <code>{submitter_id}</code>.\n\n"
+                    f"<i>The user will be notified and a support ticket will be opened.</i>"
+                ),
+                message_thread_id=callback.message.message_thread_id,
+                reply_markup=ForceReply(placeholder="Reason for rejection..."),
             )
+            # Store context in Redis to catch the reply
+            redis = get_redis()
+            ctx_key = f"mod_reject_ctx:{callback.message.chat.id}:{callback.message.id}"
+            import json
+            await redis.set(ctx_key, json.dumps({"submitter_id": submitter_id, "msg_id": msg_id}), ex=600)
+            return
         else:
             dest = "nsfw" if action == "app_nsfw" else "premium"
             await callback.answer(f"⏳ Queuing for {dest.upper()}...", show_alert=False)
@@ -161,3 +170,60 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
             await callback.answer("⚠️ Error occurred.", show_alert=True)
         except:
             pass
+
+
+@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID) & filters.reply)
+async def handle_mod_reject_reason_reply(client: Client, message: Message) -> None:
+    """Catches the reply with rejection reason and executes rejection."""
+    if not message.from_user or not is_moderator(message.from_user.id):
+        return
+
+    replied_to = message.reply_to_message
+    if not replied_to or not replied_to.from_user or not replied_to.from_user.is_bot:
+        return
+
+    # Check if this bot message was a rejection reason prompt
+    if "Rejection Reason" not in (replied_to.text or ""):
+        return
+
+    redis = get_redis()
+    # We need the original card ID to clean up.
+    # The card was replied to by the bot to create the prompt.
+    card_message = replied_to.reply_to_message
+    if not card_message:
+        return
+
+    ctx_key = f"mod_reject_ctx:{card_message.chat.id}:{card_message.id}"
+    ctx_raw = await redis.get(ctx_key)
+    if not ctx_raw:
+        return
+
+    import json
+    ctx = json.loads(ctx_raw)
+    await redis.delete(ctx_key)
+
+    reason = message.text.strip()
+    submitter_id = ctx["submitter_id"]
+    msg_id = ctx["msg_id"]
+    
+    # Recover messages for cleanup
+    recovered = await _recover_pending_from_db(client, msg_id)
+    messages = recovered[1] if recovered else []
+
+    await execute_reject(
+        client=client,
+        submitter_user_id=submitter_id,
+        mod_card_chat_id=card_message.chat.id,
+        mod_card_message_id=card_message.id,
+        moderator_name=message.from_user.first_name or str(message.from_user.id),
+        moderator_id=message.from_user.id,
+        messages=messages,
+        reason=reason
+    )
+    
+    # Cleanup moderator's input and bot's prompt
+    try:
+        await message.delete()
+        await replied_to.delete()
+    except:
+        pass

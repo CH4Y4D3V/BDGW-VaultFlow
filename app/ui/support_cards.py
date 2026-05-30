@@ -50,16 +50,27 @@ def build_admin_support_card(
     user: User, 
     ticket_id: str, 
     issue_summary: str,
-    status: str = "pending"
+    status: str = "pending",
+    stats: Optional[dict] = None
 ) -> str:
     """Admin notification for new support issues."""
     header = format_header("Support Ticket", "🆘")
     
+    # ── SYSTEM 10: USER PROFILE ──
+    join_date = stats.get("join_date", "Unknown") if stats else "Unknown"
+    sub_status = stats.get("subscription", "Free") if stats else "Free"
+    total_subs = stats.get("total_submissions", 0) if stats else 0
+    total_bans = stats.get("ban_count", 0) if stats else 0
+
     user_info = (
-        "👤 <b>USER</b>\n"
+        "👤 <b>USER PROFILE</b>\n"
         f"┣ {format_info_block('Name', user.first_name + (' ' + user.last_name if user.last_name else ''))}\n"
         f"┣ {format_info_block('Username', '@' + user.username if user.username else 'N/A')}\n"
-        f"┗ {format_info_block('User ID', user.id, code=True)}\n"
+        f"┣ {format_info_block('User ID', user.id, code=True)}\n"
+        f"┣ {format_info_block('Joined', join_date)}\n"
+        f"┣ {format_info_block('Plan', sub_status.upper())}\n"
+        f"┣ {format_info_block('Submissions', total_subs)}\n"
+        f"┗ {format_info_block('Prev Bans', total_bans)}\n"
     )
     
     ticket_info = (
@@ -75,15 +86,23 @@ def build_admin_support_card(
     
     return f"{header}\n{user_info}\n{ticket_info}\n{issue_box}"
 
-def build_admin_support_actions(ticket_id: str, user_id: int) -> InlineKeyboardMarkup:
+def build_admin_support_actions(ticket_id: str, user_id: int, status: str = "pending") -> InlineKeyboardMarkup:
     """Buttons for admin to manage tickets."""
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💬 Reply", callback_data=f"support:reply:{user_id}"),
-            InlineKeyboardButton("✅ Resolve", callback_data=f"support:resolve:{ticket_id}")
-        ],
-        [
-            InlineKeyboardButton("👤 User Profile", url=f"tg://user?id={user_id}"),
-            InlineKeyboardButton("🚫 Close Ticket", callback_data=f"support:close:{ticket_id}")
-        ]
+    buttons = []
+    
+    if status == "pending":
+        buttons.append([
+            InlineKeyboardButton("✅ Accept Support", callback_data=f"support:accept:{user_id}")
+        ])
+    
+    buttons.append([
+        InlineKeyboardButton("💬 Reply", callback_data=f"support:reply:{user_id}"),
+        InlineKeyboardButton("✅ Resolve", callback_data=f"support:resolve:{ticket_id}")
     ])
+    
+    buttons.append([
+        InlineKeyboardButton("👤 User Profile", url=f"tg://user?id={user_id}"),
+        InlineKeyboardButton("🚫 Close Ticket", callback_data=f"support:close:{ticket_id}")
+    ])
+    
+    return InlineKeyboardMarkup(buttons)
