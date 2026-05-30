@@ -127,8 +127,20 @@ render.yaml
 docker-compose.override.yml
 
 # =========================
+# Project Documentation & Audit
+# =========================
+CHANGELOG.md
+ENV_AUDIT.md
+FILES_REMOVED.md
+FIX_REPORT.md
+PRODUCTION_VERIFICATION.md
+GEMINI.md
+MEMORY.md
+
+# =========================
 # Testing
 # =========================
+tests/
 .coverage
 coverage.xml
 nosetests.xml
