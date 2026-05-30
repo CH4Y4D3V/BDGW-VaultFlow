@@ -106,11 +106,19 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
 
     try:
         text, reply_markup = build_support_welcome_card()
-        await callback.message.edit_text(
+        sent_msg = await callback.message.edit_text(
             text,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
+        
+        # ── SYSTEM 20: CLEANUP ──
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="general")
+        except:
+            pass
+
         await callback.answer()
 
         user_id = callback.from_user.id
@@ -362,6 +370,13 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
             ),
             parse_mode=ParseMode.HTML,
         )
+        
+        # ── SYSTEM 15.5: USER-SIDE DELETION ──
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().delete_user_support_history(user_id)
+        except:
+            pass
     except Exception as e:
         logger.warning(
             "handle_support_closure_callback: could not notify user",

@@ -236,6 +236,14 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
         delivered = await _deliver_to_user(client, user_id, message)
 
         if delivered:
+            # ── SYSTEM 20: CLEANUP ──
+            try:
+                from app.services.cleanup_service import get_cleanup_service
+                text_to_check = message.text or message.caption or ""
+                await get_cleanup_service().log_message(user_id, delivered.id, text_to_check, category="general")
+            except:
+                pass
+
             logger.info(
                 "Admin reply routed to user",
                 extra={

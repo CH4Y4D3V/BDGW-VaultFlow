@@ -50,6 +50,12 @@ class PaymentRepository:
         )
         return PaymentSession.from_dict(doc) if doc else None
 
+    async def get_sessions_by_status(self, statuses: list[PaymentStatus]) -> list[PaymentSession]:
+        """Fetches all sessions with the given statuses."""
+        cursor = self._collection.find({"status": {"$in": [s.value for s in statuses]}})
+        docs = await cursor.to_list(length=None)
+        return [PaymentSession.from_dict(d) for d in docs]
+
     async def acquire_processing_lock(self, payment_id: str) -> bool:
         """Atomic lock to prevent duplicate approval/rejection."""
         result = await self._collection.find_one_and_update(

@@ -272,3 +272,23 @@ class PaymentService:
             rejected_by=admin_id
         )
         return True
+
+    async def resume_active_sessions(self) -> None:
+        """
+        --- 7.4/25 RESTART SAFETY ---
+        Resumes timeouts for all active sessions on bot startup.
+        """
+        try:
+            active_sessions = await self.repository.get_sessions_by_status([
+                PaymentStatus.AWAITING_PAYMENT,
+                PaymentStatus.WAITING_SCREENSHOT,
+                PaymentStatus.UNDER_REVIEW
+            ])
+            
+            for session in active_sessions:
+                # Restart timeout timer
+                await self.start_timeout(session.id)
+                logger.info("Resumed payment session timeout", extra={"ctx_payment_id": session.id})
+                
+        except Exception as e:
+            logger.error("Failed to resume active sessions", extra={"ctx_error": str(e)})

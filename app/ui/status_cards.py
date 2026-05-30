@@ -35,11 +35,17 @@ def build_user_status_card(
     points = wallet.get("points_balance", 0) if wallet else 0
     total_earned = wallet.get("total_earned", 0) if wallet else 0
     
+    # ── SYSTEM 18: TRUST METRICS ──
+    trust_level = wallet.get("trust_level", "NEUTRAL")
+    fraud_score = wallet.get("fraud_score", 0.0)
+    
     body = (
         f"{user_line}\n"
         f"🏷 <b>Global Status:</b> {state_badge}\n"
+        f"🛡 <b>Trust Level:</b> <code>{trust_level}</code>\n"
         f"💳 <b>Subscription:</b> {sub_text}\n"
         f"🎁 <b>Points Balance:</b> ৳{points} (Earned: ৳{total_earned})\n"
+        f"⚠️ <b>Fraud Risk:</b> <code>{fraud_score}</code>\n"
         f"{THIN_DIVIDER}\n"
     )
     

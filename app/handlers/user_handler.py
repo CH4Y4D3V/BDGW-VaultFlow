@@ -319,11 +319,18 @@ async def handle_start(client: Client, message: Message) -> None:
             first_name
         )
 
-        await message.reply_text(
+        sent_msg = await message.reply_text(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
+        
+        # ── SYSTEM 20: CLEANUP ──
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="general")
+        except:
+            pass
     except Exception as e:
         logger.error(
             "handle_start crashed",
@@ -464,6 +471,14 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                     "plan_label": sub.plan.value.upper(),
                     "expiry": sub.expires_at.strftime("%Y-%m-%d") if sub.expires_at else "Lifetime"
                 }
+
+            from app.services.trust_service import TrustService
+            trust_service = TrustService()
+            trust_metrics = await trust_service.get_user_metrics(user_id)
+            wallet.update({
+                "trust_level": trust_metrics["level"],
+                "fraud_score": trust_metrics["fraud_score"]
+            })
 
             text, keyboard = build_user_status_card(
                 user_id=user_id,

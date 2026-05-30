@@ -19,6 +19,7 @@ Rules:
 
 import asyncio
 from pyrogram import Client, filters
+from pyrogram.enums import ChatType
 from pyrogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from app.utils.logger import get_logger
@@ -45,7 +46,7 @@ async def handle_ban_guard(client: Client, update: Message | CallbackQuery):
     from app.repositories.user_repository import UserRepository
     user_repo = UserRepository()
     user_doc = await user_repo.get_user(user_id)
-    
+
     if user_doc and user_doc.get("is_banned"):
         if isinstance(update, Message):
             try:
@@ -57,11 +58,23 @@ async def handle_ban_guard(client: Client, update: Message | CallbackQuery):
                 await update.answer("❌ You are banned.", show_alert=True)
             except:
                 pass
-        
+
         update.stop_propagation()
 
+    # ── SYSTEM 20: PHONE CLEANUP (GLOBAL) ──
+    if isinstance(update, Message) and update.chat and update.chat.type == ChatType.PRIVATE:
+        text = update.text or update.caption or ""
+        # BD Phone number regex
+        if any(p in text for p in ["017", "018", "019", "014", "013"]):
+            try:
+                from app.services.cleanup_service import get_cleanup_service
+                await get_cleanup_service().log_message(user_id, update.id, text, category="phone")
+            except:
+                pass
 
-# ── SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ──
+
+    # ── SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ──
+
 @Client.on_message(filters.private & filters.regex(r"^\./"), group=-1)
 async def handle_prefix_auto_delete(client: Client, message: Message):
     """

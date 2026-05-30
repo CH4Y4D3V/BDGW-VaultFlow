@@ -65,11 +65,17 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
         
         text, reply_markup = build_payment_instruction_card(session, plan)
         
-        await callback.message.edit_text(
+        sent_msg = await callback.message.edit_text(
             text,
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML
         )
+        # ── SYSTEM 20: CLEANUP ──
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="payment")
+        except:
+            pass
         
     except Exception as e:
         logger.exception("Failed to start payment session", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
@@ -148,7 +154,7 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
     await callback.answer()
 
 
-@Client.on_message(filters.private & ~filters.regex(r"^/"))
+@Client.on_message(filters.private & ~filters.regex(r"^/"), group=-10)
 async def handle_payment_inputs(client: Client, message: Message) -> None:
     """Captures TXID and Screenshot in sequence."""
     if not message.from_user:

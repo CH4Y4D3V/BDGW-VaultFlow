@@ -183,6 +183,12 @@ class AppLifecycle:
                     coalesce=True
                 )
                 logger.info("lifecycle_payment_monitor_registered")
+                
+                # ── SYSTEM 25: STARTUP RECOVERY ──
+                from app.payments import get_payment_service
+                payment_service = get_payment_service()
+                asyncio.create_task(payment_service.resume_active_sessions())
+                logger.info("lifecycle_payment_recovery_initiated")
         except Exception as e:
             logger.error("lifecycle_payment_monitor_failed", extra={"ctx_error": str(e)}, exc_info=True)
 
