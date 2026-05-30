@@ -131,7 +131,7 @@ class SupportService:
             plan = sub.plan.value if sub else "Free"
             
             activity_repo = ActivityRepository()
-            total_subs = await activity_repo.count_user_actions(user_id, ActivityAction.SUB_GRANT) # Or specific submission action
+            total_subs = await activity_repo.count_user_actions(user_id, ActivityAction.UPLOAD)
             total_bans = 1 if user_doc and user_doc.get("is_banned") else 0 # Simple check
             
             stats = {

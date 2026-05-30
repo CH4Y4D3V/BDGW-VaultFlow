@@ -43,6 +43,22 @@ class UserRepository(BaseRepository):
     async def get_user(self, user_id: int) -> Optional[dict]:
         return await self.collection.find_one({"_id": user_id})
 
+    async def ban_user(self, user_id: int, reason: str = "No reason provided") -> bool:
+        """Permanently ban a user from the bot."""
+        result = await self.collection.update_one(
+            {"_id": user_id},
+            {"$set": {"is_banned": True, "ban_reason": reason, "banned_at": datetime.now(timezone.utc)}}
+        )
+        return result.modified_count > 0
+
+    async def unban_user(self, user_id: int) -> bool:
+        """Remove ban from a user."""
+        result = await self.collection.update_one(
+            {"_id": user_id},
+            {"$set": {"is_banned": False, "ban_reason": None, "unbanned_at": datetime.now(timezone.utc)}}
+        )
+        return result.modified_count > 0
+
     async def create_indexes(self) -> None:
         await self.collection.create_index([("user_id", ASCENDING)], unique=True)
         await self.collection.create_index([("username", ASCENDING)])

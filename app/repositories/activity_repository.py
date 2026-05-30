@@ -17,6 +17,25 @@ class ActivityRepository(BaseRepository):
     async def log(self, activity: Activity) -> None:
         await self.insert_one(activity.to_dict())
 
+    async def log_activity(
+        self,
+        user_id: int,
+        action: ActivityAction,
+        chat_id: Optional[int] = None,
+        performed_by: Optional[int] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Convenience helper to log an activity record."""
+        activity = Activity(
+            user_id=user_id,
+            action=action,
+            timestamp=datetime.now(timezone.utc),
+            chat_id=chat_id,
+            performed_by=performed_by,
+            metadata=metadata or {},
+        )
+        await self.log(activity)
+
     # ── User-scoped reads ─────────────────────────────────────────────────────
 
     async def get_user_activity(

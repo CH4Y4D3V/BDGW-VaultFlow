@@ -72,6 +72,16 @@ class DistributionDispatcher:
                     all_succeeded = False
                     continue
 
+                # ── SYSTEM 16: DAILY CAP CHECK ──
+                cap_allowed, current_count = await self._rate_limiter.check_daily_cap(target_id)
+                if not cap_allowed:
+                    logger.warning(
+                        "Daily posting cap reached for target",
+                        extra={"ctx_target": target_id, "ctx_count": current_count}
+                    )
+                    all_succeeded = False
+                    continue
+
                 allowed, reason = await self._rate_limiter.check_and_consume(target_id)
                 if not allowed:
                     all_succeeded = False
@@ -98,6 +108,9 @@ class DistributionDispatcher:
                     await heartbeat_task
 
                 if result.success:
+                    # ── SYSTEM 16: INCREMENT DAILY COUNT ──
+                    await self._rate_limiter.increment_daily_count(target_id)
+
                     for job in job_docs:
                         await self._queue.record_target_delivered(str(job["_id"]), target_id)
                     await self._balancer.record_delivery(target_id, success=True)

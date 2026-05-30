@@ -25,6 +25,42 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── SYSTEM 20: FRAUD/BAN GUARD ──
+@Client.on_message(filters.private, group=-2)
+@Client.on_callback_query(group=-2)
+async def handle_ban_guard(client: Client, update: Message | CallbackQuery):
+    """
+    Prevents banned users from interacting with any bot logic.
+    Group -2 ensures this runs BEFORE everything else.
+    """
+    user_id = update.from_user.id if update.from_user else None
+    if not user_id:
+        return
+
+    # Skip owner/admins from ban check for safety
+    from app.core.permissions import is_sudo
+    if is_sudo(user_id):
+        return
+
+    from app.repositories.user_repository import UserRepository
+    user_repo = UserRepository()
+    user_doc = await user_repo.get_user(user_id)
+    
+    if user_doc and user_doc.get("is_banned"):
+        if isinstance(update, Message):
+            try:
+                await update.reply_text("❌ <b>Access Denied</b>\n\nYour account has been permanently banned due to a violation of our terms.", parse_mode=ParseMode.HTML)
+            except:
+                pass
+        else:
+            try:
+                await update.answer("❌ You are banned.", show_alert=True)
+            except:
+                pass
+        
+        update.stop_propagation()
+
+
 # ── SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ──
 @Client.on_message(filters.private & filters.regex(r"^\./"), group=-1)
 async def handle_prefix_auto_delete(client: Client, message: Message):

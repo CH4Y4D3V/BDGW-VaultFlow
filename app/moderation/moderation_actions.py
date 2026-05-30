@@ -563,6 +563,19 @@ async def execute_approve(
         f"✅ Your content was approved.\n\nDestination:\n{display_name}",
     )
 
+    # ── Audit & Activity ──
+    try:
+        from app.repositories.activity_repository import ActivityRepository
+        from app.models.activity import ActivityAction
+        activity_repo = ActivityRepository()
+        await activity_repo.log_activity(
+            user_id=submitter_user_id,
+            action=ActivityAction.UPLOAD,
+            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+        )
+    except Exception:
+        pass
+
     await get_audit().log(
         action=AuditAction.APPROVE,
         performed_by=moderator_id,
@@ -669,6 +682,19 @@ async def execute_queue(
         f"✅ Your content has been queued for posting.\n\nDestination:\n{display_name}",
     )
 
+    # ── Audit & Activity ──
+    try:
+        from app.repositories.activity_repository import ActivityRepository
+        from app.models.activity import ActivityAction
+        activity_repo = ActivityRepository()
+        await activity_repo.log_activity(
+            user_id=submitter_user_id,
+            action=ActivityAction.UPLOAD,
+            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+        )
+    except Exception:
+        pass
+
     await get_audit().log(
         action=AuditAction.QUEUE,
         performed_by=moderator_id,
@@ -765,6 +791,19 @@ async def execute_reject(
         f"❌ <b>Your submission was rejected.</b>\n\n<b>Reason:</b> {reason}\n\n"
         "A support ticket has been opened for you to discuss this decision.",
     )
+
+    # ── Audit & Activity ──
+    try:
+        from app.repositories.activity_repository import ActivityRepository
+        from app.models.activity import ActivityAction
+        activity_repo = ActivityRepository()
+        await activity_repo.log_activity(
+            user_id=submitter_user_id,
+            action=ActivityAction.UPLOAD,
+            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+        )
+    except Exception:
+        pass
 
     await get_audit().log(
         action=AuditAction.REJECT,

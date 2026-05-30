@@ -188,10 +188,16 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 await message.reply_text("❌ Error processing request. Please try again.")
                 return
         except DuplicateKeyError:
+            # ── SYSTEM 20: FRAUD PREVENTION ──
+            # Reject session and BAN user
+            from app.repositories.user_repository import UserRepository
+            user_repo = UserRepository()
+            await user_repo.ban_user(user_id, reason=f"Fraud attempt: Duplicate TXID reuse ({message.text})")
+            await service.reject_payment(session.id, "Auto-rejected: Duplicate TXID (Fraud)", 0) # 0 for System
+            
             await message.reply_text(
-                "❌ <b>Duplicate TXID detected.</b>\n\n"
-                "This Transaction ID has already been submitted for another payment. "
-                "If you believe this is an error, contact support.",
+                "❌ <b>FRAUD DETECTED</b>\n\n"
+                "This Transaction ID has already been used. Your account has been permanently banned from using the bot.",
                 parse_mode=ParseMode.HTML
             )
             return

@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Optional
 from app.config import settings
 from app.core.exceptions import RateLimitExceededError
@@ -43,11 +44,11 @@ class TokenBucket:
             await asyncio.sleep(0.1)
 
 
+from app.core.redis_client import get_redis
+
 class RateLimiterService:
     """
-    Manages global and per-target rate limits.
-    Per-target buckets are lazily created and not persisted (reset on restart).
-    That's acceptable — they refill naturally within a minute.
+    Manages global and per-target rate limits, and daily caps.
     """
 
     def __init__(self):
@@ -57,6 +58,43 @@ class RateLimiterService:
         )
         self._target_buckets: dict[str, TokenBucket] = {}
         self._bucket_lock = asyncio.Lock()
+
+    async def check_daily_cap(self, target_id: str) -> tuple[bool, int]:
+        """
+        Check if daily cap is reached for a target.
+        Returns (allowed, current_count).
+        """
+        # Determine cap based on target_id (group ID)
+        cap = 0
+        if str(target_id) == str(settings.NSFW_GROUP_ID):
+            cap = settings.DAILY_CAP_NSFW
+        elif str(target_id) in [str(settings.PREMIUM_GROUP_ID), str(settings.PREMIUM_CHANNEL_ID)]:
+            cap = settings.DAILY_CAP_PREMIUM
+        
+        if cap <= 0:
+            return True, 0 # No cap defined
+
+        redis = get_redis()
+        # Key format: daily_cap:{target_id}:{YYYY-MM-DD}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"daily_cap:{target_id}:{today}"
+        
+        count_str = await redis.get(key)
+        count = int(count_str) if count_str else 0
+        
+        return count < cap, count
+
+    async def increment_daily_count(self, target_id: str) -> int:
+        """Increment the daily post count for a target."""
+        redis = get_redis()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"daily_cap:{target_id}:{today}"
+        
+        count = await redis.incr(key)
+        # Set expiry to 48h to clean up old keys automatically
+        if count == 1:
+            await redis.expire(key, 172800)
+        return count
 
     async def _get_target_bucket(self, target_id: str) -> TokenBucket:
         async with self._bucket_lock:
