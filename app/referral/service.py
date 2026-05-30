@@ -76,7 +76,7 @@ class ReferralService:
         return qualified_count
 
     async def reward_approved_content(self, referred_id: int) -> None:
-        """F-06: Every 2 approved pieces from referred user = 1 point for referrer (RC-12 FIX: was 5)."""
+        """F-06: Every 3 approved pieces from referred user = 1 point for referrer (Section 16)."""
         ref = await self._repo.get_referral_by_referred(referred_id)
         if not ref or ref['status'] != ReferralStatus.QUALIFIED:
             return
@@ -90,10 +90,10 @@ class ReferralService:
         res = await db['referrals'].find_one_and_update(
             {"referred_user_id": referred_id},
             {"$inc": {"approved_content_count": 1}},
-            return_document=True
+            return_document=ReturnDocument.AFTER
         )
         
-        if res and res.get("approved_content_count", 0) % 2 == 0:
+        if res and res.get("approved_content_count", 0) % 3 == 0:
             await self._repo.increment_balance(referrer_id, 1)
             logger.info("referral_content_reward", extra={"ctx_referrer": referrer_id, "ctx_referred": referred_id})
 

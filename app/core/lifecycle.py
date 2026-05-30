@@ -205,6 +205,25 @@ class AppLifecycle:
         except Exception as e:
             logger.error("lifecycle_support_monitor_failed", extra={"ctx_error": str(e)})
 
+        # 9. Message Cleanup Worker
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            cleanup_service = get_cleanup_service(self._bot)
+            
+            if self._engine and self._engine.scheduler:
+                raw_scheduler = self._engine.scheduler._scheduler
+                raw_scheduler.add_job(
+                    cleanup_service.run_cleanup_sweep,
+                    "interval",
+                    minutes=5,
+                    id="message_cleanup_sweep",
+                    replace_existing=True,
+                    coalesce=True
+                )
+                logger.info("lifecycle_cleanup_monitor_registered")
+        except Exception as e:
+            logger.error("lifecycle_cleanup_monitor_failed", extra={"ctx_error": str(e)})
+
         self._running = True
         logger.info("lifecycle_startup_complete")
 

@@ -55,7 +55,7 @@ async def show_referral_status(
         f"<code>{ref_link}</code>\n\n"
         "🎁 <b>Rewards:</b>\n"
         "• 1 point for each qualified referral.\n"
-        "• 1 point for every 2 approved submissions from your referrals.\n"
+        "• 1 point for every 3 approved submissions from your referrals.\n"
         "<i>(1 point = ৳1 discount on Premium)</i>"
     )
 
