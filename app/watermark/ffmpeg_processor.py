@@ -81,6 +81,12 @@ class FFmpegProcessor:
                 logo_h = int(logo.height * (logo_w / logo.width))
                 logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
                 
+                # ── ROTATION ──
+                if settings.WATERMARK_ROTATION != 0:
+                    logo = logo.rotate(settings.WATERMARK_ROTATION, expand=True)
+                    # Recalculate size after rotation if it expanded
+                    logo_w, logo_h = logo.size
+
                 # ── SYSTEM 17: FIXED POSITION BOTTOM_RIGHT ──
                 margin = 20
                 pos = (base.width - logo_w - margin, base.height - logo_h - margin)

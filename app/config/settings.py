@@ -131,7 +131,7 @@ class Settings(BaseSettings):
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
     WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
-    WATERMARK_POSITION: str = "BOTTOM_RIGHT"
+    WATERMARK_ROTATION: int = 0
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15
 
