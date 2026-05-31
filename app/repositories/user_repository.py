@@ -8,58 +8,92 @@ from pymongo import ASCENDING
 
 from app.repositories.base import BaseRepository
 
+import uuid
+from app.models.user import User
+
 class UserRepository(BaseRepository):
     collection_name = "users"
 
     async def upsert_user(
         self,
         user_id: int,
-        first_name: str,
-        last_name: Optional[str] = None,
+        full_name: str,
         username: Optional[str] = None,
-    ) -> None:
-        """Create or update user record with core metadata."""
+        referred_by: Optional[int] = None,
+    ) -> User:
+        """Create or update user record with full metadata."""
         now = datetime.now(timezone.utc)
-        name = first_name + (f" {last_name}" if last_name else "")
         
-        await self.collection.update_one(
-            {"_id": user_id},
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "name": name,
-                    "username": username,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {
-                    "join_date": now,
-                    "is_banned": False,
-                    "metadata": {},
-                }
-            },
-            upsert=True
+        # Check if user exists
+        existing = await self.get_user(user_id)
+        if existing:
+            update_data = {
+                "full_name": full_name,
+                "username": username,
+                "updated_at": now,
+            }
+            await self.collection.update_one({"_id": user_id}, {"$set": update_data})
+            return User.from_dict({**existing, **update_data})
+
+        # Create new user
+        new_user = User(
+            _id=user_id,
+            username=username,
+            full_name=full_name,
+            join_date=now,
+            referral_code=str(uuid.uuid4())[:8],
+            referred_by=referred_by,
+            created_at=now,
+            updated_at=now
         )
+        await self.collection.insert_one(new_user.to_dict())
+        return new_user
 
     async def get_user(self, user_id: int) -> Optional[dict]:
         return await self.collection.find_one({"_id": user_id})
 
+    async def get_user_model(self, user_id: int) -> Optional[User]:
+        doc = await self.get_user(user_id)
+        return User.from_dict(doc) if doc else None
+
+    async def get_by_referral_code(self, code: str) -> Optional[User]:
+        doc = await self.collection.find_one({"referral_code": code})
+        return User.from_dict(doc) if doc else None
+
     async def ban_user(self, user_id: int, reason: str = "No reason provided") -> bool:
-        """Permanently ban a user from the bot."""
+        """Permanently ban a user."""
         result = await self.collection.update_one(
             {"_id": user_id},
-            {"$set": {"is_banned": True, "ban_reason": reason, "banned_at": datetime.now(timezone.utc)}}
+            {
+                "$set": {
+                    "is_banned": True, 
+                    "ban_reason": reason, 
+                    "updated_at": datetime.now(timezone.utc)
+                }
+            }
         )
         return result.modified_count > 0
 
-    async def unban_user(self, user_id: int) -> bool:
-        """Remove ban from a user."""
+    async def set_onboarded(self, user_id: int, status: bool = True) -> bool:
         result = await self.collection.update_one(
             {"_id": user_id},
-            {"$set": {"is_banned": False, "ban_reason": None, "unbanned_at": datetime.now(timezone.utc)}}
+            {"$set": {"onboarded": status, "updated_at": datetime.now(timezone.utc)}}
+        )
+        return result.modified_count > 0
+
+    async def update_scores(self, user_id: int, trust_delta: int = 0, fraud_delta: int = 0) -> bool:
+        result = await self.collection.update_one(
+            {"_id": user_id},
+            {
+                "$inc": {"trust_score": trust_delta, "fraud_score": fraud_delta},
+                "$set": {"updated_at": datetime.now(timezone.utc)}
+            }
         )
         return result.modified_count > 0
 
     async def create_indexes(self) -> None:
         await self.collection.create_index([("user_id", ASCENDING)], unique=True)
         await self.collection.create_index([("username", ASCENDING)])
+        await self.collection.create_index([("referral_code", ASCENDING)], unique=True)
+        await self.collection.create_index([("referred_by", ASCENDING)])
         await self.collection.create_index([("join_date", ASCENDING)])

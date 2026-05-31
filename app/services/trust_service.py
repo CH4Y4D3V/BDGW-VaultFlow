@@ -68,8 +68,22 @@ class TrustService:
         trust = await self.calculate_trust_score(user_id)
         fraud = await self.calculate_fraud_score(user_id)
         
+        # ── Trust Level Mapping ──
+        if fraud > 50:
+            level = "🚨 HIGH RISK"
+        elif fraud > 20:
+            level = "⚠️ SUSPICIOUS"
+        elif trust > 500:
+            level = "🏅 VETERAN"
+        elif trust > 100:
+            level = "✅ TRUSTED"
+        elif trust > 20:
+            level = "👤 VERIFIED"
+        else:
+            level = "🆕 NEW MEMBER"
+
         return {
             "trust_score": trust,
             "fraud_score": fraud,
-            "level": "TRUSTED" if trust > 100 and fraud < 10 else "NEUTRAL"
+            "level": level
         }

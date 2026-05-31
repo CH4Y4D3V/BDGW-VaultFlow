@@ -48,6 +48,15 @@ def build_user_status_card(
         f"⚠️ <b>Fraud Risk:</b> <code>{fraud_score}</code>\n"
         f"{THIN_DIVIDER}\n"
     )
+
+    # ── SYSTEM 10: QUEUE DATA ──
+    recent_jobs = wallet.get("recent_jobs", [])
+    if recent_jobs:
+        body += "⏳ <b>Recent Submissions:</b>\n"
+        for j in recent_jobs[:3]:
+            js = j.get("status", "pending").capitalize()
+            body += f" ┣ {j.get('content_id', '???')[:8]}... [{js}]\n"
+        body += f"{THIN_DIVIDER}\n"
     
     if membership:
         body += "✅ <b>Active Memberships:</b>\n"

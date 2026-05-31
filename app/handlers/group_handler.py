@@ -24,6 +24,27 @@ _album_lock = asyncio.Lock()
 _FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
 _MAX_RETRIES = 3
 
+# ── Prefix Auto-Delete ────────────────────────────────────────────────────────
+
+@Client.on_message(filters.regex(r"^\./") & filters.group, group=-1)
+async def handle_prefix_auto_delete(client: Client, message: Message) -> None:
+    """
+    Flow C: Any message starting with ./ in groups must be auto-deleted immediately.
+    We use group=-1 to ensure this runs before any other handlers.
+    """
+    try:
+        await message.delete()
+        logger.debug(
+            "prefix_message_deleted",
+            extra={"ctx_chat_id": message.chat.id, "ctx_user_id": message.from_user.id if message.from_user else None}
+        )
+    except Exception as e:
+        logger.warning(
+            "prefix_delete_failed",
+            extra={"ctx_error": str(e), "ctx_chat_id": message.chat.id}
+        )
+
+
 # ── Internal chat guard ───────────────────────────────────────────────────────
 
 def _is_managed_chat(chat_id: int) -> bool:

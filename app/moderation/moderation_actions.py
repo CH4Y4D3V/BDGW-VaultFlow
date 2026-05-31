@@ -338,6 +338,25 @@ async def archive_to_vault(
         content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
         checksum = _compute_checksum(file_unique_id, file_size or 0)
         
+        # ── Flow I: Hashing Deduplication ──
+        content_hash = None
+        if msg.photo:
+            try:
+                photo_bytes = await client.download_media(msg, in_memory=True)
+                from app.utils.media_hashing import calculate_image_hash
+                content_hash = calculate_image_hash(photo_bytes)
+                
+                # Check for duplicates in Vault
+                duplicate = await vault_col.find_one({"content_hash": content_hash})
+                if duplicate:
+                    logger.warning(
+                        "duplicate_content_hash_detected",
+                        extra={"ctx_content_id": content_id, "ctx_existing": duplicate["content_id"]}
+                    )
+                    # We still archive but tag it as duplicate
+            except Exception as e:
+                logger.warning("hashing_failed_during_archival", extra={"ctx_error": str(e)})
+
         vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
 
         update_doc = {
@@ -364,6 +383,7 @@ async def archive_to_vault(
                 "submitter_user_id": submitter_user_id,
                 "consent_record_id": resolved_consent_id,
                 "checksum": checksum,
+                "content_hash": content_hash,
                 "updated_at": now,
                 "metadata": {
                     "has_spoiler": getattr(media, "has_spoiler", False) if media else False,

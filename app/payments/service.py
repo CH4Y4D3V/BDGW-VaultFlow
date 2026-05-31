@@ -366,7 +366,18 @@ class PaymentService:
                         extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
                     )
 
-            # Step 7: Save payment history
+            # Step 7: Save payment history and TXID registry
+            if session.txid:
+                try:
+                    from app.repositories.txid_repository import TXIDRepository
+                    txid_repo = TXIDRepository(self.repository._db)
+                    await txid_repo.register(session.txid, session.user_id, session.id)
+                except Exception as tx_err:
+                    logger.warning(
+                        "txid_registration_failed_on_approve",
+                        extra={"ctx_txid": session.txid, "ctx_error": str(tx_err)},
+                    )
+
             await self.repository.record_subscription_history(
                 payment_id,
                 {

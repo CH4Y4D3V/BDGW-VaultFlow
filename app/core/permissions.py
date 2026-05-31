@@ -14,70 +14,60 @@ logger = get_logger(__name__)
 
 class Role(str, Enum):
     OWNER = "owner"
-    SUDO = "sudo"
-    SUPER_ADMIN = "super_admin"  # Explicit role
-    MODERATOR = "moderator"
-    SUPPORT_ADMIN = "support_admin"
-    PAYMENT_ADMIN = "payment_admin"
-    SCHEDULER_ADMIN = "scheduler_admin"
+    ADMIN = "admin"
 
 
 def get_user_roles(user_id: int) -> list[Role]:
     roles: list[Role] = []
     if user_id == settings.OWNER_ID:
         roles.append(Role.OWNER)
-    if user_id in settings.SUDO_IDS:
-        roles.append(Role.SUDO)
-        roles.append(Role.SUPER_ADMIN)
-    if user_id in settings.ADMIN_IDS or user_id in settings.MODERATOR_IDS:
-        roles.append(Role.MODERATOR)
-    if user_id in settings.SUPPORT_ADMIN_IDS:
-        roles.append(Role.SUPPORT_ADMIN)
-    if user_id in settings.PAYMENT_ADMIN_IDS:
-        roles.append(Role.PAYMENT_ADMIN)
-    if user_id in settings.SCHEDULER_ADMIN_IDS:
-        roles.append(Role.SCHEDULER_ADMIN)
+        roles.append(Role.ADMIN)  # Owner is always Admin
+    elif user_id in (settings.ADMIN_IDS or []):
+        roles.append(Role.ADMIN)
     return roles
 
 
 def has_role(user_id: int, role: Role) -> bool:
-    """OWNER and SUDO/SUPER_ADMIN inherit all roles."""
+    """Owner inherits all roles. Admin check covers ADMIN_IDS."""
     if user_id == settings.OWNER_ID:
         return True
-    if user_id in settings.SUDO_IDS:
-        return True
-    return role in get_user_roles(user_id)
+    
+    user_roles = get_user_roles(user_id)
+    return role in user_roles
 
+
+def is_admin(user_id: int) -> bool:
+    """Is the user the Owner or a listed Admin?"""
+    return user_id == settings.OWNER_ID or user_id in (settings.ADMIN_IDS or [])
+
+
+# ── Compatibility Aliases ─────────────────────────────────────────────────────
 
 def is_sudo(user_id: int) -> bool:
-    return user_id == settings.OWNER_ID or user_id in settings.SUDO_IDS
+    return is_admin(user_id)
 
 def is_super_admin(user_id: int) -> bool:
-    return is_sudo(user_id)
+    return is_admin(user_id)
 
 def is_moderator(user_id: int) -> bool:
-    return has_role(user_id, Role.MODERATOR)
-
+    return is_admin(user_id)
 
 def is_support_admin(user_id: int) -> bool:
-    return has_role(user_id, Role.SUPPORT_ADMIN)
-
+    return is_admin(user_id)
 
 def is_payment_admin(user_id: int) -> bool:
-    return has_role(user_id, Role.PAYMENT_ADMIN)
-
+    return is_admin(user_id)
 
 def is_scheduler_admin(user_id: int) -> bool:
-    return has_role(user_id, Role.SCHEDULER_ADMIN)
-
+    return is_admin(user_id)
 
 def is_any_admin(user_id: int) -> bool:
-    return bool(get_user_roles(user_id))
+    return is_admin(user_id)
 
 
 # ── Startup Validation ────────────────────────────────────────────────────────
 
-REQUIRED_ROLES = ["OWNER", "SUDO", "SUPER_ADMIN", "MODERATOR", "SUPPORT_ADMIN", "PAYMENT_ADMIN", "SCHEDULER_ADMIN"]
+REQUIRED_ROLES = ["OWNER", "ADMIN"]
 for req_role in REQUIRED_ROLES:
     if not hasattr(Role, req_role):
         raise RuntimeError(f"Invalid role reference: Role.{req_role} used but not defined.")
@@ -88,37 +78,15 @@ for req_role in REQUIRED_ROLES:
 def permission_required(role: Role, silent: bool = False):
     """
     Pyrogram handler decorator that enforces role-based access control.
-
-    Works on both Message and CallbackQuery handlers.
-
-    Args:
-        role:   The minimum Role required to execute the handler.
-        silent: If True, unauthorized calls are dropped without any reply.
-                If False (default), unauthorized users receive a denial message.
-
-    Usage:
-        @Client.on_message(filters.command("approve_payment"))
-        @permission_required(Role.PAYMENT_ADMIN)
-        async def handle_approve_payment(client, message): ...
-
-        @Client.on_callback_query(filters.regex(r"^mod_"))
-        @permission_required(Role.MODERATOR)
-        async def handle_moderation_callback(client, callback): ...
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(client, update, *args, **kwargs):
-            # Resolve user_id from either Message or CallbackQuery
             if isinstance(update, Message):
                 from_user = update.from_user
             elif isinstance(update, CallbackQuery):
                 from_user = update.from_user
             else:
-                # Unknown update type — deny by default
-                logger.warning(
-                    "permission_unknown_update_type",
-                    extra={"ctx_type": type(update).__name__, "ctx_role": role.value},
-                )
                 return
 
             if not from_user:
@@ -146,19 +114,8 @@ def permission_required(role: Role, silent: bool = False):
                             await update.reply_text(
                                 "⛔ You are not authorised to perform this action."
                             )
-                    except Exception as e:
-                        logger.debug(
-                            "permission_denial_reply_failed",
-                            extra={"ctx_error": str(e)},
-                        )
-                return
-
-            return await func(client, update, *args, **kwargs)
-
-        return wrapper
-    return decorator
-ra={"ctx_error": str(e)},
-                        )
+                    except Exception:
+                        pass
                 return
 
             return await func(client, update, *args, **kwargs)

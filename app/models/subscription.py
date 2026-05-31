@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 
 class SubscriptionStatus(str, Enum):
-    ACTIVE = "active"
-    GRACE = "grace"
-    EXPIRED = "expired"
-    BANNED = "banned"
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+    PENDING = "PENDING"
+    GRACE = "GRACE"
+    BANNED = "BANNED"
 
 
 class Plan(str, Enum):
@@ -41,17 +43,19 @@ def plan_rank(plan: "Plan | str") -> int:
 
 @dataclass
 class Subscription:
+    subscription_id: str
     user_id: int
-    plan: Plan
-    status: SubscriptionStatus
-    started_at: datetime
+    package_id: str
+    started_at: Optional[datetime]
     expires_at: Optional[datetime]
-    grace_until: Optional[datetime]
-    created_at: datetime
-    updated_at: datetime
-    notes: Optional[str] = None
-    granted_by: Optional[int] = None
-    metadata: dict = None
+    status: SubscriptionStatus
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    # Legacy/Compatibility fields
+    grace_until: Optional[datetime] = None
+    plan: Optional[Plan] = None
+    metadata: dict = field(default_factory=dict)
 
     # ── State predicates ──────────────────────────────────────────────────────
 
@@ -84,18 +88,11 @@ class Subscription:
         delta = self.expires_at - datetime.now(timezone.utc)
         return max(0, delta.days)
 
-    @property
-    def grace_remaining_days(self) -> Optional[int]:
-        if self.grace_until is None:
-            return None
-        delta = self.grace_until - datetime.now(timezone.utc)
-        return max(0, delta.days)
-
     # ── Access control ────────────────────────────────────────────────────────
 
     @property
     def rank(self) -> int:
-        return plan_rank(self.plan)
+        return plan_rank(self.plan or self.package_id)
 
     def has_access(self, required_plan: "Plan | str") -> bool:
         if self.is_banned:
@@ -106,32 +103,32 @@ class Subscription:
 
     def to_dict(self) -> dict:
         return {
+            "_id": self.subscription_id,
+            "subscription_id": self.subscription_id,
             "user_id": self.user_id,
-            "plan": self.plan.value,
-            "status": self.status.value,
+            "package_id": self.package_id,
             "started_at": self.started_at,
             "expires_at": self.expires_at,
-            "grace_until": self.grace_until,
+            "status": self.status.value,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "notes": self.notes,
-            "granted_by": self.granted_by,
-            "metadata": self.metadata or {},
+            "grace_until": self.grace_until,
+            "plan": self.plan.value if self.plan else self.package_id,
+            "metadata": self.metadata,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "Subscription":
-        now = datetime.now(timezone.utc)
         return cls(
+            subscription_id=str(data.get("_id", data.get("subscription_id"))),
             user_id=data["user_id"],
-            plan=Plan(data.get("plan", Plan.FREE)),
-            status=SubscriptionStatus(data.get("status", SubscriptionStatus.EXPIRED)),
-            started_at=data.get("started_at") or data.get("created_at") or now,
+            package_id=data.get("package_id", data.get("plan", "unknown")),
+            started_at=data.get("started_at"),
             expires_at=data.get("expires_at"),
+            status=SubscriptionStatus(data.get("status", SubscriptionStatus.PENDING)),
+            created_at=data.get("created_at", datetime.now(timezone.utc)),
+            updated_at=data.get("updated_at", datetime.now(timezone.utc)),
             grace_until=data.get("grace_until"),
-            created_at=data.get("created_at") or now,
-            updated_at=data.get("updated_at") or now,
-            notes=data.get("notes"),
-            granted_by=data.get("granted_by"),
-            metadata=data.get("metadata") or {},
+            plan=Plan(data.get("plan", Plan.FREE)) if data.get("plan") else None,
+            metadata=data.get("metadata", {}),
         )

@@ -54,11 +54,39 @@ async def _set_fsm(user_id: int, state: str, data: dict):
 @Client.on_message(filters.command("takedown") & filters.private)
 async def handle_takedown_start(client: Client, message: Message) -> None:
     user_id = message.from_user.id
-    await _set_fsm(user_id, STATE_AWAITING_ID, {})
     
+    # ── Check for direct argument
+    parts = message.text.split(None, 1)
+    if len(parts) > 1:
+        content_id = parts[1].strip()
+        
+        # 1. Basic validation
+        db = DatabaseManager.get_db()
+        exists = await db[settings.VAULT_COLLECTION].find_one({"content_id": content_id})
+        if not exists:
+            await message.reply_text("❌ Invalid Content ID or Link. Please check and try again.")
+            return
+
+        # 2. Check if already reported by this user
+        reported = await db["takedown_requests"].find_one({"content_id": content_id, "reported_by": user_id, "status": "pending"})
+        if reported:
+            await message.reply_text("⏳ <b>Already Under Review</b>\n\nYou have already reported this content. Our admins are reviewing it.", parse_mode=ParseMode.HTML)
+            return
+
+        # Start FSM from reason step
+        await _set_fsm(user_id, STATE_AWAITING_REASON, {"content_id": content_id})
+        await message.reply_text(
+            f"📝 <b>Reporting Content:</b> <code>{content_id}</code>\n\n"
+            "Please describe why this content should be removed.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # ── Default: Start guided flow
+    await _set_fsm(user_id, STATE_AWAITING_ID, {})
     await message.reply_text(
         "⚖️ <b>Takedown Request / DMCA</b>\n\n"
-        "Please provide the <b>Content ID</b> you wish to report.\n"
+        "Please provide the <b>Content ID</b> or <b>Link</b> you wish to report.\n"
         "<i>(Found in the caption of the shared content)</i>\n\n"
         "Type /cancel to abort.",
         parse_mode=ParseMode.HTML

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Tuple
+from typing import Tuple, Optional
 
 from pyrogram.types import InlineKeyboardMarkup
 
 from app.bot.keyboards import KeyboardBuilder
 from app.models.subscription import Plan, Subscription, SubscriptionStatus
 from app.repositories.subscription_repository import SubscriptionRepository
+from app.repositories.user_repository import UserRepository
+from app.ui.welcome_cards import build_welcome_card_v3, build_onboarding_keyboard
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -22,12 +24,16 @@ class UserState(str, Enum):
 
 
 class OnboardingService:
-    def __init__(self, subscription_repo: SubscriptionRepository):
+    def __init__(self, subscription_repo: SubscriptionRepository, user_repo: UserRepository):
         self.subscription_repo = subscription_repo
+        self.user_repo = user_repo
 
     async def get_user_state(self, user_id: int) -> UserState:
+        user = await self.user_repo.get_user_model(user_id)
+        if user and user.is_banned:
+            return UserState.BANNED
+            
         sub = await self.subscription_repo.get_by_user_id(user_id)
-        
         if not sub:
             return UserState.NEW
         
@@ -40,20 +46,32 @@ class OnboardingService:
         if sub.status == SubscriptionStatus.ACTIVE and sub.plan != Plan.FREE:
             return UserState.PREMIUM
             
-        if sub.status in [SubscriptionStatus.EXPIRED, SubscriptionStatus.GRACE]:
-            return UserState.RETURNING
-            
-        return UserState.RETURNING  # Default for free or existing users
+        return UserState.RETURNING
 
-    async def render_onboarding(self, user_id: int, first_name: str) -> Tuple[str, InlineKeyboardMarkup]:
-        state = await self.get_user_state(user_id)
+    async def render_start(self, user_id: int, first_name: str) -> Tuple[str, InlineKeyboardMarkup]:
+        """
+        Determines whether to show onboarding or main menu.
+        """
+        user = await self.user_repo.get_user_model(user_id)
         
-        text = self._get_template(state, first_name)
-        keyboard = KeyboardBuilder.build_main_menu(state)
+        # If not onboarded (new user or hasnt accepted terms), show welcome card v3
+        if not user or not user.onboarded:
+            text = build_welcome_card_v3(first_name)
+            keyboard = build_onboarding_keyboard()
+            return text, keyboard
+            
+        # If onboarded, show main menu
+        state = await self.get_user_state(user_id)
+        text = self._get_main_menu_text(state, first_name)
+        keyboard = KeyboardBuilder.build_main_menu(state.value)
         
         return text, keyboard
 
-    def _get_template(self, state: UserState, first_name: str) -> str:
+    async def complete_onboarding(self, user_id: int) -> bool:
+        """Mark user as onboarded."""
+        return await self.user_repo.set_onboarded(user_id, True)
+
+    def _get_main_menu_text(self, state: UserState, first_name: str) -> str:
         if state == UserState.BANNED:
             return (
                 "🚫 <b>Access Restricted</b>\n\n"
@@ -62,7 +80,7 @@ class OnboardingService:
             )
 
         return (
-            "Welcome to BDGW.\n\n"
-            "Send content, stay anonymous, access premium — all in one place.\n\n"
-            "Use the menu below."
+            f"👋 <b>Welcome back, {first_name}!</b>\n\n"
+            "What would you like to do today?\n"
+            "Use the vertical menu below to navigate."
         )

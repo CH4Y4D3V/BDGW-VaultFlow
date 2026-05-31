@@ -220,18 +220,16 @@ class DatabaseManager:
             payment_repo = PaymentRepository(cls._db)
             try:
                 await payment_repo.create_indexes()
+            except Exception as e:
+                logger.error("payment_index_setup_failed", extra={"ctx_error": str(e)})
+
+            from app.repositories.txid_repository import TXIDRepository
+            txid_repo = TXIDRepository(cls._db)
+            try:
+                await txid_repo.create_indexes()
                 logger.info("mongodb_initialization_complete")
             except Exception as e:
-                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
-                logger.error(
-                    "non_core_index_setup_failed",
-                    extra={
-                        "ctx_collection": "payments",
-                        "ctx_index_name": index_name,
-                        "ctx_mongo_error": str(e)
-                    },
-                    exc_info=True
-                )
+                logger.error("txid_index_setup_failed", extra={"ctx_error": str(e)})
             
         except Exception as e:
             logger.error(

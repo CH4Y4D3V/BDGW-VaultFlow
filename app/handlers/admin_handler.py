@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 @Client.on_message(
     filters.command("grant") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_grant_command(client: Client, message: Message) -> None:
     """/grant {user_id} {days} {plan}"""
     try:
@@ -80,7 +80,7 @@ async def handle_grant_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("revoke") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_revoke_command(client: Client, message: Message) -> None:
     """/revoke {user_id}"""
     try:
@@ -113,7 +113,7 @@ async def handle_revoke_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("ban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_ban_command(client: Client, message: Message) -> None:
     """/ban {user_id} [reason] — Permanent bot ban (Section 21: silent)."""
     try:
@@ -155,7 +155,7 @@ async def handle_ban_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("unban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_unban_command(client: Client, message: Message) -> None:
     """/unban {user_id} — Removes bot ban."""
     try:
@@ -193,7 +193,7 @@ async def handle_unban_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("kick") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.MODERATOR)
+@permission_required(Role.ADMIN)
 async def handle_kick_command(client: Client, message: Message) -> None:
     """/kick {user_id} — Removes user from premium groups."""
     try:
@@ -223,7 +223,7 @@ async def handle_kick_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("mute") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.MODERATOR)
+@permission_required(Role.ADMIN)
 async def handle_mute_command(client: Client, message: Message) -> None:
     """/mute {user_id} — Silent mute (Section 21: no notification)."""
     try:
@@ -256,7 +256,7 @@ async def handle_mute_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("warn") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.MODERATOR)
+@permission_required(Role.ADMIN)
 async def handle_warn_command(client: Client, message: Message) -> None:
     """/warn {user_id} {reason}"""
     try:
@@ -308,7 +308,7 @@ async def handle_warn_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("userinfo") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.MODERATOR)
+@permission_required(Role.ADMIN)
 async def handle_userinfo_command(client: Client, message: Message) -> None:
     """/userinfo {user_id}"""
     try:
@@ -363,7 +363,7 @@ async def handle_userinfo_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("newlink") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_newlink_command(client: Client, message: Message) -> None:
     """/newlink {user_id} — Generates a new 30-min invite link."""
     try:
@@ -417,7 +417,7 @@ async def handle_newlink_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("stats") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.MODERATOR)
+@permission_required(Role.ADMIN)
 async def handle_stats_command(client: Client, message: Message) -> None:
     """/stats — System-wide statistics."""
     try:
@@ -443,6 +443,55 @@ async def handle_stats_command(client: Client, message: Message) -> None:
 
         await message.reply_text(text, parse_mode=ParseMode.HTML)
 
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+
+@Client.on_message(
+    filters.command("approve") & filters.chat(settings.VERIFICATION_GROUP_ID)
+)
+@permission_required(Role.ADMIN)
+async def handle_approve_command(client: Client, message: Message) -> None:
+    """/approve {payment_id}"""
+    try:
+        if len(message.command) < 2:
+            await message.reply_text("❌ Usage: `/approve {payment_id}`")
+            return
+
+        session_id = message.command[1]
+        from app.payments.service import get_payment_service
+        service = get_payment_service()
+        
+        success = await service.approve_payment(client, session_id, message.from_user.id)
+        if success:
+            await message.reply_text(f"✅ Payment <code>{session_id}</code> approved.", parse_mode=ParseMode.HTML)
+        else:
+            await message.reply_text("❌ Failed to approve payment. Check session status.")
+    except Exception as e:
+        await message.reply_text(f"❌ Error: {e}")
+
+
+@Client.on_message(
+    filters.command("reject") & filters.chat(settings.VERIFICATION_GROUP_ID)
+)
+@permission_required(Role.ADMIN)
+async def handle_reject_command(client: Client, message: Message) -> None:
+    """/reject {payment_id} {reason}"""
+    try:
+        if len(message.command) < 3:
+            await message.reply_text("❌ Usage: `/reject {payment_id} {reason}`")
+            return
+
+        session_id = message.command[1]
+        reason = " ".join(message.command[2:])
+        from app.payments.service import get_payment_service
+        service = get_payment_service()
+        
+        success = await service.reject_payment(session_id, reason, message.from_user.id)
+        if success:
+            await message.reply_text(f"❌ Payment <code>{session_id}</code> rejected.\nReason: {reason}", parse_mode=ParseMode.HTML)
+        else:
+            await message.reply_text("❌ Failed to reject payment.")
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
 
@@ -490,35 +539,54 @@ async def _execute_broadcast(
     message_ids: list[int],
     caption: Optional[str],
     admin_id: int,
+    target: str = "all"
 ) -> None:
     from app.services.audit_service import get_audit
 
     db = DatabaseManager.get_db()
-    total_users = await db["users"].count_documents({"is_banned": False})
     sent_count = 0
     fail_count = 0
     start_time = datetime.now(timezone.utc)
 
+    # ── 1. Determine targets ──────────────────────────────────────────────────
+    target_ids: list[int] = []
+    
+    if target == "all":
+        cursor = db["users"].find({"is_banned": False}, {"_id": 1})
+        async for u in cursor:
+            target_ids.append(u["_id"])
+    elif target == "premium":
+        cursor = db["subscriptions"].find({"status": "ACTIVE", "plan": {"$ne": "free"}}, {"user_id": 1})
+        async for s in cursor:
+            target_ids.append(s["user_id"])
+    elif target == "group":
+        if settings.PREMIUM_GROUP_ID:
+            target_ids.append(int(settings.PREMIUM_GROUP_ID))
+    elif target == "channel":
+        if settings.PREMIUM_CHANNEL_ID:
+            target_ids.append(int(settings.PREMIUM_CHANNEL_ID))
+
+    total_targets = len(target_ids)
+
     await get_audit().log(
         action="broadcast_started",
         performed_by=admin_id,
-        details={"total_targets": total_users, "message_count": len(message_ids)},
+        details={"total_targets": total_targets, "message_count": len(message_ids), "target_type": target},
     )
 
-    async for user_doc in db["users"].find({"is_banned": False}):
-        user_id = user_doc["_id"]
-
+    for target_id in target_ids:
         try:
             if len(message_ids) > 1:
+                # Atomic Album Broadcaster
                 await client.copy_media_group(
-                    chat_id=user_id,
+                    chat_id=target_id,
                     from_chat_id=source_chat_id,
                     message_id=message_ids[0],
                 )
                 sent_count += 1
             else:
                 success = await _safe_send_broadcast(
-                    client, user_id, source_chat_id, message_ids[0], caption
+                    client, target_id, source_chat_id, message_ids[0], caption
                 )
                 if success:
                     sent_count += 1
@@ -528,14 +596,7 @@ async def _execute_broadcast(
             fail_count += 1
 
         if (sent_count + fail_count) % 100 == 0:
-            logger.info(
-                "Broadcast progress",
-                extra={
-                    "ctx_sent": sent_count,
-                    "ctx_failed": fail_count,
-                    "ctx_total": total_users,
-                },
-            )
+            logger.info("Broadcast progress", extra={"ctx_sent": sent_count, "ctx_failed": fail_count, "ctx_total": total_targets})
 
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
     summary = (
@@ -567,23 +628,32 @@ async def _execute_broadcast(
 
 @Client.on_message(
     filters.command(
-        ["broadcast", "broadcast_media", "broadcast_album", "broadcast_file", "broadcast_caption"]
+        ["broadcast", "broadcast_premium", "broadcast_group", "broadcast_channel"]
     )
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_broadcast_init(client: Client, message: Message) -> None:
     admin_id = message.from_user.id
     cmd = message.command[0]
 
+    target = "all"
+    if "premium" in cmd:
+        target = "premium"
+    elif "group" in cmd:
+        target = "group"
+    elif "channel" in cmd:
+        target = "channel"
+
     _pending_broadcasts[admin_id] = {
         "type": cmd,
+        "target": target,
         "messages": [],
         "started_at": datetime.now(timezone.utc),
     }
 
     await message.reply_text(
-        f"📢 <b>Broadcast Initialized [{cmd}]</b>\n\n"
+        f"📢 <b>Broadcast Initialized [Target: {target.upper()}]</b>\n\n"
         "Send the content you want to broadcast now. "
         "Albums are supported — send all items and wait 2 seconds.\n\n"
         "<i>To cancel, type /cancel_broadcast</i>",
@@ -595,7 +665,7 @@ async def handle_broadcast_init(client: Client, message: Message) -> None:
     filters.command("cancel_broadcast")
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUPER_ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_broadcast_cancel_cmd(client: Client, message: Message) -> None:
     admin_id = message.from_user.id
     _pending_broadcasts.pop(admin_id, None)
@@ -752,9 +822,10 @@ async def handle_broadcast_confirm(client: Client, callback: CallbackQuery) -> N
     source_chat_id = messages[0].chat.id
     message_ids = [m.id for m in messages]
     caption = messages[0].caption or messages[0].text or None
+    target = broadcast_data.get("target", "all")
 
     asyncio.create_task(
-        _execute_broadcast(client, source_chat_id, message_ids, caption, admin_id),
+        _execute_broadcast(client, source_chat_id, message_ids, caption, admin_id, target),
         name=f"broadcast-{admin_id}",
     )
 

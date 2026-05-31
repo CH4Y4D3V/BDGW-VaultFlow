@@ -104,8 +104,8 @@ class ReferralService:
             if await self.check_membership(referred_id, channel_id):
                 success = await self._repo.qualify_referral(referred_id)
                 if success:
-                    # Section 16: 1 referral = 1 point
-                    await self._repo.increment_balance(referrer_id, 1)
+                    # Section 16: 1 referral = 5 points (Flow M)
+                    await self._repo.increment_balance(referrer_id, 5)
                     qualified_count += 1
                     logger.info(
                         "referral_qualified",

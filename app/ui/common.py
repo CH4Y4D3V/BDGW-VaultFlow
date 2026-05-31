@@ -15,8 +15,8 @@ THIN_DIVIDER = "─────────────────────�
 def get_status_badge(status: str) -> str:
     """Returns a formatted status badge with appropriate emoji."""
     status_map = {
-        "awaiting_proof": "⏳ <b>Awaiting Proof</b>",
-        "proof_submitted": "📤 <b>Proof Submitted</b>",
+        "awaiting_payment": "⏳ <b>Awaiting Payment</b>",
+        "pending_details": "🔎 <b>Pending Details</b>",
         "under_review": "🔎 <b>Under Review</b>",
         "approved": "✅ <b>Approved</b>",
         "rejected": "❌ <b>Rejected</b>",
@@ -26,6 +26,13 @@ def get_status_badge(status: str) -> str:
         "active": "🟢 <b>Active</b>",
         "busy": "🟡 <b>Busy</b>",
         "offline": "🔴 <b>Offline</b>",
+        # Trust Levels (Flow P)
+        "🚨 high risk": "🚨 <b>HIGH RISK</b>",
+        "⚠️ suspicious": "⚠️ <b>SUSPICIOUS</b>",
+        "🏅 veteran": "🏅 <b>VETERAN</b>",
+        "✅ trusted": "✅ <b>TRUSTED</b>",
+        "👤 verified": "👤 <b>VERIFIED</b>",
+        "🆕 new member": "🆕 <b>NEW MEMBER</b>",
     }
     return status_map.get(status.lower(), f"❔ <b>{status.upper()}</b>")
 

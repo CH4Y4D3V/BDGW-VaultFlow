@@ -32,7 +32,8 @@ def _get_queue_repo():
     return QueueRepository(DatabaseManager.get_db())
 
 def _get_onboarding_service():
-    return OnboardingService(_get_sub_repo())
+    from app.repositories.user_repository import UserRepository
+    return OnboardingService(_get_sub_repo(), UserRepository())
 
 def _get_sub_service():
     return SubscriptionService()
@@ -204,47 +205,66 @@ async def _get_rules_text() -> str:
 
 # ── Subscription status formatter ─────────────────────────────────────────────
 
-def _format_status(sub, user_id: int) -> str:
+async def _format_status(user_id: int) -> str:
     from app.models.subscription import SubscriptionStatus
+    from app.repositories.subscription_repository import SubscriptionRepository
+    from app.referral.repository import ReferralRepository
+    from app.repositories.queue_repository import QueueRepository
+
+    sub_repo = SubscriptionRepository()
+    sub = await sub_repo.get_by_user_id(user_id)
+    
+    ref_repo = ReferralRepository(DatabaseManager.get_db())
+    wallet = await ref_repo.get_wallet(user_id)
+    points = wallet.get("points_balance", 0) if wallet else 0
+
+    queue_repo = QueueRepository(DatabaseManager.get_db())
+    user_queue = await queue_repo.get_user_queue(user_id)
 
     if sub is None:
-        return (
-            "📋 <b>Subscription Status</b>\n\n"
-            "❌ No active subscription found.\n\n"
-            "Contact an admin to subscribe."
-        )
-
-    status_icon = {
-        SubscriptionStatus.ACTIVE: "✅",
-        SubscriptionStatus.GRACE: "⚠️",
-        SubscriptionStatus.EXPIRED: "❌",
-        SubscriptionStatus.BANNED: "🚫",
-    }.get(sub.status, "❓")
-
-    lines = [
-        "📋 <b>Subscription Status</b>\n",
-        f"<b>Status:</b> {status_icon} {sub.status.value.capitalize()}",
-        f"<b>Plan:</b> {sub.plan.value.capitalize()}",
-        f"<b>Member since:</b> {sub.started_at.strftime('%Y-%m-%d')}",
-    ]
-
-    if sub.expires_at:
-        lines.append(f"<b>Expires:</b> {sub.expires_at.strftime('%Y-%m-%d')}")
-        if sub.remaining_days is not None:
-            lines.append(f"<b>Remaining:</b> {sub.remaining_days} day(s)")
+        status_text = "❌ No active subscription"
+        plan_name = "FREE"
     else:
-        lines.append("<b>Duration:</b> Lifetime ♾️")
+        status_icon = {
+            SubscriptionStatus.ACTIVE: "✅",
+            SubscriptionStatus.GRACE: "⚠️",
+            SubscriptionStatus.EXPIRED: "❌",
+            SubscriptionStatus.BANNED: "🚫",
+        }.get(sub.status, "❓")
+        status_text = f"{status_icon} {sub.status.value.capitalize()}"
+        plan_name = sub.package_id.upper()
 
-    if sub.is_in_grace and sub.grace_until:
-        lines.append(
-            f"\n⚠️ <b>Grace period until:</b> {sub.grace_until.strftime('%Y-%m-%d')}\n"
-            "Renew before grace expires to keep access."
-        )
+    queue_text = ""
+    if user_queue:
+        queue_text = "\n\n<b>Recent Submissions:</b>\n"
+        for j in user_queue[:3]:
+            status = j.get("status", "pending").capitalize()
+            queue_text += f"• {j.get('content_id', '???')[:8]}... [{status}]\n"
+    else:
+        queue_text = "\n\n<i>No recent submissions.</i>"
 
-    return "\n".join(lines)
+    text = (
+        "👤 <b>Account Dashboard</b>\n\n"
+        f"<b>Plan:</b> {plan_name}\n"
+        f"<b>Status:</b> {status_text}\n"
+        f"<b>User ID:</b> <code>{user_id}</code>\n"
+        f"<b>Referral Points:</b> ৳{points}\n"
+        f"{queue_text}"
+    )
+
+    return text
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
+
+async def _delete_after(message: Message, delay: float = 10.0) -> None:
+    """Helper to delete a message after a delay."""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
 
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
@@ -254,32 +274,39 @@ async def handle_start(client: Client, message: Message) -> None:
         user_id = message.from_user.id
         first_name = message.from_user.first_name or "Creator"
 
-        # ── Anti-Spam / Cooldown (best-effort — degrades gracefully if Redis down)
+        # ── Anti-Spam / Cooldown
         spam_key = f"onboarding:spam:{user_id}"
         if await _check_spam_guard(spam_key, ttl_seconds=5):
+            # Failed auth/spam cleanup (immediate)
+            asyncio.create_task(_delete_after(message, delay=0))
             return
 
         logger.info("/start command received", extra={"ctx_user_id": user_id})
 
-        # ── SYSTEM 1: USER REGISTRATION ──
-        try:
-            from app.repositories.user_repository import UserRepository
-            user_repo = UserRepository()
-            await user_repo.upsert_user(
-                user_id=user_id,
-                first_name=message.from_user.first_name,
-                last_name=message.from_user.last_name,
-                username=message.from_user.username
-            )
-        except Exception as e:
-            logger.warning("user_registration_failed", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+        # ── Referral Payload Handling ──
+        referred_by = None
+        if len(message.command) > 1:
+            payload = message.command[1]
+            if payload.startswith("ref_"):
+                try:
+                    referred_by = int(payload.split("_")[1])
+                except (IndexError, ValueError):
+                    pass
 
-        # F-12: Ensure subscription exists
+        # ── SYSTEM 1: USER REGISTRATION ──
+        from app.repositories.user_repository import UserRepository
+        user_repo = UserRepository()
+        await user_repo.upsert_user(
+            user_id=user_id,
+            full_name=f"{first_name} {message.from_user.last_name or ''}".strip(),
+            username=message.from_user.username,
+            referred_by=referred_by
+        )
+
+        # Ensure free sub exists
         sub_service = _get_sub_service()
         existing_sub = await sub_service.get_subscription(user_id)
-        is_first_time = existing_sub is None
-        
-        if is_first_time:
+        if existing_sub is None:
             from app.models.subscription import Plan
             await sub_service.grant(
                 user_id=user_id,
@@ -288,108 +315,47 @@ async def handle_start(client: Client, message: Message) -> None:
                 granted_by=0,
                 notes="Auto-registered on /start"
             )
-            
-            # Send the detailed onboarding message
-            onboarding_text = (
-                "👋 <b>Welcome to BD Gone Wild!</b>\n\n"
-                "This bot is your central hub for the community. Here is what you can do:\n"
-                "• 💎 <b>Premium Access</b> — Get exclusive content.\n"
-                "• 📤 <b>Content Submission</b> — Share anonymously.\n"
-                "• 🗑 <b>Takedown Requests</b> — Request content removal.\n"
-                "• 📊 <b>User Status</b> — Check your profile and referrals.\n"
-                "• 🆘 <b>Support</b> — Talk directly to our admins.\n\n"
-                "<i>Please follow our community and submission rules at all times.</i>"
-            )
-            await message.reply_text(onboarding_text, parse_mode=ParseMode.HTML)
-
-        # ── Referral Payload Handling ──
-        if len(message.command) > 1:
-            payload = message.command[1]
-            if payload.startswith("ref_"):
-                try:
-                    referrer_id = int(payload.split("_")[1])
-                    from app.referral.repository import ReferralRepository
-                    from app.referral.service import ReferralService
-                    from app.referral.handlers import process_referral_start
-
-                    ref_repo = ReferralRepository(DatabaseManager.get_db())
-                    ref_service = ReferralService(ref_repo, client)
-
-                    await process_referral_start(client, message, referrer_id, ref_service)
-                except (IndexError, ValueError):
-                    pass
-                except Exception as e:
-                    # Referral failure must never block /start from completing
-                    logger.warning(
-                        "Referral processing failed — continuing start",
-                        extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-                    )
-            elif payload == "resubscribe":
-                await handle_mystatus_direct(client, message)
-                return
 
         onboarding_service = _get_onboarding_service()
-        text, keyboard = await onboarding_service.render_onboarding(
+        text, keyboard = await onboarding_service.render_start(
             user_id,
             first_name
         )
 
-        sent_msg = await message.reply_text(
+        await message.reply_text(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_markup=keyboard
         )
         
-        # ── SYSTEM 20: CLEANUP ──
-        try:
-            from app.services.cleanup_service import get_cleanup_service
-            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="general")
-        except:
-            pass
     except Exception as e:
         logger.error(
             "handle_start crashed",
             extra={"ctx_user_id": getattr(message.from_user, "id", "?"), "ctx_error": str(e)},
             exc_info=True,
         )
-        try:
-            await message.reply_text("❌ System busy. Please try again in a moment.")
-        except Exception as e:
-            logger.exception(
-                "start_error_reply_failed",
-                extra={"ctx_error": str(e)},
-            )
-            pass
+        await message.reply_text("❌ System busy. Please try again in a moment.")
 
-async def handle_mystatus_direct(client: Client, message: Message) -> None:
-    user_id = message.from_user.id
-    sub_service = _get_sub_service()
-    sub = await sub_service.get_subscription(user_id)
-    from app.referral.repository import ReferralRepository
-    ref_repo = ReferralRepository(DatabaseManager.get_db())
-    wallet = await ref_repo.get_wallet(user_id)
-    queue_repo = _get_queue_repo()
-    user_queue = await queue_repo.get_user_queue(user_id)
-    from app.models.subscription import SubscriptionStatus
-    plan_name = sub.plan.value.upper() if sub else "FREE"
-    status_emoji = "✅" if sub and sub.status == SubscriptionStatus.ACTIVE else "⏳"
-    points = wallet.get("points_balance", 0) if wallet else 0
-    queue_text = ""
-    if user_queue:
-        queue_text = "\n\n<b>Recent Submissions:</b>\n"
-        for j in user_queue[:5]:
-            status = j.get("status", "pending").capitalize()
-            queue_text += f"• {j.get('content_id', '???')[:8]}... [{status}]\n"
-    else:
-        queue_text = "\n\n<i>No recent submissions.</i>"
-    text = (
-        f"👤 <b>Account Status</b>\n\n"
-        f"<b>Plan:</b> {plan_name} {status_emoji}\n"
-        f"<b>ID:</b> <code>{user_id}</code>\n"
-        f"<b>Points:</b> ৳{points}\n"
-        f"{queue_text}"
-    )
-    await message.reply_text(text, reply_markup=KeyboardBuilder.build_back_button(), parse_mode=ParseMode.HTML)
+
+# ── Onboarding Callbacks ──────────────────────────────────────────────────────
+
+@Client.on_callback_query(filters.regex(r"^onboarding:accept_terms$"))
+async def handle_accept_terms(client: Client, callback_query: CallbackQuery) -> None:
+    user_id = callback_query.from_user.id
+    first_name = callback_query.from_user.first_name or "Creator"
+    
+    await callback_query.answer("Terms Accepted! Welcome. ✅")
+    
+    onboarding_service = _get_onboarding_service()
+    await onboarding_service.complete_onboarding(user_id)
+    
+    # ── Flow O: Onboarding Cleanup ──
+    # We edit the message to show main menu, so no need to delete the card itself.
+    # But we could delete user's previous /start if it wasn't already.
+    
+    # Refresh to show main menu
+    text, keyboard = await onboarding_service.render_start(user_id, first_name)
+    await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
 # ── Menu Callbacks ────────────────────────────────────────────────────────────
@@ -490,9 +456,14 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             from app.services.trust_service import TrustService
             trust_service = TrustService()
             trust_metrics = await trust_service.get_user_metrics(user_id)
+            
+            queue_repo = _get_queue_repo()
+            recent_jobs = await queue_repo.get_user_queue(user_id)
+
             wallet.update({
                 "trust_level": trust_metrics["level"],
-                "fraud_score": trust_metrics["fraud_score"]
+                "fraud_score": trust_metrics["fraud_score"],
+                "recent_jobs": recent_jobs
             })
 
             text, keyboard = build_user_status_card(
@@ -547,6 +518,14 @@ async def handle_mystatus(client: Client, message: Message) -> None:
         return
     await handle_mystatus_direct(client, message)
     logger.info("/mystatus", extra={"ctx_user_id": message.from_user.id})
+
+
+@Client.on_message(filters.command("help") & filters.private)
+async def handle_help(client: Client, message: Message) -> None:
+    from app.ui.help_cards import build_help_card_v2, build_help_keyboard
+    text = build_help_card_v2()
+    keyboard = build_help_keyboard()
+    await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
 
 # ── /ping ─────────────────────────────────────────────────────────────────────

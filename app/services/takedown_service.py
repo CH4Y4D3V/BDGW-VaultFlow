@@ -252,6 +252,54 @@ class TakedownService:
             },
         )
 
+        # ── Flow G: Auto-open Support Ticket on Rejection ──
+        try:
+            # Find the users who reported this content
+            reporters_cursor = db["takedown_requests"].find(
+                {"content_id": content_id, "status": "dismissed", "reviewed_at": now}
+            )
+            async for report in reporters_cursor:
+                user_id = report["reported_by"]
+                from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
+                from app.ui.support_cards import build_admin_support_card, build_admin_support_actions
+                
+                # Create support topic
+                from app.bot.client import get_bot
+                bot = get_bot()
+                topic_id = await get_topic_manager().get_or_create_user_topic(
+                    bot, user_id, TOPIC_SUPPORT
+                )
+                
+                # Notify admin in topic
+                ticket_id = f"T-REJ-{content_id[:8]}"
+                text = build_admin_support_card(
+                    user_id=user_id,
+                    username=None, # Will be fetched if needed
+                    ticket_id=ticket_id,
+                    subject=f"Takedown Rejection: {content_id}",
+                    source="TAKEDOWN_REJECTION"
+                )
+                await bot.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=text,
+                    reply_markup=build_admin_support_actions(ticket_id, user_id),
+                    message_thread_id=topic_id,
+                    parse_mode="html"
+                )
+                
+                # Notify user
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "❌ <b>Your takedown request was dismissed.</b>\n\n"
+                        "A support ticket has been opened for you to discuss this with our staff. "
+                        "Please send your questions here."
+                    ),
+                    parse_mode="html"
+                )
+        except Exception as e:
+            logger.warning("failed_to_auto_open_support_on_dismiss", extra={"ctx_error": str(e)})
+
         await get_audit().log(
             action=AuditAction.TAKEDOWN_DISMISS,
             performed_by=reviewed_by,
