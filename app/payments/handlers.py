@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
+from pymongo.errors import DuplicateKeyError  # FIX GAP 3: was missing
 from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import (
@@ -15,7 +16,7 @@ from pyrogram.types import (
 from app.config import settings
 from app.core.permissions import is_support_admin
 from app.payments import get_payment_service
-from app.payments.models import PaymentStatus, PaymentSession
+from app.payments.models import PaymentStatus
 from app.payments.service import PLANS
 from app.utils.logger import get_logger
 
@@ -27,60 +28,65 @@ from app.ui.payment_cards import (
     build_payment_status_card,
     build_proof_received_card,
     build_premium_activated_card,
-    build_payment_rejected_card
+    build_payment_rejected_card,
 )
+
+
+# ── Premium menu ──────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
-    """Shows premium plan selection."""
     await callback.answer()
-    
     text, reply_markup = build_plan_selection_card(PLANS)
-    
     await callback.message.edit_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML
+        text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
     )
 
+
+# ── Plan selection ────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:select:(?P<plan_id>.+)$"))
 async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None:
     plan_id = callback.matches[0].group("plan_id")
     user_id = callback.from_user.id
-    
     await callback.answer()
 
     service = get_payment_service()
-    
-    # Check for existing active session
+
     existing = await service.get_active_session(user_id)
     if existing:
-        await callback.answer("You already have an active payment session.", show_alert=True)
+        await callback.answer(
+            "You already have an active payment session.", show_alert=True
+        )
         return
 
     try:
         session = await service.create_session(user_id, plan_id)
         plan = PLANS[plan_id]
-        
         text, reply_markup = build_payment_instruction_card(session, plan)
-        
         sent_msg = await callback.message.edit_text(
-            text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML
+            text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
         )
-        # ── SYSTEM 20: CLEANUP ──
+        # Log for 20-minute cleanup
         try:
             from app.services.cleanup_service import get_cleanup_service
-            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="payment")
-        except:
+            await get_cleanup_service().log_message(
+                user_id, sent_msg.id, text, category="payment"
+            )
+        except Exception:
             pass
-        
-    except Exception as e:
-        logger.exception("Failed to start payment session", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
-        await callback.answer("Could not initiate payment. Please try again.", show_alert=True)
 
+    except Exception as e:
+        logger.exception(
+            "handle_plan_selection_failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        await callback.answer(
+            "Could not initiate payment. Please try again.", show_alert=True
+        )
+
+
+# ── Payment status ────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:status$"))
 async def handle_payment_status(client: Client, callback: CallbackQuery) -> None:
@@ -90,17 +96,15 @@ async def handle_payment_status(client: Client, callback: CallbackQuery) -> None
     if not session:
         await callback.answer("No active payment session.", show_alert=True)
         return
-
     plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
     text, reply_markup = build_payment_status_card(session, plan)
-    
     await callback.message.edit_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML,
+        text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
     )
     await callback.answer()
 
+
+# ── Cancel ────────────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:cancel:(?P<sid>.+)$"))
 async def handle_payment_cancel(client: Client, callback: CallbackQuery) -> None:
@@ -112,165 +116,232 @@ async def handle_payment_cancel(client: Client, callback: CallbackQuery) -> None
         return
     await callback.message.edit_text(
         "Payment session cancelled.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Back", callback_data="menu:premium")]]),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("← Back", callback_data="menu:premium")]]
+        ),
     )
     await callback.answer()
 
+
+# ── Method selection ──────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:method:(?P<method>\w+):(?P<sid>.+)$"))
 async def handle_payment_method(client: Client, callback: CallbackQuery) -> None:
     method = callback.matches[0].group("method")
     session_id = callback.matches[0].group("sid")
-    
+
     service = get_payment_service()
     session = await service.get_session(session_id)
-    
+
     if not session or session.status != PaymentStatus.WAITING_PAYMENT_DETAILS:
         await callback.answer("Session expired or invalid.", show_alert=True)
         return
 
-    # Update session to REQUESTED
     updated = await service.update_status(
-        session_id, 
-        PaymentStatus.REQUESTED,
-        payment_method=method
+        session_id, PaymentStatus.REQUESTED, payment_method=method
     )
     if not updated:
         await callback.answer("Could not request details. Try again.", show_alert=True)
         return
 
-    await callback.message.edit_text(
+    sent_msg = await callback.message.edit_text(
         "⏳ <b>Requesting payment details...</b>\n\n"
         "An admin has been notified. You will receive the payment "
-        "number/QR here shortly. Please keep this chat open.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session_id}")]
-        ]),
-        parse_mode=ParseMode.HTML
+        "number/QR code here shortly. Please keep this chat open.",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session_id}")]]
+        ),
+        parse_mode=ParseMode.HTML,
     )
-    
-    # Notify Admins of the REQUEST
+
+    # Log for 20-minute cleanup
+    try:
+        from app.services.cleanup_service import get_cleanup_service
+        await get_cleanup_service().log_message(
+            session.user_id, sent_msg.id, "", category="payment"
+        )
+    except Exception:
+        pass
+
     await _notify_admins_of_request(client, session, method)
     await callback.answer()
 
 
+# ── Payment proof input handler ───────────────────────────────────────────────
+# Group -10 so it runs before support handler (default group 0)
+# but AFTER ban guard (group -2) and update logger (group -1).
+
 @Client.on_message(filters.private & ~filters.regex(r"^/"), group=-10)
 async def handle_payment_inputs(client: Client, message: Message) -> None:
-    """Captures TXID and Screenshot in sequence."""
+    """Captures TXID and Screenshot in sequence for active payment sessions."""
     if not message.from_user:
-        return
-    user_id = message.from_user.id
-    
-    service = get_payment_service()
-    session = await service.get_active_session(user_id)
-    if not session or session.status not in [PaymentStatus.AWAITING_PAYMENT, PaymentStatus.WAITING_SCREENSHOT]:
         raise ContinuePropagation
 
+    user_id = message.from_user.id
+
+    # Fast-path: check Redis before hitting MongoDB
+    try:
+        from app.core.redis_client import get_redis
+        redis = get_redis()
+        session_id_cached = await redis.get(f"pay_session:{user_id}")
+        if not session_id_cached:
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception as e:
+        logger.warning(
+            "handle_payment_inputs_redis_check_failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        # Fall through to DB check
+
+    service = get_payment_service()
+    session = await service.get_active_session(user_id)
+
+    if not session or session.status not in (
+        PaymentStatus.AWAITING_PAYMENT,
+        PaymentStatus.WAITING_SCREENSHOT,
+    ):
+        raise ContinuePropagation
+
+    # ── TXID collection ───────────────────────────────────────────────────────
     if session.status == PaymentStatus.AWAITING_PAYMENT:
         if not message.text:
-            await message.reply_text("Please send your Transaction ID (TXID) as text.")
+            await message.reply_text(
+                "Please send your Transaction ID (TXID) as text."
+            )
             return
-        
-        # --- GAP 3 FIX: Import and use DuplicateKeyError ---
-        from pymongo.errors import DuplicateKeyError
+
+        txid = message.text.strip()
+
+        # FIX GAP 3: DuplicateKeyError now imported — this catch will work
         try:
-            success = await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=message.text)
+            success = await service.update_status(
+                session.id, PaymentStatus.WAITING_SCREENSHOT, txid=txid
+            )
             if not success:
-                await message.reply_text("❌ Error processing request. Please try again.")
+                await message.reply_text(
+                    "❌ Error processing request. Please try again."
+                )
                 return
         except DuplicateKeyError:
-            # ── SYSTEM 20: FRAUD PREVENTION ──
-            from app.repositories.user_repository import UserRepository
-            user_repo = UserRepository()
-            await user_repo.ban_user(user_id, reason=f"Fraud attempt: Duplicate TXID reuse ({message.text})")
-            
-            # --- GAP 3 FIX: Direct status update to avoid lock mismatch ---
-            await service.repository._collection.update_one(
-                {"_id": session.id},
-                {"$set": {"status": PaymentStatus.REJECTED.value, "rejection_reason": "Auto-rejected: Duplicate TXID (Fraud)"}}
+            # Duplicate TXID — fraud detection path
+            logger.warning(
+                "duplicate_txid_detected",
+                extra={"ctx_user_id": user_id, "ctx_txid": txid[:20]},
             )
-            
+
+            # FIX GAP 3: reject_payment handles AWAITING_PAYMENT status directly
+            await service.reject_payment(
+                session.id, f"Duplicate TXID rejected: {txid}", 0
+            )
+
+            # Ban user for fraud
+            try:
+                from app.repositories.user_repository import UserRepository
+                user_repo = UserRepository()
+                await user_repo.ban_user(
+                    user_id,
+                    reason=f"Fraud attempt: Duplicate TXID reuse ({txid[:20]})",
+                )
+            except Exception as ban_err:
+                logger.error(
+                    "duplicate_txid_ban_failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(ban_err)},
+                )
+
             await message.reply_text(
                 "❌ <b>FRAUD DETECTED</b>\n\n"
-                "This Transaction ID has already been used. Your account has been permanently banned from using the bot.",
-                parse_mode=ParseMode.HTML
+                "This Transaction ID has already been used. "
+                "Your account has been permanently banned.",
+                parse_mode=ParseMode.HTML,
             )
             return
-            
-        await message.reply_text("✅ TXID received. Now please send a screenshot of the payment proof.")
-        
+
+        sent_msg = await message.reply_text(
+            "✅ TXID received. Now please send a screenshot of the payment proof."
+        )
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(
+                user_id, sent_msg.id, "", category="payment"
+            )
+        except Exception:
+            pass
+
+    # ── Screenshot collection ──────────────────────────────────────────────────
     elif session.status == PaymentStatus.WAITING_SCREENSHOT:
         if not (message.photo or message.document):
             await message.reply_text("Please send a photo or document as proof.")
             return
-        
-        file_id = message.photo.file_id if message.photo else message.document.file_id
-        session.txid = session.txid or message.text
-        await service.update_status(session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id)
-        
-        text = build_proof_received_card(session.id)
-        
-        await message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML
+
+        file_id = (
+            message.photo.file_id
+            if message.photo
+            else message.document.file_id
         )
-        
-        # Notify Admins
-        await _notify_admins_of_submission(client, session, session.txid or "", file_id)
+
+        await service.update_status(
+            session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id
+        )
+
+        text = build_proof_received_card(session.id)
+        sent_msg = await message.reply_text(text, parse_mode=ParseMode.HTML)
+
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(
+                user_id, sent_msg.id, text, category="payment"
+            )
+        except Exception:
+            pass
+
+        # Notify admins with screenshot
+        await _notify_admins_of_submission(
+            client, session, session.txid or "", file_id
+        )
 
 
-async def _notify_admins_of_request(client: Client, session: PaymentSession, method: str) -> None:
-    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
-    topic_manager = get_topic_manager()
-    
-    try:
-        topic_id = await topic_manager.get_or_create_user_topic(client, session.user_id, TOPIC_PAYMENT)
-    except Exception as e:
-        logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
-        topic_id = None
-
-    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_request_actions
-    
-    # Get user object for better card details
-    user = await client.get_users(session.user_id)
-    plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
-    
-    text = build_admin_payment_review_card(user, session, plan)
-    reply_markup = build_admin_payment_request_actions(session.id, session.user_id)
-    
-    await client.send_message(
-        chat_id=settings.VERIFICATION_GROUP_ID,
-        text=text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML,
-        message_thread_id=topic_id
-    )
-
+# ── Admin: send payment details ───────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:send:(?P<sid>.+)$"))
 async def handle_admin_send_details(client: Client, callback: CallbackQuery) -> None:
     session_id = callback.matches[0].group("sid")
     admin_id = callback.from_user.id
-    
+
     if not is_support_admin(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
-        
+
     service = get_payment_service()
     updated = await service.update_status(session_id, PaymentStatus.PENDING_DETAILS)
-    
+
     if not updated:
-        await callback.answer("Could not update session. Already handled?", show_alert=True)
+        await callback.answer(
+            "Could not update session. Already handled?", show_alert=True
+        )
         return
 
-    await callback.message.edit_text(
-        callback.message.text + "\n\n⏳ <b>Waiting for Admin Input</b>\n"
-        f"Please <b>Reply</b> to this message with the payment instructions (bKash number, QR code, etc.).",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Cancel Send", callback_data=f"pay:admin:cancel_send:{session_id}")]
-        ]),
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await callback.message.edit_text(
+            (callback.message.text or "") + "\n\n⏳ <b>Waiting for Admin Input</b>\n"
+            "Please <b>Reply</b> to this message with the payment instructions "
+            "(bKash number, QR code, etc.).",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "❌ Cancel Send",
+                            callback_data=f"pay:admin:cancel_send:{session_id}",
+                        )
+                    ]
+                ]
+            ),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
     await callback.answer("Ready to receive payment details.")
 
 
@@ -278,187 +349,293 @@ async def handle_admin_send_details(client: Client, callback: CallbackQuery) -> 
 async def handle_admin_cancel_send(client: Client, callback: CallbackQuery) -> None:
     session_id = callback.matches[0].group("sid")
     admin_id = callback.from_user.id
-    
+
     if not is_support_admin(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
-        
+
     service = get_payment_service()
-    # Revert back to REQUESTED
     updated = await service.update_status(session_id, PaymentStatus.REQUESTED)
-    
+
     if not updated:
         await callback.answer("Could not revert session.", show_alert=True)
         return
 
-    # Restore original markup
+    original_text = (callback.message.text or "").split("\n\n⏳")[0]
     buttons = [
         [
-            InlineKeyboardButton("📩 Send Payment Details", callback_data=f"pay:admin:send:{session_id}"),
-            InlineKeyboardButton("❌ Reject Request", callback_data=f"pay:admin:rej_req:{session_id}")
+            InlineKeyboardButton(
+                "📩 Send Payment Details",
+                callback_data=f"pay:admin:send:{session_id}",
+            ),
+            InlineKeyboardButton(
+                "❌ Reject Request",
+                callback_data=f"pay:admin:rej_req:{session_id}",
+            ),
         ]
     ]
-    # Remove the "Waiting for admin input" text
-    original_text = callback.message.text.split("\n\n⏳")[0]
-    await callback.message.edit_text(
-        original_text,
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode=ParseMode.HTML
-    )
+    try:
+        await callback.message.edit_text(
+            original_text,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
+
     await callback.answer("Cancelled sending details.")
 
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:rej_req:(?P<sid>.+)$"))
-async def handle_admin_reject_request(client: Client, callback: CallbackQuery) -> None:
+async def handle_admin_reject_request(
+    client: Client, callback: CallbackQuery
+) -> None:
     session_id = callback.matches[0].group("sid")
     admin_id = callback.from_user.id
-    
+
     if not is_support_admin(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
-        
+
     service = get_payment_service()
-    success = await service.reject_payment(session_id, "Payment request rejected by admin", admin_id)
-    
+    success = await service.reject_payment(
+        session_id, "Payment request rejected by admin", admin_id
+    )
+
     if success:
         session = await service.get_session(session_id)
-        await callback.message.edit_text(
-            callback.message.text + f"\n\n❌ Request Rejected by {callback.from_user.first_name}",
-            reply_markup=None
-        )
         try:
-            await client.send_message(
-                session.user_id,
-                "❌ <b>Your payment request was rejected.</b>\n\n"
-                "Please try again or contact support.",
-                parse_mode=ParseMode.HTML
+            await callback.message.edit_text(
+                (callback.message.text or "")
+                + f"\n\n❌ Request Rejected by {callback.from_user.first_name}",
+                reply_markup=None,
             )
         except Exception:
             pass
+        if session:
+            try:
+                await client.send_message(
+                    session.user_id,
+                    "❌ <b>Your payment request was rejected.</b>\n\n"
+                    "Please try again or contact support.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
         await callback.answer("Request rejected.")
     else:
         await callback.answer("Could not reject request.", show_alert=True)
 
 
-async def _notify_admins_of_submission(client: Client, session: PaymentSession, txid: str, file_id: str) -> None:
-    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
-    topic_manager = get_topic_manager()
-    
-    try:
-        topic_id = await topic_manager.get_or_create_user_topic(client, session.user_id, TOPIC_PAYMENT)
-    except Exception as e:
-        logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
-        topic_id = None
+# ── Admin: approve / reject decision ──────────────────────────────────────────
 
-    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
-    
-    # Get user object for better card details
-    user = await client.get_users(session.user_id)
-    plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
-    
-    text = build_admin_payment_review_card(user, session, plan)
-    reply_markup = build_admin_payment_actions(session.id, session.user_id)
-    
-    try:
-        await client.send_photo(
-            chat_id=settings.VERIFICATION_GROUP_ID,
-            photo=file_id,
-            caption=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML,
-            message_thread_id=topic_id
-        )
-    except Exception as e:
-        logger.warning("Failed to send photo for submission notification, falling back to text", extra={"ctx_error": str(e)})
-        # Fallback to text message if photo fails (e.g. invalid file_id or it was a document)
-        await client.send_message(
-            chat_id=settings.VERIFICATION_GROUP_ID,
-            text=f"{text}\n\n⚠️ <i>Screenshot could not be loaded directly. File ID: <code>{file_id}</code></i>",
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML,
-            message_thread_id=topic_id
-        )
-
-
-@Client.on_callback_query(filters.regex(r"^pay:admin:(?P<action>approve|reject):(?P<sid>.+)$"))
+@Client.on_callback_query(
+    filters.regex(r"^pay:admin:(?P<action>approve|reject):(?P<sid>.+)$")
+)
 async def handle_admin_decision(client: Client, callback: CallbackQuery) -> None:
     action = callback.matches[0].group("action")
     session_id = callback.matches[0].group("sid")
     admin_id = callback.from_user.id
-    
+
     if not is_support_admin(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
-        
+
     service = get_payment_service()
-    from app.ui.admin_cards import build_admin_rejection_reasons
-    
+
     if action == "approve":
         success = await service.approve_payment(client, session_id, admin_id)
         if success:
-            await callback.message.edit_caption(
-                callback.message.caption + f"\n\n✅ Approved by {callback.from_user.first_name}",
-                reply_markup=None
-            )
+            # FIX GAP 4: use edit_text not edit_caption (card was sent as text)
+            try:
+                await callback.message.edit_text(
+                    (callback.message.text or "")
+                    + f"\n\n✅ Approved by {callback.from_user.first_name}",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
             await callback.answer("Payment approved.")
         else:
-            await callback.answer("Could not process. Already handled?", show_alert=True)
-            
+            await callback.answer(
+                "Could not process. Already handled?", show_alert=True
+            )
+
     elif action == "reject":
-        # Show rejection reasons
+        from app.ui.admin_cards import build_admin_rejection_reasons
         reply_markup = build_admin_rejection_reasons(session_id)
-        await callback.message.edit_reply_markup(reply_markup)
+        try:
+            await callback.message.edit_reply_markup(reply_markup)
+        except Exception:
+            pass
         await callback.answer()
+
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:back:(?P<sid>.+)$"))
 async def handle_admin_back_to_main(client: Client, callback: CallbackQuery) -> None:
     session_id = callback.matches[0].group("sid")
     from app.ui.admin_cards import build_admin_payment_actions
-    
+
     service = get_payment_service()
     session = await service.get_session(session_id)
     if not session:
         await callback.answer("Session no longer exists.")
         return
-        
-    await callback.message.edit_reply_markup(build_admin_payment_actions(session.id, session.user_id))
+
+    try:
+        await callback.message.edit_reply_markup(
+            build_admin_payment_actions(session.id, session.user_id)
+        )
+    except Exception:
+        pass
     await callback.answer()
 
-@Client.on_callback_query(filters.regex(r"^pay:admin:rej_rsn:(?P<reason>\w+):(?P<sid>.+)$"))
+
+@Client.on_callback_query(
+    filters.regex(r"^pay:admin:rej_rsn:(?P<reason>\w+):(?P<sid>.+)$")
+)
 async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> None:
     reason_code = callback.matches[0].group("reason")
     session_id = callback.matches[0].group("sid")
     admin_id = callback.from_user.id
-    
+
     reason_text = {
         "txid": "Invalid Transaction ID",
         "amount": "Incorrect Payment Amount",
         "dup": "Duplicate Transaction Reference",
-        "unclear": "Payment Screenshot is Unclear"
+        "unclear": "Payment Screenshot is Unclear",
     }.get(reason_code, "Payment rejected")
-    
+
     service = get_payment_service()
     success = await service.reject_payment(session_id, reason_text, admin_id)
-    
+
     if success:
         session = await service.get_session(session_id)
-        await callback.message.edit_caption(
-            callback.message.caption + f"\n\n❌ Rejected: {reason_text}",
-            reply_markup=None
-        )
-        
-        # Notify User with new UI
         try:
-            text, reply_markup = build_payment_rejected_card(reason_text, session_id)
-            await client.send_message(
-                session.user_id,
-                text,
-                reply_markup=reply_markup,
-                parse_mode=ParseMode.HTML
+            # FIX: Use edit_text (card was text not photo initially)
+            await callback.message.edit_text(
+                (callback.message.text or "")
+                + f"\n\n❌ Rejected: {reason_text}",
+                reply_markup=None,
             )
-        except Exception as e:
-            logger.warning("Could not notify user of rejection", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
-            
+        except Exception:
+            try:
+                await callback.message.edit_caption(
+                    (callback.message.caption or "")
+                    + f"\n\n❌ Rejected: {reason_text}",
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
+
+        if session:
+            try:
+                text, reply_markup = build_payment_rejected_card(
+                    reason_text, session_id
+                )
+                await client.send_message(
+                    session.user_id,
+                    text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as e:
+                logger.warning(
+                    "rejection_notify_user_failed",
+                    extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+                )
+
         await callback.answer("Payment rejected.")
     else:
         await callback.answer("Error processing rejection.", show_alert=True)
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+async def _notify_admins_of_request(
+    client: Client, session, method: str
+) -> None:
+    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
+
+    topic_manager = get_topic_manager()
+    topic_id = None
+    try:
+        topic_id = await topic_manager.get_or_create_user_topic(
+            client, session.user_id, TOPIC_PAYMENT
+        )
+    except Exception as e:
+        logger.error(
+            "notify_admins_request_topic_failed",
+            extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+        )
+
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
+
+    try:
+        user = await client.get_users(session.user_id)
+        plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
+        text = build_admin_payment_review_card(user, session, plan)
+        reply_markup = build_admin_payment_actions(session.id, session.user_id)
+
+        await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+            message_thread_id=topic_id,
+        )
+    except Exception as e:
+        logger.error(
+            "notify_admins_request_failed",
+            extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+        )
+
+
+async def _notify_admins_of_submission(
+    client: Client, session, txid: str, file_id: str
+) -> None:
+    from app.services.topic_manager import get_topic_manager, TOPIC_PAYMENT
+
+    topic_manager = get_topic_manager()
+    topic_id = None
+    try:
+        topic_id = await topic_manager.get_or_create_user_topic(
+            client, session.user_id, TOPIC_PAYMENT
+        )
+    except Exception as e:
+        logger.error(
+            "notify_admins_submission_topic_failed",
+            extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+        )
+
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
+
+    try:
+        user = await client.get_users(session.user_id)
+        plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
+        text = build_admin_payment_review_card(user, session, plan)
+        reply_markup = build_admin_payment_actions(session.id, session.user_id)
+
+        try:
+            await client.send_photo(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                photo=file_id,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=topic_id,
+            )
+        except Exception:
+            # Screenshot may be a document, not a photo
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=f"{text}\n\n📎 <i>Screenshot file_id: <code>{file_id[:30]}...</code></i>",
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML,
+                message_thread_id=topic_id,
+            )
+    except Exception as e:
+        logger.error(
+            "notify_admins_submission_failed",
+            extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+        )

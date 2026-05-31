@@ -63,9 +63,6 @@ class Settings(BaseSettings):
     PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
     # ── Access Control ────────────────────────────────────────────────────────
-    # FIX 7: OWNER_ID is now required (ellipsis = no default). If the env var
-    # is missing, pydantic-settings will raise a ValidationError at startup
-    # with a clear message instead of silently defaulting to 0.
     OWNER_ID: int = Field(..., description="Telegram user_id of the bot owner. Required.")
     ADMIN_IDS: List[int] = Field(default_factory=list)
     SUDO_IDS: List[int] = Field(default_factory=list)
@@ -119,7 +116,7 @@ class Settings(BaseSettings):
     PROCESSED_MEDIA_DIR: str = "./processed"
     WATERMARK_CACHE_DIR: str = "./watermark_cache"
     FFMPEG_TIMEOUT: float = 120.0
-    
+
     # ── Watermark toggle ─────────────────────────────────────────────────────
     WATERMARK_ENABLED: bool = False  # Set True only when logo assets exist
 
@@ -131,8 +128,11 @@ class Settings(BaseSettings):
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
     WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
-    WATERMARK_ROTATION: int = 0
+    # FIX: WATERMARK_POSITION was referenced in moderation_actions.py but missing here.
+    # Added with safe default. Valid values match WatermarkPosition enum:
+    # BOTTOM_RIGHT | BOTTOM_LEFT | TOP_RIGHT | TOP_LEFT | CENTER
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
+    WATERMARK_ROTATION: int = 0
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15
 
@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     # ── Invite security ───────────────────────────────────────────────────────
     INVITE_EXPIRY_MINUTES: int = 30
 
-    # ── Daily distribution caps (FIX 14) ─────────────────────────────────────
+    # ── Daily distribution caps ───────────────────────────────────────────────
     DAILY_CAP_NSFW: int = 75
     DAILY_CAP_PREMIUM: int = 140
 
