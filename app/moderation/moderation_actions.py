@@ -79,7 +79,7 @@ def _get_watermark_config(dest: str) -> Optional[dict]:
     return {
         "watermark_image_path": logo_path,
         "watermark_text": text,
-        "position": settings.WATERMARK_POSITION,
+        "position": random.choice(["TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT", "CENTER"]),
         "opacity": settings.WATERMARK_OPACITY,
         "scale": settings.WATERMARK_SCALE,
         "destination": dest,

@@ -43,6 +43,9 @@ from pyrogram.errors import FloodWait
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 from app.core.database import DatabaseManager
 
 CHUNK_SIZE = 100        # messages per GetHistory request
@@ -51,22 +54,22 @@ FLOOD_PAD  = 2          # extra seconds added to FloodWait sleep
 
 
 async def main() -> None:
-    print("=" * 60)
-    print("  Vault Message ID Backfill Tool")
-    print("=" * 60)
-    print(f"  Vault Channel : {settings.VAULT_CHANNEL_ID}")
-    print(f"  MongoDB       : {settings.MONGO_URI.split('@')[-1]}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info("  Vault Message ID Backfill Tool")
+    logger.info("=" * 60)
+    logger.info(f"  Vault Channel : {settings.VAULT_CHANNEL_ID}")
+    logger.info(f"  MongoDB       : {settings.MONGO_URI.split('@')[-1]}")
+    logger.info("=" * 60)
 
     if not settings.VAULT_CHANNEL_ID:
-        print("\n❌ VAULT_CHANNEL_ID is not set in your environment. Aborting.")
+        logger.info("\n❌ VAULT_CHANNEL_ID is not set in your environment. Aborting.")
         return
 
-    print("\nConnecting to MongoDB...")
+    logger.info("\nConnecting to MongoDB...")
     await DatabaseManager.connect()
     db = DatabaseManager.get_db()
     vault_collection = db[settings.VAULT_COLLECTION]
-    print("MongoDB connected.\n")
+    logger.info("MongoDB connected.\n")
 
     client = Client(
         name="backfill_user",
@@ -74,26 +77,26 @@ async def main() -> None:
         api_hash=settings.API_HASH,
     )
 
-    print("Starting Pyrogram user client...")
-    print("You may be prompted for your phone number and OTP on first run.\n")
+    logger.info("Starting Pyrogram user client...")
+    logger.info("You may be prompted for your phone number and OTP on first run.\n")
     await client.start()
     me = await client.get_me()
-    print(f"Logged in as: {me.first_name} (@{me.username} id={me.id})\n")
+    logger.info(f"Logged in as: {me.first_name} (@{me.username} id={me.id})\n")
 
     try:
         vault_chat_id = int(settings.VAULT_CHANNEL_ID)
         chat = await client.get_chat(vault_chat_id)
-        print(f"Successfully accessed vault channel: '{chat.title}'\n")
+        logger.info(f"Successfully accessed vault channel: '{chat.title}'\n")
     except Exception as e:
-        print(f"\n❌ Could not access VAULT_CHANNEL_ID ({settings.VAULT_CHANNEL_ID}).")
-        print(f"   Error: {e}")
-        print("   Ensure the logged-in user is a member of the channel.")
+        logger.info(f"\n❌ Could not access VAULT_CHANNEL_ID ({settings.VAULT_CHANNEL_ID}).")
+        logger.info(f"   Error: {e}")
+        logger.info("   Ensure the logged-in user is a member of the channel.")
         await client.stop()
         await DatabaseManager.disconnect()
         return
 
-    print("Starting backfill process. This may take a while for large channels...")
-    print("FloodWait errors will be handled automatically — do not interrupt.\n")
+    logger.info("Starting backfill process. This may take a while for large channels...")
+    logger.info("FloodWait errors will be handled automatically — do not interrupt.\n")
 
     operations    = []
     processed     = 0
@@ -115,7 +118,7 @@ async def main() -> None:
                     chunk.append(msg)
             except FloodWait as e:
                 wait = e.value + FLOOD_PAD
-                print(f"  [FloodWait] Sleeping {wait}s — will resume from same offset...")
+                logger.info(f"  [FloodWait] Sleeping {wait}s — will resume from same offset...")
                 await asyncio.sleep(wait)
                 chunk = []
                 retrying = True
@@ -127,7 +130,7 @@ async def main() -> None:
         for message in chunk:
             processed += 1
             if processed % 500 == 0:
-                print(f"  ...scanned {processed} messages, found {updated} matches...")
+                logger.info(f"  ...scanned {processed} messages, found {updated} matches...")
 
             media = None
             if message.media:
@@ -168,11 +171,11 @@ async def main() -> None:
         except BulkWriteError as bwe:
             updated += bwe.details.get("nModified", 0)
 
-    print("\n" + "=" * 60)
-    print("✅ Backfill Complete.")
-    print(f"  Total messages scanned : {processed}")
-    print(f"  Documents updated      : {updated}")
-    print("=" * 60)
+    logger.info("\n" + "=" * 60)
+    logger.info("✅ Backfill Complete.")
+    logger.info(f"  Total messages scanned : {processed}")
+    logger.info(f"  Documents updated      : {updated}")
+    logger.info("=" * 60)
 
     await client.stop()
     await DatabaseManager.disconnect()

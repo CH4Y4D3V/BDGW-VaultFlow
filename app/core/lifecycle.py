@@ -79,6 +79,13 @@ class AppLifecycle:
             await self._bot.start()
             me = await self._bot.get_me()
             set_bot_id(me.id)
+            
+            from pyrogram.types import BotCommand
+            await self._bot.set_bot_commands([
+                BotCommand("start", "Main Menu"),
+                BotCommand("takedown", "Remove Content"),
+                BotCommand("help", "Support"),
+            ])
 
             try:
                 await self._verify_channel_access()
@@ -225,7 +232,7 @@ class AppLifecycle:
                 raw_scheduler.add_job(
                     cleanup_service.run_cleanup_sweep,
                     "interval",
-                    minutes=5,
+                    minutes=1,
                     id="message_cleanup_sweep",
                     replace_existing=True,
                     coalesce=True

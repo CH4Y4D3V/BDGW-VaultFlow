@@ -3,9 +3,12 @@ import hashlib
 from datetime import datetime, timezone
 from motor.motor_asyncio import AsyncIOMotorClient
 from app.config import settings
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 async def migrate():
-    print("Starting BDGW VaultFlow Schema Migration (v1)...")
+    logger.info("Starting BDGW VaultFlow Schema Migration (v1)...")
     client = AsyncIOMotorClient(settings.MONGO_URI)
     db = client[settings.MONGO_DB_NAME]
     queue = db[settings.QUEUE_COLLECTION]
@@ -16,7 +19,7 @@ async def migrate():
         {"schema_version": {"$exists": False}},
         {"$set": {"schema_version": 1, "migration_version": 0}}
     )
-    print(f"Updated {result.modified_count} jobs to schema_version 1")
+    logger.info(f"Updated {result.modified_count} jobs to schema_version 1")
 
     # 2. Fix content_id and references
     cursor = queue.find({"status": {"$in": ["pending", "watermarking", "ready", "locked", "processing"]}})
@@ -28,7 +31,7 @@ async def migrate():
         source_msg_id = meta.get("source_message_id") or job.get("source_message_id")
         
         if not source_chat_id or not source_msg_id:
-            print(f"Job {job_id} missing source refs. Quarantining.")
+            logger.warning(f"Job {job_id} missing source refs. Quarantining.")
             await queue.update_one({"_id": job_id}, {"$set": {"status": "quarantine", "quarantine_reason": "missing_source_refs"}})
             continue
 
@@ -45,7 +48,7 @@ async def migrate():
                 vault_msg_id = v_doc.get("vault_message_id")
         
         if not vault_msg_id:
-            print(f"Job {job_id} missing vault ref. Quarantining.")
+            logger.warning(f"Job {job_id} missing vault ref. Quarantining.")
             await queue.update_one({"_id": job_id}, {"$set": {"status": "quarantine", "quarantine_reason": "unrecoverable_vault_reference"}})
             continue
 
@@ -62,7 +65,7 @@ async def migrate():
             }
         )
 
-    print("Migration complete.")
+    logger.info("Migration complete.")
 
 if __name__ == "__main__":
     asyncio.run(migrate())

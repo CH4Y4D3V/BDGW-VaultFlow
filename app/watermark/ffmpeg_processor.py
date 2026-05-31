@@ -87,12 +87,20 @@ class FFmpegProcessor:
                     # Recalculate size after rotation if it expanded
                     logo_w, logo_h = logo.size
 
-                # ── SYSTEM 17: FIXED POSITION BOTTOM_RIGHT ──
+                # ── RANDOM POSITION ──
+                import random
                 margin = 20
-                pos = (base.width - logo_w - margin, base.height - logo_h - margin)
+                positions = {
+                    "TOP_LEFT": (margin, margin),
+                    "TOP_RIGHT": (base.width - logo_w - margin, margin),
+                    "BOTTOM_LEFT": (margin, base.height - logo_h - margin),
+                    "BOTTOM_RIGHT": (base.width - logo_w - margin, base.height - logo_h - margin),
+                    "CENTER": ((base.width - logo_w) // 2, (base.height - logo_h) // 2)
+                }
+                pos = positions[random.choice(list(positions.keys()))]
                 
-                # ── SYSTEM 17: FIXED OPACITY 0.8 ──
-                opacity = settings.WATERMARK_OPACITY # 0.8
+                # ── OPACITY 0.9 ──
+                opacity = 0.9
                 # Apply opacity to logo
                 logo_with_opacity = logo.copy()
                 alpha = logo_with_opacity.getchannel('A')
@@ -112,21 +120,52 @@ class FFmpegProcessor:
             return output_path
 
     async def _process_video(self, input_path: str, output_path: str, config: dict) -> str:
-        text = config.get("watermark_text", "BDGW")
+        import random
         
-        # ── SYSTEM 17: FIXED BOTTOM_RIGHT TEXT ──
-        # x=(w-text_w)-20:y=(h-text_h)-20
-        # Opacity 0.8: fontcolor=white@0.8
-        drawtext = (
-            f"drawtext=text='{text}':"
-            f"x=(w-text_w)-20:y=(h-text_h)-20:"
-            f"fontsize=h/20:fontcolor=white@{settings.WATERMARK_OPACITY}:"
+        text1 = config.get("watermark_text", "BDGW")
+        text2 = "VaultFlow" # Secondary text
+
+        # Randomize opacity (0.43 - 0.51)
+        opacity1 = round(random.uniform(0.43, 0.51), 2)
+        opacity2 = round(random.uniform(0.43, 0.51), 2)
+
+        # Randomize start times (0 to 5 seconds)
+        start1 = round(random.uniform(0, 5), 1)
+        start2 = round(random.uniform(0, 5), 1)
+
+        # Randomize positions
+        pos_options = [
+            "x=20:y=20", # TOP_LEFT
+            "x=(w-text_w)-20:y=20", # TOP_RIGHT
+            "x=20:y=(h-text_h)-20", # BOTTOM_LEFT
+            "x=(w-text_w)-20:y=(h-text_h)-20", # BOTTOM_RIGHT
+            "x=(w-text_w)/2:y=(h-text_h)/2" # CENTER
+        ]
+        
+        pos1 = random.choice(pos_options)
+        pos2 = random.choice(pos_options)
+        while pos2 == pos1:
+            pos2 = random.choice(pos_options)
+
+        drawtext1 = (
+            f"drawtext=text='{text1}':"
+            f"{pos1}:"
+            f"enable='between(t,{start1},99999)':"
+            f"fontsize=h/20:fontcolor=white@{opacity1}:"
+            f"shadowcolor=black:shadowx=2:shadowy=2"
+        )
+        
+        drawtext2 = (
+            f"drawtext=text='{text2}':"
+            f"{pos2}:"
+            f"enable='between(t,{start2},99999)':"
+            f"fontsize=h/25:fontcolor=white@{opacity2}:"
             f"shadowcolor=black:shadowx=2:shadowy=2"
         )
 
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
-            "-vf", drawtext,
+            "-vf", f"{drawtext1},{drawtext2}",
             "-c:a", "copy",
             "-preset", "ultrafast",
             output_path
