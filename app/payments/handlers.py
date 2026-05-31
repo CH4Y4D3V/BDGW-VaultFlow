@@ -1,4 +1,3 @@
-# app/payments/handlers.py
 from __future__ import annotations
 
 import asyncio
@@ -260,7 +259,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         except Exception:
             pass
 
-    # ── Screenshot collection ──────────────────────────────────────────────────
+    # ── Screenshot collection ─────────────────────────────────────────────────
     elif session.status == PaymentStatus.WAITING_SCREENSHOT:
         if not (message.photo or message.document):
             await message.reply_text("Please send a photo or document as proof.")
@@ -276,7 +275,9 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id
         )
         if not success:
-            await message.reply_text("❌ Failed to update session status. Please try again or contact support.")
+            await message.reply_text(
+                "❌ Failed to update session status. Please try again or contact support."
+            )
             return
 
         text = build_proof_received_card(session.id)
@@ -418,6 +419,7 @@ async def handle_admin_reject_request(
                 )
             except Exception:
                 pass
+
         await callback.answer("Request rejected.")
     else:
         await callback.answer("Could not reject request.", show_alert=True)

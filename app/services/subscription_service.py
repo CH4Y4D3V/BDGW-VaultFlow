@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -81,12 +82,14 @@ class SubscriptionService:
                 exp = base + timedelta(days=duration_days)
             else:
                 exp = now + timedelta(days=duration_days)
-            
+
             expires_at = exp
             grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
         sub = Subscription(
+            subscription_id=existing.subscription_id if existing else str(_uuid.uuid4()),
             user_id=user_id,
+            package_id=plan.value,
             plan=plan,
             status=SubscriptionStatus.ACTIVE,
             started_at=now,
@@ -94,9 +97,11 @@ class SubscriptionService:
             grace_until=grace_until,
             created_at=existing.created_at if existing else now,
             updated_at=now,
-            notes=notes,
-            granted_by=granted_by,
-            metadata=existing.metadata if existing else {},
+            metadata={
+                **(existing.metadata if existing else {}),
+                "notes": notes,
+                "granted_by": granted_by,
+            },
         )
         await self._repo.upsert(sub)
         logger.info(
@@ -122,7 +127,10 @@ class SubscriptionService:
         sub.plan = Plan.FREE
         sub.updated_at = now
         await self._repo.upsert(sub)
-        logger.info("Subscription revoked", extra={"ctx_user_id": user_id, "ctx_revoked_by": revoked_by})
+        logger.info(
+            "Subscription revoked",
+            extra={"ctx_user_id": user_id, "ctx_revoked_by": revoked_by}
+        )
         return sub
 
     async def set_grace(self, sub: Subscription) -> Subscription:
