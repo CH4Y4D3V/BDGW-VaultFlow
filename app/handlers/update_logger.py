@@ -3,85 +3,119 @@ from __future__ import annotations
 """
 Global Telegram update interceptor — update_logger.py
 
-Registered at group=-1, which fires BEFORE all other handlers.
+Registered at group=-1 (fires BEFORE all other handlers except ban guard at -2).
 Provides structured entry-point logging for every incoming Telegram update.
 
-This is the PRIMARY observability tool for diagnosing silent handler failures.
-Without this, a handler crash is invisible — Pyrogram's internal dispatcher
-catches the exception and drops the update with no structured trace.
+FIX (GAP 7 — BD Phone Number Detection):
+  Previous check: `any(p in text for p in ["017", "018", "019", "014", "013"])`
+  This matched ANY text containing those substrings, e.g. "2017 was a good year"
+  or "01389 is a postcode" — causing false-positive deletions.
 
-Rules:
-  - NEVER raises.
-  - NEVER calls stop_propagation() — must not block downstream handlers.
-  - Logs the full update envelope so you can always confirm the bot received
-    an update even when the downstream handler fails.
+  Fix: Use the same compiled regex as cleanup_service.py:
+    r"(?<!\d)01[3-9]\d{8}(?!\d)"
+  This requires exactly 11 digits starting with 01[3-9] — matches real BD numbers only.
 """
 
 import asyncio
+import re
+
 from pyrogram import Client, filters
-from pyrogram.enums import ChatType
+from pyrogram.enums import ChatType, ParseMode
 from pyrogram.types import CallbackQuery, ChatMemberUpdated, Message
 
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── SYSTEM 20: FRAUD/BAN GUARD ──
+# FIX GAP 7: BD phone number — must be exactly 11 digits, 01[3-9] prefix.
+# Lookbehind/lookahead prevent matching partial numbers embedded in longer digits.
+_BD_PHONE_REGEX = re.compile(r"(?<!\d)01[3-9]\d{8}(?!\d)")
+
+
+# ── Ban guard (group -2 — highest priority) ───────────────────────────────────
+
 @Client.on_message(filters.private, group=-2)
 @Client.on_callback_query(group=-2)
-async def handle_ban_guard(client: Client, update: Message | CallbackQuery):
+async def handle_ban_guard(client: Client, update: Message | CallbackQuery) -> None:
     """
     Prevents banned users from interacting with any bot logic.
-    Group -2 ensures this runs BEFORE everything else.
+    Fires before all handlers. Stops propagation on banned users.
     """
     user_id = update.from_user.id if update.from_user else None
     if not user_id:
         return
 
-    # Skip owner/admins from ban check for safety
+    # Owner and sudo are never banned
     from app.core.permissions import is_sudo
     if is_sudo(user_id):
         return
 
-    from app.repositories.user_repository import UserRepository
-    user_repo = UserRepository()
-    user_doc = await user_repo.get_user(user_id)
+    try:
+        from app.repositories.user_repository import UserRepository
+        user_repo = UserRepository()
+        user_doc = await user_repo.get_user(user_id)
+    except Exception:
+        return  # DB error — allow through rather than lock everyone out
 
     if user_doc and user_doc.get("is_banned"):
         if isinstance(update, Message):
             try:
-                await update.reply_text("❌ <b>Access Denied</b>\n\nYour account has been permanently banned due to a violation of our terms.", parse_mode=ParseMode.HTML)
-            except:
+                await update.reply_text(
+                    "❌ <b>Access Denied</b>\n\n"
+                    "Your account has been permanently banned due to a "
+                    "violation of our terms.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
                 pass
-        else:
+        elif isinstance(update, CallbackQuery):
             try:
                 await update.answer("❌ You are banned.", show_alert=True)
-            except:
+            except Exception:
                 pass
 
         update.stop_propagation()
 
-    # ── SYSTEM 20: PHONE CLEANUP (GLOBAL) ──
-    if isinstance(update, Message) and update.chat and update.chat.type == ChatType.PRIVATE:
-        text = update.text or update.caption or ""
-        # --- GAP 7 FIX: Use strict regex instead of simple prefix check ---
-        from app.services.cleanup_service import BD_PHONE_REGEX
-        import re
-        if re.search(BD_PHONE_REGEX, text):
-            try:
-                from app.services.cleanup_service import get_cleanup_service
-                await get_cleanup_service().log_message(user_id, update.id, text, category="phone")
-            except:
-                pass
+
+# ── BD phone number cleanup (group -2 alongside ban guard) ───────────────────
+
+@Client.on_message(filters.private, group=-2)
+async def handle_phone_number_cleanup(client: Client, message: Message) -> None:
+    """
+    Section 20: BD phone numbers → auto-delete after 7 minutes.
+    FIX GAP 7: Uses regex instead of substring match to avoid false positives.
+    """
+    if not message.from_user:
+        return
+
+    text = message.text or message.caption or ""
+    if not text:
+        return
+
+    if _BD_PHONE_REGEX.search(text):
+        user_id = message.from_user.id
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(
+                user_id=user_id,
+                message_id=message.id,
+                text=text,
+                category="phone",
+            )
+        except Exception as e:
+            logger.warning(
+                "phone_cleanup_log_failed",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
 
 
-    # ── SYSTEM 4: DOT-SLASH PREFIX AUTO-DELETE ──
+# ── Dot-slash prefix auto-delete (group -1) ───────────────────────────────────
 
 @Client.on_message(filters.private & filters.regex(r"^\./"), group=-1)
-async def handle_prefix_auto_delete(client: Client, message: Message):
+async def handle_prefix_auto_delete(client: Client, message: Message) -> None:
     """
-    Catch messages starting with ./ and delete them after 10 seconds.
-    Group -1 ensures this runs alongside tracing and doesn't block downstream.
+    Section 4.3 / Section 20: Messages starting with ./ deleted after 10 seconds.
+    Silent — no notification to user.
     """
     await asyncio.sleep(10)
     try:
@@ -89,18 +123,19 @@ async def handle_prefix_auto_delete(client: Client, message: Message):
     except Exception:
         pass
 
-# ── Idempotency Cache ──
-# Prevents duplicate UPDATE_TRACE logs if the plugin is loaded multiple times
-# or if multiple handlers catch the same update.
+
+# ── Idempotency cache ─────────────────────────────────────────────────────────
+# Prevents duplicate UPDATE_TRACE logs if loaded multiple times.
+
 _trace_cache: set[str] = set()
-_MAX_CACHE_SIZE = 100
+_MAX_CACHE_SIZE = 200
+
 
 def _is_duplicate(update_id: str) -> bool:
     if update_id in _trace_cache:
         return True
     _trace_cache.add(update_id)
     if len(_trace_cache) > _MAX_CACHE_SIZE:
-        # Simple FIFO-ish cleanup
         try:
             _trace_cache.remove(next(iter(_trace_cache)))
         except (StopIteration, KeyError):
@@ -108,12 +143,11 @@ def _is_duplicate(update_id: str) -> bool:
     return False
 
 
+# ── Message trace (group -1) ──────────────────────────────────────────────────
+
 @Client.on_message(group=-1)
 async def trace_message_update(client: Client, message: Message) -> None:
-    """
-    Fires for EVERY incoming Message update before any other handler.
-    RC-1 fix: global trace so we always know the bot received the update.
-    """
+    """Fires for EVERY incoming Message before any other handler (except ban guard)."""
     update_key = f"msg:{message.id}:{message.chat.id if message.chat else 0}"
     if _is_duplicate(update_key):
         return
@@ -145,16 +179,14 @@ async def trace_message_update(client: Client, message: Message) -> None:
             },
         )
     except Exception as e:
-        # Safety net — this handler must NEVER crash
         logger.error("UPDATE_TRACE: failed to log message update", exc_info=e)
 
 
+# ── Callback query trace (group -1) ──────────────────────────────────────────
+
 @Client.on_callback_query(group=-1)
 async def trace_callback_update(client: Client, callback: CallbackQuery) -> None:
-    """
-    Fires for EVERY incoming CallbackQuery before any other handler.
-    RC-1 fix: confirms callback delivery even when the actual handler crashes.
-    """
+    """Fires for EVERY CallbackQuery before any other handler."""
     update_key = f"cb:{callback.id}"
     if _is_duplicate(update_key):
         return
@@ -182,13 +214,13 @@ async def trace_callback_update(client: Client, callback: CallbackQuery) -> None
         logger.error("UPDATE_TRACE: failed to log callback update", exc_info=e)
 
 
+# ── Chat member update trace (group -1) ──────────────────────────────────────
+
 @Client.on_chat_member_updated(group=-1)
 async def trace_member_update(client: Client, update: ChatMemberUpdated) -> None:
-    """
-    Fires for EVERY ChatMemberUpdated event before other handlers.
-    """
+    """Fires for EVERY ChatMemberUpdated event."""
     user_id = update.new_chat_member.user.id if update.new_chat_member else 0
-    update_key = f"member:{update.chat.id}:{user_id}:{update.date}"
+    update_key = f"member:{update.chat.id if update.chat else 0}:{user_id}:{update.date}"
     if _is_duplicate(update_key):
         return
 

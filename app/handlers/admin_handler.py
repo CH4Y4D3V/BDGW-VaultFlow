@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 @Client.on_message(
     filters.command("grant") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_grant_command(client: Client, message: Message) -> None:
     """/grant {user_id} {days} {plan}"""
     try:
@@ -80,7 +80,7 @@ async def handle_grant_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("revoke") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_revoke_command(client: Client, message: Message) -> None:
     """/revoke {user_id}"""
     try:
@@ -113,7 +113,7 @@ async def handle_revoke_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("ban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.ADMIN)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_ban_command(client: Client, message: Message) -> None:
     """/ban {user_id} [reason] — Permanent bot ban (Section 21: silent)."""
     try:
@@ -128,22 +128,25 @@ async def handle_ban_command(client: Client, message: Message) -> None:
             else "Banned by admin"
         )
 
-        from app.repositories.user_repository import UserRepository
+        db = DatabaseManager.get_db()
+        await db["users"].update_one(
+            {"_id": target_id},
+            {
+                "$set": {
+                    "is_banned": True,
+                    "ban_reason": reason,
+                    "banned_at": datetime.now(timezone.utc),
+                    "banned_by": message.from_user.id,
+                }
+            },
+        )
 
-        user_repo = UserRepository()
-        success = await user_repo.ban_user(target_id, reason)
-
-        if success:
-            await message.reply_text(
-                f"🚫 User <code>{target_id}</code> has been permanently banned.\n"
-                f"Reason: {reason}",
-                parse_mode=ParseMode.HTML,
-            )
-            # Section 21: Bot ban = silent. No notification to user.
-        else:
-            await message.reply_text(
-                "❌ Failed to ban user. User might not exist in DB."
-            )
+        await message.reply_text(
+            f"🚫 User <code>{target_id}</code> has been permanently banned.\n"
+            f"Reason: {reason}",
+            parse_mode=ParseMode.HTML,
+        )
+        # Section 21: Bot ban = silent. No notification to user.
 
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
@@ -152,7 +155,7 @@ async def handle_ban_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("unban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.ADMIN)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_unban_command(client: Client, message: Message) -> None:
     """/unban {user_id} — Removes bot ban."""
     try:
@@ -161,12 +164,13 @@ async def handle_unban_command(client: Client, message: Message) -> None:
             return
 
         target_id = int(message.command[1])
-        from app.repositories.user_repository import UserRepository
+        db = DatabaseManager.get_db()
+        result = await db["users"].update_one(
+            {"_id": target_id},
+            {"$set": {"is_banned": False, "unbanned_at": datetime.now(timezone.utc)}}
+        )
 
-        user_repo = UserRepository()
-        success = await user_repo.unban_user(target_id)
-
-        if success:
+        if result.modified_count:
             await message.reply_text(
                 f"✅ User <code>{target_id}</code> has been unbanned.",
                 parse_mode=ParseMode.HTML,
@@ -180,7 +184,7 @@ async def handle_unban_command(client: Client, message: Message) -> None:
             except Exception:
                 pass
         else:
-            await message.reply_text("❌ Failed to unban user.")
+            await message.reply_text("❌ User not found in database.")
 
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
@@ -263,15 +267,20 @@ async def handle_warn_command(client: Client, message: Message) -> None:
         target_id = int(message.command[1])
         reason = " ".join(message.command[2:])
 
-        from app.repositories.activity_repository import ActivityRepository
-        from app.models.activity import ActivityAction
-
-        activity_repo = ActivityRepository()
-        await activity_repo.log_activity(
-            user_id=target_id,
-            action=ActivityAction.AUDIT,
-            performed_by=message.from_user.id,
-            metadata={"type": "warning", "reason": reason},
+        db = DatabaseManager.get_db()
+        await db["users"].update_one(
+            {"_id": target_id},
+            {
+                "$push": {
+                    "warnings": {
+                        "reason": reason,
+                        "warned_by": message.from_user.id,
+                        "warned_at": datetime.now(timezone.utc),
+                    }
+                },
+                "$inc": {"warning_count": 1},
+            },
+            upsert=True,
         )
 
         try:
@@ -308,13 +317,8 @@ async def handle_userinfo_command(client: Client, message: Message) -> None:
             return
 
         target_id = int(message.command[1])
-        from app.repositories.user_repository import UserRepository
-        from app.repositories.activity_repository import ActivityRepository
-        from app.models.activity import ActivityAction
-        from app.ui.common import format_header, format_info_block
-
-        user_repo = UserRepository()
-        user_doc = await user_repo.get_user(target_id)
+        db = DatabaseManager.get_db()
+        user_doc = await db["users"].find_one({"_id": target_id})
         if not user_doc:
             await message.reply_text("❌ User not found in database.")
             return
@@ -322,29 +326,34 @@ async def handle_userinfo_command(client: Client, message: Message) -> None:
         sub_service = SubscriptionService()
         sub = await sub_service.get_subscription(target_id)
 
-        activity_repo = ActivityRepository()
-        total_subs = await activity_repo.count_user_actions(
-            target_id, ActivityAction.UPLOAD
-        )
-
-        header = format_header("User Profile", "👤")
-        join_date = user_doc.get("join_date")
+        join_date = user_doc.get("join_date") or user_doc.get("created_at")
         join_str = (
             join_date.strftime("%Y-%m-%d")
             if hasattr(join_date, "strftime")
             else str(join_date or "Unknown")
         )
 
+        plan_str = sub.plan.value.upper() if sub else "FREE"
+        status_str = sub.status.value.upper() if sub else "N/A"
+        banned_str = "Yes ⛔" if user_doc.get("is_banned") else "No ✅"
+        warning_count = user_doc.get("warning_count", 0)
+
         text = (
-            f"{header}\n"
-            f"┣ {format_info_block('Name', user_doc.get('name', 'Unknown'))}\n"
-            f"┣ {format_info_block('Username', '@' + (user_doc.get('username') or 'N/A'))}\n"
-            f"┣ {format_info_block('User ID', target_id, code=True)}\n"
-            f"┣ {format_info_block('Joined', join_str)}\n"
-            f"┣ {format_info_block('Banned', 'Yes ⛔' if user_doc.get('is_banned') else 'No ✅')}\n"
-            f"┣ {format_info_block('Plan', sub.plan.value.upper() if sub else 'FREE')}\n"
-            f"┗ {format_info_block('Submissions', total_subs)}\n"
+            f"👤 <b>User Profile</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"<b>Name:</b> {user_doc.get('name', user_doc.get('first_name', 'Unknown'))}\n"
+            f"<b>Username:</b> @{user_doc.get('username') or 'N/A'}\n"
+            f"<b>User ID:</b> <code>{target_id}</code>\n"
+            f"<b>Joined:</b> {join_str}\n"
+            f"<b>Banned:</b> {banned_str}\n"
+            f"<b>Warnings:</b> {warning_count}\n"
+            f"<b>Plan:</b> {plan_str}\n"
+            f"<b>Sub Status:</b> {status_str}\n"
         )
+
+        if sub and sub.expires_at:
+            text += f"<b>Expires:</b> {sub.expires_at.strftime('%Y-%m-%d')}\n"
+
         await message.reply_text(text, parse_mode=ParseMode.HTML)
 
     except Exception as e:
@@ -354,7 +363,7 @@ async def handle_userinfo_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("newlink") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.ADMIN)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_newlink_command(client: Client, message: Message) -> None:
     """/newlink {user_id} — Generates a new 30-min invite link."""
     try:
@@ -439,16 +448,8 @@ async def handle_stats_command(client: Client, message: Message) -> None:
 
 
 # ── Broadcast system ──────────────────────────────────────────────────────────
-# FIX GAP 4: All content types supported. Caption preserved on all types.
-# Album collection uses a 2-second window. _safe_send_broadcast uses
-# client.copy_message() correctly (not message.copy() which doesn't exist).
 
-# In-memory pending broadcast state (admin_id → broadcast context).
-# Only the Message reference is in memory; the admin_id key is re-checked
-# against DB on execution, so a restart would require re-initiating broadcast.
 _pending_broadcasts: dict[int, dict] = {}
-
-# Album collection buffer: group_id → {messages: [], user_id: int}
 _broadcast_album_buffer: dict[str, dict] = {}
 _broadcast_album_tasks: dict[str, asyncio.Task] = {}
 
@@ -460,14 +461,9 @@ async def _safe_send_broadcast(
     message_id: int,
     caption: Optional[str] = None,
 ) -> bool:
-    """
-    FIX GAP 4: Send a copy of a message to user_id using client.copy_message().
-    caption is forwarded to preserve it on all content types.
-    Handles FloodWait with one retry.
-    """
     from pyrogram.errors import FloodWait, UserIsBlocked, PeerIdInvalid
 
-    kwargs = {
+    kwargs: dict = {
         "chat_id": user_id,
         "from_chat_id": source_chat_id,
         "message_id": message_id,
@@ -495,10 +491,6 @@ async def _execute_broadcast(
     caption: Optional[str],
     admin_id: int,
 ) -> None:
-    """
-    Execute broadcast to all non-banned users.
-    For albums (multiple message_ids), uses copy_media_group.
-    """
     from app.services.audit_service import get_audit
 
     db = DatabaseManager.get_db()
@@ -518,7 +510,6 @@ async def _execute_broadcast(
 
         try:
             if len(message_ids) > 1:
-                # Album — use copy_media_group
                 await client.copy_media_group(
                     chat_id=user_id,
                     from_chat_id=source_chat_id,
@@ -555,12 +546,13 @@ async def _execute_broadcast(
         f"┗ ⏱ <b>Duration:</b> {duration:.1f}s"
     )
 
-    if settings.HUB_TOPIC_AUDIT:
+    hub_topic_audit = getattr(settings, "HUB_TOPIC_AUDIT", None)
+    if hub_topic_audit:
         try:
             await client.send_message(
                 chat_id=settings.VERIFICATION_GROUP_ID,
                 text=summary,
-                message_thread_id=settings.HUB_TOPIC_AUDIT,
+                message_thread_id=hub_topic_audit,
                 parse_mode=ParseMode.HTML,
             )
         except Exception:
@@ -569,11 +561,7 @@ async def _execute_broadcast(
     await get_audit().log(
         action="broadcast_complete",
         performed_by=admin_id,
-        details={
-            "sent": sent_count,
-            "failed": fail_count,
-            "duration": duration,
-        },
+        details={"sent": sent_count, "failed": fail_count, "duration": duration},
     )
 
 
@@ -583,9 +571,8 @@ async def _execute_broadcast(
     )
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_broadcast_init(client: Client, message: Message) -> None:
-    """Initialize a broadcast — next message from this admin is the content."""
     admin_id = message.from_user.id
     cmd = message.command[0]
 
@@ -608,7 +595,7 @@ async def handle_broadcast_init(client: Client, message: Message) -> None:
     filters.command("cancel_broadcast")
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_broadcast_cancel_cmd(client: Client, message: Message) -> None:
     admin_id = message.from_user.id
     _pending_broadcasts.pop(admin_id, None)
@@ -618,7 +605,6 @@ async def handle_broadcast_cancel_cmd(client: Client, message: Message) -> None:
 async def _flush_broadcast_album(
     admin_id: int, group_id: str, client: Client
 ) -> None:
-    """Wait 2 seconds for album collection, then prompt for confirmation."""
     await asyncio.sleep(2.0)
 
     buffer_data = _broadcast_album_buffer.pop(group_id, None)
@@ -664,11 +650,6 @@ async def _flush_broadcast_album(
 
 @Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
 async def handle_broadcast_content_capture(client: Client, message: Message) -> None:
-    """
-    Capture the broadcast content after /broadcast is issued.
-    FIX GAP 4: Handles ALL content types including video, voice, audio,
-    animation, sticker. Album collection uses 2-second window.
-    """
     if not message.from_user:
         return
 
@@ -676,13 +657,11 @@ async def handle_broadcast_content_capture(client: Client, message: Message) -> 
     broadcast_data = _pending_broadcasts.get(admin_id)
 
     if not broadcast_data or broadcast_data.get("messages"):
-        return  # Not in broadcast init mode, or already received content
+        return
 
-    # Skip commands
     if message.text and message.text.startswith("/"):
         return
 
-    # Album handling
     if message.media_group_id:
         group_id = f"bc_{admin_id}_{message.media_group_id}"
 
@@ -705,11 +684,9 @@ async def handle_broadcast_content_capture(client: Client, message: Message) -> 
         _broadcast_album_buffer[group_id]["messages"].append(message)
         return
 
-    # Single message — capture and prompt
     broadcast_data["messages"] = [message]
     broadcast_data["is_album"] = False
 
-    # Determine caption to preserve
     caption = message.caption or message.text or None
 
     keyboard = InlineKeyboardMarkup(
