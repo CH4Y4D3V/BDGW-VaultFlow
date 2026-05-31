@@ -1,9 +1,10 @@
+# app/payments/handlers.py
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
 
-from pymongo.errors import DuplicateKeyError  # FIX GAP 3: was missing
+from pymongo.errors import DuplicateKeyError
 from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import (
@@ -67,7 +68,6 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
         sent_msg = await callback.message.edit_text(
             text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
         )
-        # Log for 20-minute cleanup
         try:
             from app.services.cleanup_service import get_cleanup_service
             await get_cleanup_service().log_message(
@@ -154,7 +154,6 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
         parse_mode=ParseMode.HTML,
     )
 
-    # Log for 20-minute cleanup
     try:
         from app.services.cleanup_service import get_cleanup_service
         await get_cleanup_service().log_message(
@@ -168,8 +167,6 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 
 
 # ── Payment proof input handler ───────────────────────────────────────────────
-# Group -10 so it runs before support handler (default group 0)
-# but AFTER ban guard (group -2) and update logger (group -1).
 
 @Client.on_message(filters.private & ~filters.regex(r"^/"), group=-10)
 async def handle_payment_inputs(client: Client, message: Message) -> None:
@@ -179,7 +176,6 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
 
     user_id = message.from_user.id
 
-    # Fast-path: check Redis before hitting MongoDB
     try:
         from app.core.redis_client import get_redis
         redis = get_redis()
@@ -193,7 +189,6 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             "handle_payment_inputs_redis_check_failed",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
-        # Fall through to DB check
 
     service = get_payment_service()
     session = await service.get_active_session(user_id)
@@ -214,7 +209,6 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
 
         txid = message.text.strip()
 
-        # FIX GAP 3: DuplicateKeyError now imported — this catch will work
         try:
             success = await service.update_status(
                 session.id, PaymentStatus.WAITING_SCREENSHOT, txid=txid
@@ -225,18 +219,15 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 )
                 return
         except DuplicateKeyError:
-            # Duplicate TXID — fraud detection path
             logger.warning(
                 "duplicate_txid_detected",
                 extra={"ctx_user_id": user_id, "ctx_txid": txid[:20]},
             )
 
-            # FIX GAP 3: reject_payment handles AWAITING_PAYMENT status directly
             await service.reject_payment(
                 session.id, f"Duplicate TXID rejected: {txid}", 0
             )
 
-            # Ban user for fraud
             try:
                 from app.repositories.user_repository import UserRepository
                 user_repo = UserRepository()
@@ -299,7 +290,6 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         except Exception:
             pass
 
-        # Notify admins with screenshot
         await _notify_admins_of_submission(
             client, session, session.txid or "", file_id
         )
@@ -401,7 +391,6 @@ async def handle_admin_reject_request(
         return
 
     admin_name = callback.from_user.first_name or "Admin"
-    await callback_query.answer(f"❌ Rejecting request... (Admin: {admin_name})", show_alert=True)
 
     service = get_payment_service()
     success = await service.reject_payment(
@@ -411,8 +400,8 @@ async def handle_admin_reject_request(
     if success:
         session = await service.get_session(session_id)
         try:
-            await callback_query.message.edit_text(
-                (callback_query.message.text or "")
+            await callback.message.edit_text(
+                (callback.message.text or "")
                 + f"\n\n❌ Request Rejected by {admin_name}",
                 reply_markup=None,
             )
@@ -431,7 +420,7 @@ async def handle_admin_reject_request(
                 pass
         await callback.answer("Request rejected.")
     else:
-        await callback.answer("Coulck.answer("Could not reject requrt=True)
+        await callback.answer("Could not reject request.", show_alert=True)
 
 
 # ── Admin: approve / reject decision ──────────────────────────────────────────
@@ -453,7 +442,6 @@ async def handle_admin_decision(client: Client, callback: CallbackQuery) -> None
     if action == "approve":
         success = await service.approve_payment(client, session_id, admin_id)
         if success:
-            # FIX GAP 4: use edit_text not edit_caption (card was sent as text)
             try:
                 await callback.message.edit_text(
                     (callback.message.text or "")
@@ -508,21 +496,19 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
 
     reason_text = {
         "txid": "Invalid Transaction ID",
-        "amount": "Incorrectnt": "Incorrect Payment Amount",
+        "amount": "Incorrect Payment Amount",
         "dup": "Duplicate Transaction Reference",
         "unclear": "Payment Screenshot is Unclear",
     }.get(reason_code, "Payment rejected")
 
     admin_name = callback.from_user.first_name or "Admin"
-    await callback.answer(f"❌ Finalizing rejection... (Admin: {admin_name})", show_alert=True)
-    
+
     service = get_payment_service()
     success = await service.reject_payment(session_id, reason_text, admin_id, admin_name)
 
     if success:
         session = await service.get_session(session_id)
         try:
-            # FIX GAP 4: use edit_text (card was text not photo initially)
             await callback.message.edit_text(
                 (callback.message.text or "")
                 + f"\n\n❌ Rejected by {admin_name}\nReason: {reason_text}",
@@ -549,7 +535,7 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.HTML,
                 )
-            excep          except Exception as e:
+            except Exception as e:
                 logger.warning(
                     "rejection_notify_user_failed",
                     extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
@@ -621,14 +607,14 @@ async def _notify_admins_of_submission(
     from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
 
     try:
-        user = await client.get_usr_id)
+        user = await client.get_users(session.user_id)
         plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
         text = build_admin_payment_review_card(user, session, plan)
         reply_markup = build_admin_payment_actions(session.id, session.user_id)
 
         try:
             await client.send_photo(
-                chat_id=settings.VERIFIsettings.VERIFICATION_GROUP_ID,
+                chat_id=settings.VERIFICATION_GROUP_ID,
                 photo=file_id,
                 caption=text,
                 reply_markup=reply_markup,
@@ -636,7 +622,6 @@ async def _notify_admins_of_submission(
                 message_thread_id=topic_id,
             )
         except Exception:
-            # Screenshot may be a document, not a photo
             await client.send_message(
                 chat_id=settings.VERIFICATION_GROUP_ID,
                 text=f"{text}\n\n📎 <i>Screenshot file_id: <code>{file_id[:30]}...</code></i>",
@@ -648,6 +633,4 @@ async def _notify_admins_of_submission(
         logger.error(
             "notify_admins_submission_failed",
             extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
-        )
-n.user_id, "ctx_error": str(e)},
         )
