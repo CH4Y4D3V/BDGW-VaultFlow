@@ -229,14 +229,14 @@ async def _notify_admins_of_request(client: Client, session: PaymentSession, met
         logger.error("Failed to get user payment topic", extra={"ctx_user_id": session.user_id, "ctx_error": str(e)})
         topic_id = None
 
-    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_request_actions
     
     # Get user object for better card details
     user = await client.get_users(session.user_id)
     plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
     
     text = build_admin_payment_review_card(user, session, plan)
-    reply_markup = build_admin_payment_actions(session.id, session.user_id)
+    reply_markup = build_admin_payment_request_actions(session.id, session.user_id)
     
     await client.send_message(
         chat_id=settings.VERIFICATION_GROUP_ID,

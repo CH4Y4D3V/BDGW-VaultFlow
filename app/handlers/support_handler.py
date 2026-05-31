@@ -192,26 +192,7 @@ async def handle_private_message_support(client: Client, message: Message) -> No
     if not message.from_user:
         return
 
-    # Also skip media submissions — those are handled by handle_media_submission
-    # in submission_handler.py. We only want text/non-media messages here.
-    if message.photo or message.video or message.document or message.animation:
-        logger.debug(
-            "handle_private_message_support: skipping media (handled by submission_handler)",
-            extra={"ctx_from_user": message.from_user.id},
-        )
-        return
-
     user_id = message.from_user.id
-
-    # B-08 FIX: Redis-backed fast check
-    from app.core.redis_client import get_redis
-    redis = get_redis()
-    if redis:
-        try:
-            if not await redis.exists(f"support_topic:{user_id}"):
-                return
-        except Exception as e:
-            logger.warning("Redis fast-path failed in handle_private_message_support", extra={"ctx_error": str(e)})
 
     try:
         topic_manager = get_topic_manager()

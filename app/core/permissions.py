@@ -47,6 +47,9 @@ def has_role(user_id: int, role: Role) -> bool:
     return role in get_user_roles(user_id)
 
 
+def is_sudo(user_id: int) -> bool:
+    return user_id == settings.OWNER_ID or user_id in settings.SUDO_IDS
+
 def is_moderator(user_id: int) -> bool:
     return has_role(user_id, Role.MODERATOR)
 

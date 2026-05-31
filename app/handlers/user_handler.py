@@ -277,7 +277,9 @@ async def handle_start(client: Client, message: Message) -> None:
         # F-12: Ensure subscription exists
         sub_service = _get_sub_service()
         existing_sub = await sub_service.get_subscription(user_id)
-        if not existing_sub:
+        is_first_time = existing_sub is None
+        
+        if is_first_time:
             from app.models.subscription import Plan
             await sub_service.grant(
                 user_id=user_id,
@@ -286,6 +288,19 @@ async def handle_start(client: Client, message: Message) -> None:
                 granted_by=0,
                 notes="Auto-registered on /start"
             )
+            
+            # Send the detailed onboarding message
+            onboarding_text = (
+                "👋 <b>Welcome to BD Gone Wild!</b>\n\n"
+                "This bot is your central hub for the community. Here is what you can do:\n"
+                "• 💎 <b>Premium Access</b> — Get exclusive content.\n"
+                "• 📤 <b>Content Submission</b> — Share anonymously.\n"
+                "• 🗑 <b>Takedown Requests</b> — Request content removal.\n"
+                "• 📊 <b>User Status</b> — Check your profile and referrals.\n"
+                "• 🆘 <b>Support</b> — Talk directly to our admins.\n\n"
+                "<i>Please follow our community and submission rules at all times.</i>"
+            )
+            await message.reply_text(onboarding_text, parse_mode=ParseMode.HTML)
 
         # ── Referral Payload Handling ──
         if len(message.command) > 1:

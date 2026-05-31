@@ -68,6 +68,17 @@ def build_admin_payment_review_card(
     
     return f"{header}\n{user_info}\n{sub_info}\n{pay_info}\n{meta_info}\n{time_info}"
 
+def build_admin_payment_request_actions(session_id: str, user_id: int) -> InlineKeyboardMarkup:
+    """Action buttons for initial payment request."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📤 Send Payment Details", callback_data=f"pay:admin:send:{session_id}")
+        ],
+        [
+            InlineKeyboardButton("❌ Reject", callback_data=f"pay:admin:reject:{session_id}")
+        ]
+    ])
+
 def build_admin_payment_actions(session_id: str, user_id: int) -> InlineKeyboardMarkup:
     """Action buttons for admin review."""
     return InlineKeyboardMarkup([
