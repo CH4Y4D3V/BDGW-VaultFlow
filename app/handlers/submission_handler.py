@@ -196,13 +196,13 @@ async def _finalize_submission(client: Client, messages: list[Message], user_id:
         # This ensures that even if the bot restarts, the content is safe in 
         # the vault and can be recovered by moderators.
         from app.moderation.moderation_actions import archive_to_vault
-        from app.core.models import ModerationState
+        from app.core.models import ModerationState, ModerationDestination
         
         await archive_to_vault(
             client=client,
             messages=messages,
             submitter_user_id=user_id,
-            dest="pending",
+            dest=ModerationDestination.PENDING,
             initial_status=ModerationState.PENDING
         )
 

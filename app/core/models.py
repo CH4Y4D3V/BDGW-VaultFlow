@@ -44,6 +44,7 @@ class ModerationState(str, Enum):
 
 
 class ModerationDestination(str, Enum):
+    PENDING = "pending"
     NSFW = "nsfw"
     PREMIUM = "premium"
 

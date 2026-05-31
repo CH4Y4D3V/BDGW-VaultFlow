@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.errors import FloodWait
 
 from app.config import settings
 from app.core.database import DatabaseManager
@@ -256,7 +257,7 @@ async def handle_mute_command(client: Client, message: Message) -> None:
 
 
 @Client.on_message(filters.command("newlink") & filters.chat(settings.VERIFICATION_GROUP_ID))
-@permission_required(Role.ADMIN)
+@permission_required(Role.MODERATOR)
 async def handle_newlink_command(client: Client, message: Message) -> None:
     """/newlink {user_id} — Generates a new 30-min invite link."""
     try:
