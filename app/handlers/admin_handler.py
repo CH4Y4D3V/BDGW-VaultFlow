@@ -28,7 +28,7 @@ logger = get_logger(__name__)
 @Client.on_message(
     filters.command("grant") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_grant_command(client: Client, message: Message) -> None:
     """/grant {user_id} {days} {plan}"""
     try:
@@ -80,7 +80,7 @@ async def handle_grant_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("revoke") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_revoke_command(client: Client, message: Message) -> None:
     """/revoke {user_id}"""
     try:
@@ -113,7 +113,7 @@ async def handle_revoke_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("ban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_ban_command(client: Client, message: Message) -> None:
     """/ban {user_id} [reason] — Permanent bot ban (Section 21: silent)."""
     try:
@@ -155,7 +155,7 @@ async def handle_ban_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("unban") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_unban_command(client: Client, message: Message) -> None:
     """/unban {user_id} — Removes bot ban."""
     try:
@@ -363,7 +363,7 @@ async def handle_userinfo_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.command("newlink") & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_newlink_command(client: Client, message: Message) -> None:
     """/newlink {user_id} — Generates a new 30-min invite link."""
     try:
@@ -571,7 +571,7 @@ async def _execute_broadcast(
     )
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_broadcast_init(client: Client, message: Message) -> None:
     admin_id = message.from_user.id
     cmd = message.command[0]
@@ -595,7 +595,7 @@ async def handle_broadcast_init(client: Client, message: Message) -> None:
     filters.command("cancel_broadcast")
     & filters.chat(settings.VERIFICATION_GROUP_ID)
 )
-@permission_required(Role.SUDO)
+@permission_required(Role.SUPER_ADMIN)
 async def handle_broadcast_cancel_cmd(client: Client, message: Message) -> None:
     admin_id = message.from_user.id
     _pending_broadcasts.pop(admin_id, None)

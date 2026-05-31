@@ -1,233 +1,1276 @@
-# BDGW VaultFlow — Final QC Audit & Fix Implementation
-## Senior QC / Production Sign-Off Review
-### Version 1.0 | Post-Gemini Cross-Check
-
----
-
-## Executive Summary
-
-After a full read of all 124 source files and the cross-check report, this audit confirms **8 critical systems were either missing, incomplete, or broken**. This document catalogs every gap found and the exact files that implement the fixes.
-
-The existing codebase (Pyrogram + Motor + MongoDB) is architecturally sound. The core engine (queue, watermark, distribution, vault) is well-built. The gaps are concentrated in user-facing flows and lifecycle systems.
-
----
-
-## Critical Gaps Found & Fixed
-
-### 🔴 GAP 1 — Payment System (System 5): INCOMPLETE
-
-**What existed:** `app/payments/handlers.py`, `app/payments/service.py`, `app/payments/models.py`, `app/payments/repository.py`
-
-**What was broken:**
-- `approve_payment()` called `ParseMode.HTML` without importing it
-- `resume_active_sessions()` called `start_timeout()` but the session already had `expires_at` set — it would reset the timer on restart instead of using remaining time
-- `PaymentStatus.PENDING_DETAILS` transition from `REQUESTED` existed but `handle_payment_method` tried to transition directly to `REQUESTED` which isn't an allowed transition from `WAITING_PAYMENT_DETAILS`
-- The admin "Send Payment Details" flow routed through `pay:admin:send:` callback but `handle_payment_inputs` used group -10 priority which conflicts with support handler at default priority
-- Session creation: `offset = round(random.uniform(0.01, 0.50), 2)` — `random` not imported in service
-- `handle_admin_decision` called `callback.message.edit_caption` but payment card was sent as text not photo for initial request — would throw `MessageNotModified` or wrong method
-- `_notify_admins_of_request` uses `PaymentSession` type hint but the object is referenced before type is imported
-
-**Fix:** `app/payments/service.py` — rewritten with all imports, correct FSM transitions, restart-safe timer resume using remaining time from `expires_at`, full atomic approval.
-
----
-
-### 🔴 GAP 2 — Subscription Lifecycle (System 6): MISSING SCHEDULER REGISTRATION
-
-**What existed:** `app/workers/subscription_worker.py` — well-implemented
-
-**What was broken:**
-- `SubscriptionWorker` was started in `lifecycle.py` BUT the 7-day / 3-day notification logic existed but used `metadata` dict to track whether warnings were sent — this dict is on the Python object only, not persisted to DB. On restart, ALL warnings would resend.
-- `seven_day_warned`, `three_day_warned_1`, `three_day_warned_2` were set on `sub.metadata` and then `update_subscription(sub)` was called — but `update_subscription` just calls `repo.upsert(sub)` which overwrites the entire subscription document including metadata. This works IF the subscription model's `to_dict()` includes metadata. It does. ✅
-- However: `three_day_warned_2` logic checked `expires_at < now + timedelta(hours=48)` but `get_expiring_soon(within_hours=72)` returns subs expiring within 72h — meaning the second warning fires immediately after the first for subs with 48-72h remaining, not 24h after first.
-
-**Fix:** `app/workers/subscription_worker.py` — timing fix using timestamp-based check instead of window overlap.
-
----
-
-### 🔴 GAP 3 — TXID Protection (System 7/8): PARTIALLY IMPLEMENTED
-
-**What existed:** `PaymentRepository` has `pay_txid_unique` index (sparse, unique on `txid`). `handle_payment_inputs` catches `DuplicateKeyError`.
-
-**What was broken:**
-- The `DuplicateKeyError` import was missing from `app/payments/handlers.py` — the catch block would itself throw `NameError`
-- The duplicate TXID path called `service.reject_payment(session.id, ..., 0)` but `reject_payment` calls `acquire_processing_lock` first, and the session status is `AWAITING_PAYMENT` not `UNDER_REVIEW` — lock acquisition would fail (returns False) and the session would not be rejected
-- User was banned but session was left in `AWAITING_PAYMENT` state — would allow retry attempts
-
-**Fix:** `app/payments/handlers.py` — added `DuplicateKeyError` import, fixed reject path to force-update status directly.
-
----
-
-### 🔴 GAP 4 — Broadcast Missing Content Types (System 9): PARTIALLY IMPLEMENTED
-
-**What existed:** `app/handlers/admin_handler.py` has broadcast system handling text, photo, albums, documents.
-
-**What was broken:**
-- `_safe_send_broadcast` used `message.copy(chat_id=user_id)` — Pyrogram's `Message.copy()` is not a method. Should be `client.copy_message(chat_id, from_chat_id, message_id)`
-- Video, voice, audio, animation, sticker not explicitly handled — `copy_message` would handle them but the media_group collection had no timeout window
-- Caption was NOT preserved — `copy_message` without `caption` parameter drops captions for non-album messages
-- `broadcast_data["content"]` stored the `Message` object but `_execute_broadcast` was a separate task — if bot restarted mid-broadcast, it would be lost (FSM-only, not DB-backed)
-
-**Fix:** `app/handlers/admin_handler.py` — fixed `_safe_send_broadcast`, added media_group collection, caption preservation, all content types.
-
----
-
-### 🔴 GAP 5 — Content Submission (System 12): INCOMPLETE
-
-**What existed:** `app/handlers/submission_handler.py` — exists but incomplete.
-
-**What was broken:**
-- Channel membership gate (`VAULT_CHANNEL_ID`) was NOT implemented — the spec requires user to join the main channel before submitting
-- Terms acceptance stored in `consent_records` with `is_active=True` — but `submission_handler.py`'s `handle_consent_agree` callback (`consent:agree` without user ID) conflicted with `creator_onboarding.py`'s `consent:agree:{user_id}` pattern
-- `archive_to_vault` was called with `dest="pending"` which is not a valid `ModerationDestination` — would cause issues in vault queries
-- `_finalize_submission` called `register_pending` AFTER `forward_to_verification` — but `pop_pending` in callback handler looks up by `first_msg_id` from the ORIGINAL message, not the forwarded message. The pending registry should be keyed by the original message IDs.
-- `WeakValueDictionary` for album locks — if no strong reference is held to the lock between `create_task` and `async with lock`, the lock gets GC'd
-
-**Fix:** `app/handlers/submission_handler.py` — fixed membership gate, consent flow, vault dest, pending registry key, album lock lifecycle.
-
----
-
-### 🔴 GAP 6 — Vault & Queue Engine (System 13): MOSTLY WORKING, GAPS
-
-**What existed:** `app/scheduler/scheduler.py`, `app/repositories/queue_repository.py`, `app/distribution/engine.py` — substantial and well-built.
-
-**What was broken:**
-- `_enqueue_content` in scheduler used `settings.VAULT_CHANNEL_ID` for `vault_chat_id` — correct — but `vault_message_id` was `content_item.get("vault_message_id")` which could be `None` for legacy vault items. The queue repo's `enqueue()` throws `VaultReferenceMissingError` if `vault_message_id` is None. The scheduler would silently drop these items.
-- Dead letter queue existed in repo but `move_to_dead_letter` updated the original job to `DEAD` status but the `dead_letters` collection `upsert` used `original_job_id` as unique key — if called twice (retry race), would silently fail second upsert
-- `get_deadline_exceeded_jobs` queried `scheduled_at` but the model field is `queue_deadline` — no results ever returned
-- Daily cap check in `_distribution_cycle` used `_get_posted_count_last_24h` which queries `completed_at >= cutoff` — correct. But `_get_daily_cap` used `dest` from `source_channel_id.replace("submission_", "")` which only works for `submission_nsfw` / `submission_premium` — direct vault uploads (from `backfill_vault.py` or `vault_handler.py`) use `content_item.get("content_id")` not `submission_` prefix
-
-**Fix:** Scheduler and queue repo — fixed field names, vault_message_id fallback, deadline query field, daily cap dest resolution.
-
----
-
-### 🔴 GAP 7 — Message Cleanup (System 17): 4 OF 5 RULES MISSING
-
-**What existed:** `app/services/cleanup_service.py` — partial implementation. `app/handlers/update_logger.py` — phone number detection exists but only logs, doesn't schedule deletion. `app/core/lifecycle.py` registers cleanup sweep every 5 minutes.
-
-**What was broken:**
-- `CleanupService.log_message` correctly categorizes messages but the `run_cleanup_sweep` only deletes via `self._bot.delete_messages(user_id, msg_id)` — this is a DM delete, won't work for group messages
-- BD phone number regex in `cleanup_service.py` is `(?:017|018|019|014|013)\d{8}` (9 total digits without leading 0, making 11-digit numbers) — correct
-- BUT `update_logger.py` checked `if any(p in text for p in ["017", "018", "019", "014", "013"])` — this would match ANY text containing those strings (e.g. "2017 was a good year")
-- Payment session message cleanup: no payment handler called `log_message` with `category="payment"` — the 20-minute timer only ran for explicitly logged messages
-- Support closure cleanup: `delete_user_support_history` existed but `support_handler.py` never called it in the closure callback — it was only called from `handle_support_closure_callback` which had a bug: `tid` variable referenced in audit log but came from the regex match group named `tid` which was the ticket_id string, not user_id
-
-**Fix:** `app/services/cleanup_service.py`, `app/handlers/support_handler.py`, `app/handlers/update_logger.py` — complete the 5 cleanup rules.
-
----
-
-### 🔴 GAP 8 — Restart Safety (System 20/25): PARTIALLY IMPLEMENTED
-
-**What existed:** `lifecycle.py` calls `payment_service.resume_active_sessions()` as a task.
-
-**What was broken:**
-- `resume_active_sessions` called `start_timeout(session.id)` unconditionally — this RESET the timer to `now + 20 minutes` instead of restoring the remaining time from `session.expires_at`
-- Support tickets: no restoration of in-memory topic cache on restart — `TopicManager._local_cache` is empty on restart, triggering new topic creation for existing tickets
-- Queue: `recover_stale_jobs()` was called at startup (in `DispatcherWorker.start()` and scheduler's `_run_startup_integrity_scan`) — this IS implemented correctly ✅
-- Payment FSM: `get_redis()` returns a sync-style client but `handle_payment_inputs` used `await redis.exists(...)` — mixing sync/async Redis
-
-**Fix:** `app/payments/service.py`, `app/services/topic_manager.py` — restart-safe timer resume, topic cache restoration.
-
----
-
-## Additional Bugs Found (Not in Cross-Check)
-
-### BUG A — `app/handlers/callback_handler.py`: Missing import
-`get_redis` used but not imported in `handle_moderation_callback` and `handle_mod_reject_reason_reply`.
-
-### BUG B — `app/handlers/admin_handler.py`: Duplicate handler definitions
-`handle_ban_command` and `handle_unban_command` are each defined TWICE with different `@permission_required` decorators. Pyrogram will register both; the second one overwrites the first silently.
-
-### BUG C — `app/services/audit_service.py`: Missing imports
-`settings` used but not imported. `ParseMode` used but not imported.
-
-### BUG D — `app/handlers/topic_router.py`: `ChatType` used but not imported
-`chat.type == ChatType.FORUM` in `topic_manager.py` references `ChatType` imported from `pyrogram.enums` but the import line is missing.
-
-### BUG E — `app/referral/service.py`: `ReturnDocument` not imported
-`from pymongo import ReturnDocument` missing — `reward_approved_content` would crash.
-
-### BUG F — `app/payments/service.py`: `ParseMode` not imported in approve flow
-`await client.send_message(..., parse_mode=ParseMode.HTML)` — no import.
-
-### BUG G — `app/watermark/ffmpeg_processor.py`: `settings.WATERMARK_POSITION` not defined
-The `_get_watermark_config` function in `moderation_actions.py` sets `position: settings.WATERMARK_POSITION` but `Settings` class doesn't have this field — only `WATERMARK_OPACITY`, `WATERMARK_SCALE`, etc. The field was missing from `settings.py`.
-
-**Wait** — checking `settings.py`... `WATERMARK_POSITION` IS missing. The `WatermarkPosition` enum default in `ffmpeg_processor.py` hardcodes `BOTTOM_RIGHT`. But `moderation_actions.py` passes `settings.WATERMARK_POSITION` to watermark_config dict, which would fail at settings load with `AttributeError`.
-
-**Fix:** `app/config/settings.py` — add `WATERMARK_POSITION: str = "BOTTOM_RIGHT"`.
-
----
-
-## Files That Need to Be Delivered as Fixes
-
-Given the project is in the documents (not on disk as actual files the user can run), the deliverable here is a complete implementation package. The files below are the ones with confirmed bugs that need correction:
-
-1. `app/payments/service.py` — restart-safe timer, correct imports, atomic approval
-2. `app/payments/handlers.py` — DuplicateKeyError import, all content type handling  
-3. `app/workers/subscription_worker.py` — timing fix for 3-day second warning
-4. `app/handlers/admin_handler.py` — broadcast fix, no duplicate handlers
-5. `app/handlers/submission_handler.py` — membership gate, consent fix, album lock
-6. `app/services/cleanup_service.py` — all 5 cleanup rules complete
-7. `app/handlers/update_logger.py` — BD phone number regex fix
-8. `app/services/audit_service.py` — missing imports
-9. `app/services/topic_manager.py` — ChatType import, cache restoration
-10. `app/referral/service.py` — ReturnDocument import
-11. `app/config/settings.py` — WATERMARK_POSITION field
-12. `app/handlers/callback_handler.py` — get_redis import
-13. `app/scheduler/scheduler.py` — deadline field name fix, vault_message_id fallback
-
----
-
-## Systems Status After Fixes
-
-| System | Status |
-|--------|--------|
-| 1. User Registration | ✅ Complete |
-| 2. Main Menu | ✅ Complete |
-| 3. Commands | ✅ Complete |
-| 4. Dot-slash cleanup | ✅ Complete |
-| 5. Payment Flow | ✅ Fixed |
-| 6. Subscription Lifecycle | ✅ Fixed |
-| 7. TXID Protection | ✅ Fixed |
-| 8. Verification Hub | ✅ Complete |
-| 9. Broadcast | ✅ Fixed |
-| 10. Support Tickets | ✅ Fixed |
-| 11. Takedown | ⚠️ Functional, admin reject needs typed reason enforcement |
-| 12. Content Submission | ✅ Fixed |
-| 13. Vault & Queue | ✅ Fixed |
-| 14. Watermark Pipeline | ✅ Fixed (WATERMARK_POSITION added) |
-| 15. Referral System | ✅ Fixed |
-| 16. User Dashboard | ✅ Complete |
-| 17. Message Cleanup | ✅ Fixed |
-| 18. Trust & Fraud | ✅ Complete |
-| 19. Audit Logging | ✅ Fixed (imports) |
-| 20. Restart Safety | ✅ Fixed |
-
----
-
-## Launch Checklist (Section 29)
-
-Before deploying to Railway:
-
-- [ ] Set all ENV vars from `.env.example`
-- [ ] Set `VERIFICATION_GROUP_ID` to a supergroup with Topics enabled
-- [ ] Add bot as admin with "Manage Topics" permission in verification group
-- [ ] Add bot as admin in VAULT_CHANNEL_ID, NSFW_GROUP_ID, PREMIUM_GROUP_ID
-- [ ] Run `scripts/backfill_vault.py` after first content is in vault channel
-- [ ] Set `WATERMARK_ENABLED=true` and place logo PNGs at asset paths
-- [ ] Set `OWNER_ID` to your Telegram user ID
-- [ ] MongoDB must be replica set for transaction support (Atlas free tier works)
-- [ ] Redis must be running (Railway Redis plugin or Redis Cloud free tier)
-- [ ] Run `python main_bot.py` — startup will auto-create all indexes
-
----
-
-## Architecture Notes for Production
-
-**Scaling:** The current architecture supports horizontal scaling of dispatcher and watermark workers via `docker-compose up --scale dispatcher=3`. The distributed lock service prevents duplicate delivery.
-
-**MongoDB:** Without replica set, transactions fall back to non-atomic operations. The code handles this gracefully but TXID protection and album delivery guarantees are weaker. Use Atlas or a self-hosted replica set.
-
-**Session persistence:** All critical state (payments, support, queue, invites) is DB-backed. A full process restart loses only in-memory rate limiter bucket state and flood wait timers (which are also Redis-backed now).
-
-**FFmpeg:** The Dockerfile installs FFmpeg. For Railway deployment, the `nixpacks` config in `railway.toml` also installs it. Video watermarking requires ~2-4x video duration in processing time at `ultrafast` preset.
+====================================================================
+BDGW VAULTFLOW — FINAL PRODUCTION FORCE AUDIT
+MASTER AI INSTRUCTION PROMPT
+====================================================================
+THIS IS NOT A SUGGESTION. THIS IS AN ORDER.
+YOU WILL READ EVERY FILE. YOU WILL FIX EVERY ISSUE.
+YOU WILL NOT STOP UNTIL THIS CODEBASE IS 100% PRODUCTION READY.
+YOU WILL NOT REPORT DONE UNTIL EVERY SINGLE ITEM BELOW IS VERIFIED.
+====================================================================
+
+CONTEXT:
+  Project     : BDGW VaultFlow
+  Type        : Production Telegram SaaS Bot (Pyrogram, Python)
+  Database    : PostgreSQL (async SQLAlchemy + Alembic)
+  Cache/Lock  : Redis
+  Framework   : Pyrogram
+  Delivery    : RIGHT NOW. THIS IS THE FINAL PASS.
+
+RULE 1: You will open and READ every .py file in the repo.
+RULE 2: You will not trust any previous audit report. Start fresh.
+RULE 3: You will not mark anything done unless you see working code.
+RULE 4: If something is missing, you write it. No exceptions.
+RULE 5: If something is broken, you fix it. No exceptions.
+RULE 6: You do not move to the next item until the current one works.
+RULE 7: Everything you build must be async-safe, restart-safe,
+        duplicate-safe, and FloodWait-safe.
+RULE 8: Database is the ONLY source of truth. Never FSM alone.
+RULE 9: Every critical operation must be idempotent and audit-logged.
+RULE 10: You push to GitHub only after every item below is verified.
+
+====================================================================
+STEP 1 — CLEAN THE REPO FIRST
+====================================================================
+
+Delete everything that does not belong in production:
+
+DELETE:
+  - All __pycache__ directories (find . -type d -name __pycache__)
+  - All *.pyc files
+  - All .DS_Store files
+  - All *.log files
+  - All check_*.py, test_*.py that are empty or placeholder only
+  - All autofix.py, preflight.py, scratch.py, temp*.py, draft*.py
+  - All files named old_*, backup_*, copy_*, unused_*, debug_*
+  - All .pytest_cache, .ruff_cache, .mypy_cache directories
+  - All TODO.md, NOTES.md, SCRATCH.md files
+  - Any handler file that defines functions but registers nothing
+  - Any router file that is created but never included in main app
+  - Any model file that defines tables never referenced in code
+  - All print() debug statements across entire codebase
+  - All commented-out code blocks over 3 lines
+  - All unused import statements
+
+AFTER DELETION:
+  Run: grep -r "print(" . --include="*.py"
+  If any print() found → delete every single one.
+
+  Run: python -m py_compile on every .py file.
+  If any syntax error found → fix it before continuing.
+
+====================================================================
+STEP 2 — VERIFY AND FIX DATABASE SCHEMA
+====================================================================
+
+Open your migrations or models. Verify EVERY table below exists
+with EVERY column listed. If any table or column is missing,
+create and run the migration before doing anything else.
+
+TABLE: users
+  user_id         BIGINT PRIMARY KEY
+  username        VARCHAR nullable
+  full_name       VARCHAR not null
+  join_date       TIMESTAMP not null
+  onboarded       BOOLEAN default false
+  is_banned       BOOLEAN default false
+  is_muted        BOOLEAN default false
+  trust_score     INTEGER default 0
+  fraud_score     INTEGER default 0
+  referral_code   VARCHAR unique not null
+  referred_by     BIGINT nullable FK → users.user_id
+  referral_points INTEGER default 0
+  warn_count      INTEGER default 0
+
+TABLE: subscriptions
+  subscription_id UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  package_id      VARCHAR not null
+  started_at      TIMESTAMP
+  expires_at      TIMESTAMP
+  status          VARCHAR (ACTIVE/EXPIRED/CANCELLED/PENDING)
+
+TABLE: payments
+  payment_id      UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  subscription_id UUID FK → subscriptions nullable
+  package_id      VARCHAR
+  method          VARCHAR
+  txid            VARCHAR nullable
+  amount          NUMERIC
+  status          VARCHAR (PENDING/PROOF_SUBMITTED/APPROVED/REJECTED/EXPIRED)
+  session_active  BOOLEAN default false
+  session_started_at TIMESTAMP nullable
+  proof_screenshot_file_id VARCHAR nullable
+  approved_by     BIGINT nullable
+  rejected_by     BIGINT nullable
+  rejection_reason TEXT nullable
+  created_at      TIMESTAMP
+  updated_at      TIMESTAMP
+
+TABLE: txid_registry
+  txid            VARCHAR PRIMARY KEY
+  payment_id      UUID FK → payments
+  user_id         BIGINT
+  registered_at   TIMESTAMP
+
+TABLE: invites
+  invite_id       UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  payment_id      UUID FK → payments
+  invite_link     TEXT
+  created_at      TIMESTAMP
+  expires_at      TIMESTAMP
+  used            BOOLEAN default false
+
+TABLE: support_tickets
+  ticket_id       UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  hub_topic_id    INTEGER
+  status          VARCHAR (PENDING/ACTIVE/CLOSED)
+  assigned_to     BIGINT nullable
+  opened_at       TIMESTAMP
+  accepted_at     TIMESTAMP nullable
+  closed_at       TIMESTAMP nullable
+  closure_summary TEXT nullable
+  source          VARCHAR (MANUAL/TAKEDOWN_REJECTION/UNHANDLED_TEXT)
+  source_ref_id   UUID nullable
+
+TABLE: takedown_requests
+  takedown_id     UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  reason          TEXT not null
+  content_link    TEXT not null
+  status          VARCHAR (PENDING/APPROVED/REJECTED)
+  submitted_at    TIMESTAMP
+  reviewed_at     TIMESTAMP nullable
+  reviewed_by     BIGINT nullable
+  rejection_reason TEXT nullable
+  support_ticket_id UUID nullable FK → support_tickets
+
+TABLE: content_submissions
+  submission_id   UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  content_type    VARCHAR
+  file_id         VARCHAR
+  content_hash    VARCHAR
+  album_hash      VARCHAR nullable
+  status          VARCHAR (PENDING/APPROVED_STANDARD/APPROVED_NSFW/APPROVED_PREMIUM/REJECTED)
+  rejection_reason TEXT nullable
+  submitted_at    TIMESTAMP
+  reviewed_at     TIMESTAMP nullable
+  reviewed_by     BIGINT nullable
+
+TABLE: vault
+  vault_id        UUID PRIMARY KEY
+  submission_id   UUID FK → content_submissions
+  content_type    VARCHAR
+  file_id         VARCHAR
+  category        VARCHAR (STANDARD/NSFW/PREMIUM)
+  archived_at     TIMESTAMP
+  last_posted_at  TIMESTAMP nullable
+  post_count      INTEGER default 0
+
+TABLE: queue_jobs
+  job_id          UUID PRIMARY KEY
+  vault_id        UUID FK → vault nullable
+  content_type    VARCHAR
+  file_id         VARCHAR
+  category        VARCHAR
+  status          VARCHAR (PENDING/PROCESSING/SENT/FAILED/DEAD_LETTER)
+  retry_count     INTEGER default 0
+  max_retries     INTEGER default 3
+  scheduled_at    TIMESTAMP
+  processed_at    TIMESTAMP nullable
+  error_message   TEXT nullable
+
+TABLE: referrals
+  referral_id     UUID PRIMARY KEY
+  referrer_id     BIGINT FK → users
+  referred_id     BIGINT FK → users
+  joined_at       TIMESTAMP
+  verified        BOOLEAN default false
+  blocked         BOOLEAN default false
+
+TABLE: punishments
+  punishment_id   UUID PRIMARY KEY
+  user_id         BIGINT FK → users
+  type            VARCHAR (WARN/MUTE/BAN/KICK)
+  reason          TEXT
+  issued_by       BIGINT
+  issued_at       TIMESTAMP
+  expires_at      TIMESTAMP nullable
+  active          BOOLEAN default true
+
+TABLE: audit_logs
+  log_id          UUID PRIMARY KEY
+  event_type      VARCHAR
+  user_id         BIGINT nullable
+  admin_id        BIGINT nullable
+  details         JSONB
+  created_at      TIMESTAMP
+
+TABLE: broadcast_jobs
+  job_id          UUID PRIMARY KEY
+  initiated_by    BIGINT
+  content_type    VARCHAR
+  payload         JSONB
+  status          VARCHAR (PENDING/RUNNING/DONE/FAILED)
+  total_targets   INTEGER default 0
+  sent_count      INTEGER default 0
+  failed_count    INTEGER default 0
+  created_at      TIMESTAMP
+  completed_at    TIMESTAMP nullable
+
+After verifying all tables exist and all columns are present:
+  Run alembic upgrade head (or equivalent)
+  Confirm no migration errors.
+
+====================================================================
+STEP 3 — FIX EVERY HANDLER AND FLOW
+====================================================================
+
+Go through each flow. Read the actual code. Fix what is wrong.
+
+--------------------------------------------------------------------
+FLOW A: /start — ONBOARDING & MAIN MENU
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  1. User sends /start
+  2. Bot checks users table for this user_id
+  3. If NOT found:
+       - Insert user into users table (onboarded = false)
+       - Send onboarding message explaining:
+           • This bot belongs to BD Gone Wild Community
+           • Controls Premium Access
+           • Handles Content Submission
+           • Handles Content Removal Requests
+           • Handles User Status
+           • Handles Support Requests
+           • Community rules and submission rules
+       - Set onboarded = true in DB
+       - Then show main menu
+  4. If FOUND and onboarded = true:
+       - Show main menu directly. No onboarding.
+  5. Main menu keyboard:
+       Row 1: [ 💎 Premium Access ]
+       Row 2: [ 📤 Submit Content Anonymously ]
+       Row 3: [ 🎁 Referral Program ] [ 📊 My Status ]
+       Row 4: [ 🆘 Need Help ]
+
+FIX IF WRONG:
+  - If onboarding check uses FSM → replace with DB check
+  - If user not saved to DB on first start → add insert
+  - If menu has wrong buttons or layout → fix layout
+
+--------------------------------------------------------------------
+FLOW B: BOT COMMAND MENU (Telegram slash picker)
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  bot.set_my_commands([
+    BotCommand("start",    "Main Menu"),
+    BotCommand("takedown", "Remove Content"),
+    BotCommand("help",     "Support"),
+  ])
+
+  Exactly 3 commands. No /main. No /cancel. No extras.
+  Descriptions must be plain English as shown above.
+
+FIX IF WRONG:
+  - Remove any command not in the list above
+  - If /main exists anywhere → remove it completely
+  - set_my_commands must be called in on_startup
+
+--------------------------------------------------------------------
+FLOW C: ./PREFIX AUTO-DELETE
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  Any message where text starts with "./" in a private chat:
+    1. Bot receives message
+    2. asyncio.sleep(10)
+    3. bot.delete_message(chat_id, message_id)
+    4. No response, no notification, completely silent
+
+FIX IF WRONG:
+  - Must be middleware or a catch-all handler
+  - Must be scoped to private chats only (not hub, not groups)
+  - Must not block other handlers from processing
+
+--------------------------------------------------------------------
+FLOW D: PREMIUM ACCESS — FULL PAYMENT FLOW
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN (end to end):
+
+  D1. User clicks 💎 Premium Access
+      → Bot shows package options:
+          [ 1 Month ] [ 3 Months ] [ 6 Months ]
+
+  D2. User selects package
+      → Bot shows payment method options
+          (configurable, e.g. bKash, Nagad, USDT, etc.)
+
+  D3. User selects method
+      → Bot creates payment record in DB:
+          status = PENDING, session_active = false
+      → Bot creates topic in Verification Hub → Payments thread:
+          ┌────────────────────────────────────┐
+          │ 💳 NEW PAYMENT REQUEST             │
+          │ User    : [Name] (@username)        │
+          │ User ID : [id]                      │
+          │ Package : [package name]            │
+          │ Method  : [method]                  │
+          │ Time    : [timestamp]               │
+          └────────────────────────────────────┘
+          Button: [ 📤 Send Payment Details ]
+      → Bot tells user:
+          "Your payment request has been received. An admin will
+           send you the payment details shortly. Please wait."
+
+  D4. Admin clicks 📤 Send Payment Details
+      → Admin manually types and sends: number/QR/wallet/instructions
+        inside the hub topic (the bot does NOT send these — EVER)
+      → Bot detects the admin's message was delivered successfully
+        via Telegram API (no error on send)
+      → Bot updates payment record: session_active = true,
+        session_started_at = now()
+      → Bot starts 20-minute countdown timer (stored in DB)
+      → Bot tells user:
+          "Payment details have been sent to you by our team.
+           Please complete the payment and send your proof within
+           20 minutes. Include your Transaction ID and a screenshot
+           (optional)."
+
+  D5. User sends proof (TXID + optional screenshot)
+      → Bot checks:
+          Is session_active = true? If not → reject, tell user session expired
+          Is TXID already in txid_registry? If yes → reject, tell user duplicate
+      → Bot stores proof in payment record
+      → Bot forwards proof to hub topic:
+          ┌──────────────────────────────────────┐
+          │ 🧾 PAYMENT PROOF SUBMITTED           │
+          │ User    : [Name] (@username)          │
+          │ User ID : [id]                        │
+          │ Package : [package]                   │
+          │ TXID    : [txid]                      │
+          │ Time    : [timestamp]                 │
+          └──────────────────────────────────────┘
+          Buttons: [ ✅ Approve ] [ ❌ Reject ]
+
+  D6. Admin clicks ✅ Approve
+      → System executes atomically (DB transaction + Redis lock):
+          1. Re-check session_active = true
+          2. Re-check payment not already processed (idempotency)
+          3. Acquire Redis lock on payment_id
+          4. Create subscription record, status = ACTIVE
+          5. Generate Telegram invite link (creates_join_request=False,
+             member_limit=1, expire_date=now+1800)
+          6. Save invite to invites table
+          7. Insert TXID into txid_registry
+          8. Update payment status = APPROVED
+          9. Clear session (session_active = false)
+         10. Release lock
+      → Deliver invite link to user:
+          "✅ Your payment has been approved! Welcome to the community.
+           Here is your exclusive invite link. It expires in 30 minutes
+           and can only be used once:
+           [invite link]
+           Do not share this link with anyone."
+      → Log to audit
+
+  D7. Admin clicks ❌ Reject
+      → Bot prompts admin in topic: "Type your rejection reason."
+      → Admin types reason
+      → Payment status = REJECTED, reason stored
+      → Session cleared
+      → User notified:
+          "Your payment could not be verified.
+           Reason: [reason]
+           If you believe this is an error, please contact support."
+      → Log to audit
+
+  D8. 20-minute timeout worker
+      → Background task checks every minute for sessions where:
+          session_active = true AND
+          session_started_at < now() - 20 minutes AND
+          status = PENDING or PROOF_SUBMITTED
+      → For each expired session:
+          Set session_active = false, status = EXPIRED
+          Notify user:
+              "Your payment session has expired (20 minutes).
+               Please start a new payment request from the main menu."
+          Log to audit
+
+FIX IF ANY STEP IS MISSING: write the complete handler.
+
+--------------------------------------------------------------------
+FLOW E: SUBSCRIPTION LIFECYCLE
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  Background worker runs every hour:
+    Query subscriptions where status = ACTIVE
+
+    For each:
+      days_left = (expires_at - now()).days
+
+      If days_left == 7:
+        Send user: "Your premium subscription expires in 7 days.
+                    Renew now to keep uninterrupted access."
+
+      If days_left == 3:
+        Send user: "⚠️ Your premium subscription expires in 3 days.
+                    Renew now to avoid losing access."
+
+      If days_left == 0 (expiry day):
+        Send user: "Your premium subscription has expired today.
+                    Contact support or renew to regain access."
+        Remove user from all premium groups via Telegram API
+        Update subscription status = EXPIRED in DB
+        Log to audit
+
+  CRITICAL RULES:
+    - Group removal notification IS sent (allowed)
+    - Bot ban/mute notifications are NOT sent
+    - Worker must be idempotent (running twice must not send 2 messages)
+    - Add a notifications_sent JSON column or separate table to track
+      which notifications have already been sent for each subscription
+
+FIX IF MISSING: write the scheduler task using APScheduler or
+asyncio loop.
+
+--------------------------------------------------------------------
+FLOW F: TXID PROTECTION
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  Before accepting any proof:
+    SELECT FROM txid_registry WHERE txid = [submitted_txid]
+    If found: reject immediately with message:
+        "This transaction ID has already been used.
+         If you believe this is an error, please contact support."
+    If not found: proceed to approval flow.
+    On approval: INSERT into txid_registry atomically within
+    the same DB transaction as subscription activation.
+
+FIX IF MISSING: add the check in proof submission handler and
+add the INSERT in the atomic approval block.
+
+--------------------------------------------------------------------
+FLOW G: SUPPORT TICKET SYSTEM
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  G1. Trigger points (all three must work):
+        - User clicks 🆘 Need Help
+        - User sends /help
+        - User sends any text that no handler catches
+          (use a catch-all message handler at lowest priority)
+
+  G2. On trigger:
+        Check: does user already have an OPEN or ACTIVE ticket?
+        If yes: tell user "You already have an open support ticket.
+                An admin will respond to you shortly."
+        If no: create ticket:
+          - Insert into support_tickets (status = PENDING)
+          - Create forum topic in Hub → Support thread
+          - Send first message in topic:
+              ┌──────────────────────────────────────────┐
+              │ 🎫 SUPPORT TICKET #[id]                  │
+              │ Name       : [full_name]                  │
+              │ Username   : @[username]                  │
+              │ User ID    : [user_id]                    │
+              │ Join Date  : [join_date]                  │
+              │ Premium    : [ACTIVE/EXPIRED/NONE]        │
+              │ Package    : [package or N/A]             │
+              │ Expires    : [date or N/A]                │
+              │ Referrals  : [count] ([points] pts)       │
+              │ Submissions: [total] (✅[approved]        │
+              │              ❌[rejected] ⏳[queued])     │
+              │ Warnings   : [count]                      │
+              │ Mutes      : [count]                      │
+              │ Bans       : [count]                      │
+              └──────────────────────────────────────────┘
+              Button: [ ✅ Accept Support ]
+          - Tell user:
+              "Your support ticket has been created. An admin will
+               be with you shortly. Please describe your issue."
+
+  G3. 5-minute unattended check:
+        asyncio.sleep(300) after ticket creation
+        If ticket still status = PENDING (no admin accepted):
+          Tell user:
+              "No admin is available right now. Your ticket is still
+               open and an admin will respond as soon as possible."
+        Do NOT close the ticket. Keep it open.
+
+  G4. Admin clicks ✅ Accept Support:
+        - Update ticket: status = ACTIVE, assigned_to = admin_id,
+          accepted_at = now()
+        - Tell user:
+            "An admin has joined your support session.
+             How can we help you?"
+        - Tell admin in topic:
+            "You are now connected to [Name]. Anything you type here
+             will be forwarded to the user."
+
+  G5. Two-way bridge (while ticket is ACTIVE):
+        User sends message to bot:
+          → Bot forwards to hub topic (as text with attribution)
+        Admin sends message in hub topic:
+          → Bot forwards to user in private chat
+
+        Support both text and media (photos, voice, files, etc.)
+
+  G6. Closure:
+        Admin sends /close in topic OR clicks Close button:
+          - Update ticket: status = CLOSED, closed_at = now()
+          - Delete all user-side messages silently
+          - Preserve topic permanently
+          - Tell user:
+              "Your support session has been closed. If you need
+               further help, feel free to reach out again."
+          - Log to audit
+
+  G7. Auto-open from Takedown rejection:
+        When a takedown is rejected, call the same ticket creation
+        flow with source = "TAKEDOWN_REJECTION" and
+        source_ref_id = takedown_id
+        First message in topic must include the rejection reason
+        as additional context.
+
+--------------------------------------------------------------------
+FLOW H: TAKEDOWN REQUEST SYSTEM (/takedown)
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  H1. User sends /takedown → FSM starts
+  H2. Bot asks:
+        "What is your reason for requesting content removal?
+         Please describe clearly."
+      User must type. Cannot skip.
+      If user sends /cancel → clear FSM, return to main menu silently.
+
+  H3. Bot asks:
+        "Please send the link or reference to the content you want
+         removed."
+      User must send link. Cannot skip.
+      If user sends /cancel → clear FSM, return to main menu silently.
+
+  H4. Confirmation:
+        - Save to takedown_requests table (status = PENDING)
+        - Send formatted card to Hub → Takedown topic:
+            ┌──────────────────────────────────────────┐
+            │ 🗑 TAKEDOWN REQUEST                      │
+            │ User    : [Name] (@username)              │
+            │ User ID : [user_id]                       │
+            │ Reason  : [reason]                        │
+            │ Link    : [content_link]                  │
+            │ Time    : [timestamp]                     │
+            └──────────────────────────────────────────┘
+            Buttons: [ ✅ Approve & Delete ] [ ❌ Reject ]
+        - Tell user:
+            "Your removal request has been submitted. Our team
+             will review it and get back to you soon."
+
+  H5. Admin clicks ✅ Approve & Delete:
+        Bot attempts to delete content (if it has access).
+        If success:
+          - Update status = APPROVED
+          - Tell user:
+              "✅ Your content removal request has been approved.
+               The content has been removed."
+          - Log to audit
+        If bot cannot auto-delete:
+          - Show admin button: [ ✔️ Confirm Manual Deletion ]
+          - Admin deletes manually, clicks confirm
+          - Same user notification and DB update
+
+  H6. Admin clicks ❌ Reject:
+        Bot sends message in topic (replies to admin):
+          "Please type your rejection reason and send it here."
+        Bot waits for admin's next message in that topic.
+        Admin types reason and sends.
+        Bot:
+          - Update takedown status = REJECTED, rejection_reason = reason
+          - Notify user:
+              "Your removal request was reviewed but could not be
+               approved.
+               Reason: [reason]
+               If you would like to discuss this, a support session
+               has been opened for you."
+          - Auto-create support ticket (source = TAKEDOWN_REJECTION)
+          - Log to audit
+
+--------------------------------------------------------------------
+FLOW I: CONTENT SUBMISSION SYSTEM
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  I1. User clicks 📤 Submit Content Anonymously
+      Bot checks: is user a member of MAIN_CHANNEL_ID?
+        Use getChatMember API call.
+        If not member:
+          "You need to join our main channel before you can
+           submit content. Join here: [channel link]
+           Then come back and try again."
+          Show button: [ ✅ I've Joined ] that re-checks membership.
+        If member:
+          Show terms message with [ ✅ I Accept ] button.
+
+  I2. User accepts terms
+      Bot: "You can now send your content. We accept photos,
+            videos, albums, documents, audio, voice messages,
+            GIFs, and files. Send it now."
+
+  I3. User sends content
+      Bot:
+        - Compute content hash (file_id or media hash)
+        - Check content_submissions for duplicate hash
+        - If duplicate: "This content has already been submitted."
+        - If new: save to content_submissions (status = PENDING)
+        - Forward to Hub → Content Review topic:
+            ┌──────────────────────────────────────────┐
+            │ 📥 NEW CONTENT SUBMISSION               │
+            │ User    : [Name] (@username)              │
+            │ User ID : [user_id]                       │
+            │ Type    : [content_type]                  │
+            │ Time    : [timestamp]                     │
+            └──────────────────────────────────────────┘
+            [forwarded content below]
+            Buttons: [🔞 Standard] [🔥 NSFW] [⭐ Premium] [❌ Reject]
+        - Tell user:
+            "Your content has been submitted and is under review.
+             You'll be notified once a decision is made. Thank you!"
+
+  I4. Admin approves (any of the three approval types):
+        - Update submission status = APPROVED_[TYPE]
+        - Save to vault table
+        - Create queue_job (status = PENDING)
+        - Tell user:
+            "✅ Your submitted content has been approved and added
+             to the queue. Thank you for contributing!"
+        - Log to audit
+
+  I5. Admin clicks ❌ Reject:
+        Bot prompts admin: "Type your rejection reason."
+        Admin types reason.
+        - Update submission status = REJECTED, reason stored
+        - Content message archived in hub topic (do not delete)
+        - Tell user:
+            "Your submitted content was reviewed but could not be
+             approved.
+             Reason: [reason]
+             You're welcome to submit again following our guidelines."
+        - Log to audit
+
+--------------------------------------------------------------------
+FLOW J: BROADCAST SYSTEM
+--------------------------------------------------------------------
+
+THIS IS CRITICAL. MUST SUPPORT ALL CONTENT TYPES.
+
+WHAT MUST HAPPEN:
+
+  J1. Admin sends /broadcast in Hub → Broadcasts topic
+      Bot: "Send me the content you want to broadcast to all users.
+            You can send: text, photo, video, voice, audio, document,
+            GIF, sticker, or a media album. Include a caption
+            if you want one."
+
+  J2. Admin sends content (ANY TYPE):
+      Bot must detect content type and handle correctly:
+
+      TEXT:
+        message.text is not None → type = "text"
+
+      PHOTO:
+        message.photo is not None → type = "photo"
+        Use message.photo[-1].file_id (largest size)
+
+      VIDEO:
+        message.video is not None → type = "video"
+
+      VOICE:
+        message.voice is not None → type = "voice"
+
+      AUDIO:
+        message.audio is not None → type = "audio"
+
+      DOCUMENT:
+        message.document is not None → type = "document"
+
+      ANIMATION (GIF):
+        message.animation is not None → type = "animation"
+
+      STICKER:
+        message.sticker is not None → type = "sticker"
+
+      MEDIA GROUP (ALBUM — multiple photos/videos):
+        message.media_group_id is not None → type = "media_group"
+        IMPORTANT: collect ALL messages with same media_group_id
+        Use a short buffer: asyncio.sleep(1.5) then collect all
+        stored messages for that media_group_id before proceeding.
+        Build InputMediaPhoto/InputMediaVideo list with captions.
+
+      CAPTION:
+        Always preserve message.caption or message.text as caption.
+        Never strip captions from any content type.
+
+  J3. Bot previews content back to admin:
+      "Here is a preview of your broadcast. Confirm to send?"
+      Buttons: [ 📢 Confirm & Send ] [ ❌ Cancel ]
+
+  J4. Admin confirms:
+      - Create broadcast_job in DB (status = PENDING)
+      - Fetch all users from users table where is_banned = false
+      - For each user, send using the CORRECT method:
+          "text"        → bot.send_message(user_id, text)
+          "photo"       → bot.send_photo(user_id, file_id, caption=)
+          "video"       → bot.send_video(user_id, file_id, caption=)
+          "voice"       → bot.send_voice(user_id, file_id, caption=)
+          "audio"       → bot.send_audio(user_id, file_id, caption=)
+          "document"    → bot.send_document(user_id, file_id, caption=)
+          "animation"   → bot.send_animation(user_id, file_id, caption=)
+          "sticker"     → bot.send_sticker(user_id, file_id)
+          "media_group" → bot.send_media_group(user_id, media=[...])
+                          Each InputMedia item carries its own caption.
+
+      FloodWait handling:
+          try:
+            await bot.send_*(...)
+          except FloodWait as e:
+            await asyncio.sleep(e.value + 1)
+            retry once
+          except (UserBlocked, UserDeactivated, ChatNotFound):
+            log failed, continue to next user
+
+      Update broadcast_job: sent_count, failed_count, status = DONE
+      Tell admin in topic:
+          "📢 Broadcast complete.
+           Sent: [count] | Failed: [count]"
+
+--------------------------------------------------------------------
+FLOW K: VAULT & QUEUE ENGINE
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  K1. Queue worker (runs continuously, asyncio loop):
+        Every N minutes (configurable via ENV: QUEUE_INTERVAL_MINUTES):
+          Query queue_jobs where status = PENDING, ordered by scheduled_at
+          Check today's sent count per category vs daily limits:
+            PREMIUM_DAILY_LIMIT (from ENV)
+            NSFW_DAILY_LIMIT    (from ENV)
+          For each eligible job:
+            Update status = PROCESSING
+            Apply watermark (see Flow L)
+            Send to target group(s)
+            If success: status = SENT, processed_at = now()
+            If fail: retry_count += 1
+              If retry_count >= max_retries: status = DEAD_LETTER
+              Else: status = PENDING (will retry next cycle)
+
+  K2. Vault fallback (when queue is empty):
+        If no PENDING jobs exist:
+          Query vault where:
+            last_posted_at < now() - VAULT_COOLDOWN_HOURS (from ENV)
+            OR last_posted_at IS NULL
+          Order RANDOMLY (ORDER BY RANDOM() in SQL)
+          Pick one item per category up to daily limits
+          Create queue_job for it
+          Proceed to K1
+
+  K3. Dead letter queue:
+        Admin can send /deadletters in hub to see dead letter jobs
+        Admin can manually retry or dismiss them
+
+--------------------------------------------------------------------
+FLOW L: WATERMARK PIPELINE
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  PHOTOS:
+    - Load original image
+    - Load watermark PNG from WATERMARK_IMAGE_PATH (ENV)
+    - Resize watermark to ~15% of image width
+    - Position: RANDOM — pick one of: top-left, top-right,
+      bottom-left, bottom-right, center (randomize each time)
+    - Apply at opacity 90 (0.9 alpha blend)
+    - Save and return watermarked image
+
+  VIDEOS:
+    - Use FFmpeg
+    - Add TWO text watermarks:
+        Watermark 1: Community name or handle
+        Watermark 2: Secondary text (configurable)
+    - Each watermark: random position (use drawtext filter with
+      random x/y within safe margins)
+    - Each watermark: random start time (enable between 0-5s,
+      or random within video duration)
+    - Opacity: random between 110-130 (drawtext alpha 0.43-0.51)
+    - DO NOT use fixed BOTTOM_RIGHT — positions must be randomized
+
+FIX: If current code uses fixed BOTTOM_RIGHT → change to random
+position selection as described above.
+
+--------------------------------------------------------------------
+FLOW M: REFERRAL SYSTEM
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+
+  M1. On user registration:
+        Generate unique referral_code (UUID short or custom)
+        Store in users.referral_code
+        Referral link = https://t.me/[BOT_USERNAME]?start=[referral_code]
+
+  M2. When a new user starts with a start parameter:
+        Extract referral_code from /start [code]
+        Find referrer in users table by referral_code
+        If found:
+          Set new_user.referred_by = referrer.user_id
+          Insert into referrals table (verified = false)
+          Verify new user's membership in main channel
+          If verified: update referral.verified = true
+          Add 1 point to referrer.referral_points
+          Notify referrer:
+              "🎁 Someone joined using your referral link!
+               You've earned 1 referral point (৳1 discount)."
+
+  M3. On content approval:
+        Increment user's approved content count
+        Every 3 approvals: add 1 point to referral_points
+        Notify user:
+            "⭐ Your content has been approved! You've earned
+             1 referral point for 3 approved submissions."
+
+  M4. Referral dashboard (inside My Status or Referral Program button):
+        Total Referrals  : [count]
+        Active Referrals : [verified = true, user not banned]
+        Blocked Referrals: [blocked = true]
+        Your Points      : [referral_points]
+        Discount Value   : ৳[referral_points]
+
+--------------------------------------------------------------------
+FLOW N: USER STATUS DASHBOARD (📊 My Status)
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  Pull all data from DB and display:
+
+  ┌────────────────────────────────────────────┐
+  │ 📊 YOUR STATUS                             │
+  │                                             │
+  │ 👤 Name      : [full_name]                 │
+  │ 🔖 Username  : @[username]                 │
+  │ 🆔 User ID   : [user_id]                   │
+  │ 📅 Joined    : [join_date]                 │
+  │                                             │
+  │ 💎 Premium   : [ACTIVE / EXPIRED / NONE]   │
+  │ 📦 Package   : [package or N/A]            │
+  │ ⏰ Expires   : [date or N/A]               │
+  │ ⏳ Remaining : [X days or N/A]             │
+  │                                             │
+  │ 🎁 Referrals : [count] ([points] pts)      │
+  │ 💵 Discount  : ৳[points]                  │
+  │                                             │
+  │ 📤 Submissions                             │
+  │    Total     : [count]                     │
+  │    Approved  : [count]                     │
+  │    Rejected  : [count]                     │
+  │    In Queue  : [count]                     │
+  │                                             │
+  │ 💳 Last Payment : [date / N/A]             │
+  │                                             │
+  │ ⚠️ Warnings  : [count]                    │
+  │ 🔇 Mutes     : [count]                     │
+  │ 🔨 Bans      : [count]                     │
+  │ 👢 Kicks     : [count]                     │
+  └────────────────────────────────────────────┘
+
+  All values must be pulled from DB. Never hardcoded.
+
+--------------------------------------------------------------------
+FLOW O: MESSAGE CLEANUP (ALL 5 RULES)
+--------------------------------------------------------------------
+
+RULE 1: General bot conversation messages
+  After bot sends any message in private chat:
+    Store message_id + chat_id + delete_at (now + 3600 seconds)
+  Background worker checks every 5 minutes for due deletions.
+  Delete silently. No notification.
+
+RULE 2: Payment session messages
+  All messages during active payment session (after session starts,
+  before session ends):
+    Store with delete_at = now + 1200 seconds (20 minutes)
+  Same background worker handles these.
+
+RULE 3: Bangladesh phone number detection
+  Any message in private chat matching regex: 01[3-9]\d{8}
+  (11-digit BD mobile number, starting with 013-019)
+  Delete after 7 minutes (420 seconds)
+  This covers payment numbers admins forward to users.
+  Silent deletion.
+
+RULE 4: ./prefix messages
+  Already handled in Flow C (10 seconds, silent)
+
+RULE 5: Support conversation messages (user side)
+  On ticket closure:
+    Delete all messages bot exchanged with user during this ticket
+    Store message IDs during conversation for this purpose
+    On close: iterate and delete all. Silent.
+
+ALL RULES: Zero notifications. User never knows messages were deleted.
+
+FIX IF MISSING: Implement cleanup_worker as a background asyncio task
+that runs every 60 seconds and processes the cleanup queue.
+
+--------------------------------------------------------------------
+FLOW P: TRUST & FRAUD SCORING
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  trust_score and fraud_score columns exist in users table.
+
+  trust_score increases when:
+    + Content approved: +2 per approval
+    + Account age milestone (30 days: +5, 90 days: +10)
+
+  trust_score decreases when:
+    - Content rejected: -1 per rejection
+    - Warning issued: -3 per warning
+
+  fraud_score increases when:
+    + Duplicate TXID attempt: +10
+    + Fake proof (rejected payment): +5
+    + Invite abuse detected: +15
+    + Payment session expired without proof: +2
+
+  Update scores in DB after each relevant event.
+  These scores inform admin decisions — display in support card.
+
+--------------------------------------------------------------------
+FLOW Q: AUDIT LOGGING
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN:
+  Every event below must:
+    1. Write a row to audit_logs table
+    2. Forward a message to Hub → Audit Logs topic thread
+
+  Events to log:
+    - User registered
+    - Payment request created
+    - Payment session activated
+    - Payment proof submitted
+    - Payment approved / rejected
+    - Subscription activated
+    - Subscription expired
+    - Invite generated
+    - Invite used
+    - Support ticket opened / accepted / closed
+    - Takedown submitted / approved / rejected
+    - Content submitted / approved / rejected
+    - User warned / muted / banned / kicked
+    - Broadcast started / completed
+    - TXID duplicate attempt
+    - Queue job sent / failed / dead-lettered
+    - Trust/Fraud score changed
+
+  Each audit entry format in hub:
+    📋 [EVENT_TYPE]
+    User: [name] ([id])
+    Admin: [name] ([id]) (if applicable)
+    Details: [relevant info]
+    Time: [timestamp]
+
+--------------------------------------------------------------------
+FLOW R: RESTART SAFETY
+--------------------------------------------------------------------
+
+WHAT MUST HAPPEN in on_startup:
+
+  1. Query payments where session_active = true
+     For each: resume the 20-minute timeout countdown
+     (remaining = 1200 - (now - session_started_at).seconds)
+     If remaining <= 0: expire session immediately
+
+  2. Query support_tickets where status IN ('PENDING', 'ACTIVE')
+     For each: reload the user_id ↔ topic_id bridge into memory
+     (store in a dict: {user_id: topic_id, topic_id: user_id})
+
+  3. Query queue_jobs where status = 'PROCESSING'
+     For each: reset to PENDING (they were interrupted)
+
+  4. Log: "Bot restarted. Recovered [N] payment sessions,
+          [M] support tickets, [K] queue jobs."
+
+====================================================================
+STEP 4 — ADMIN HUB COMMANDS (VERIFY ALL)
+====================================================================
+
+All commands below must:
+  - Work only inside Verification Hub group
+  - Check sender is in ADMIN_IDS (from ENV) before executing
+  - Log action to audit
+
+/userinfo [user_id or @username]
+  → Show full profile: all fields from Flow N plus punishment history
+
+/warn [user_id] [reason]
+  → Insert into punishments (type = WARN)
+  → Increment users.warn_count
+  → Update trust_score (-3)
+  → Notify user silently: "You have received a warning: [reason]"
+
+/mute [user_id] [duration_minutes] [reason]
+  → Insert into punishments (type = MUTE)
+  → Set users.is_muted = true
+  → Restrict user in all managed groups
+  → Silent (no notification to user)
+
+/ban [user_id] [reason]
+  → Insert into punishments (type = BAN)
+  → Set users.is_banned = true
+  → Ban from all managed groups
+  → Silent
+
+/kick [user_id] [reason]
+  → Insert into punishments (type = KICK)
+  → Remove from group, do not ban
+  → Silent
+
+/approve [item_id]
+  → Generic approve for pending items
+  → Route to correct handler based on item type
+
+/reject [item_id] [reason]
+  → Generic reject
+
+/broadcast
+  → Trigger broadcast FSM (Flow J)
+
+/broadcast_media
+  → Shortcut: prompt admin to send single media item
+
+/broadcast_album
+  → Shortcut: prompt admin to send album
+
+/broadcast_file
+  → Shortcut: prompt admin to send document
+
+/broadcast_caption [text]
+  → Broadcast text-only message with given caption
+
+====================================================================
+STEP 5 — QUALITY PASS: EVERY USER MESSAGE
+====================================================================
+
+Go through EVERY bot message string in the codebase.
+Apply these rules to EVERY single one:
+
+USER MESSAGES must be:
+  ✓ Plain, warm, conversational English
+  ✓ Tell the user what happened AND what to do next
+  ✓ Never show internal errors, stack traces, or DB terms
+  ✓ Never say "Error", "Exception", "Invalid state"
+  ✓ Use emoji only where it genuinely helps clarity
+
+BAD → GOOD EXAMPLES:
+  "Session expired."
+  → "Your payment session has timed out. Please start a new
+     payment request from the main menu."
+
+  "TXID duplicate."
+  → "This transaction ID has already been used. If you think
+     this is a mistake, please contact support."
+
+  "User not found."
+  → "We couldn't find your account. Please send /start to get started."
+
+  "Error processing."
+  → "Something went wrong. Please try again or contact support
+     if this keeps happening."
+
+  "Submission rejected."
+  → "Your submission was reviewed but couldn't be approved.
+     Reason: [reason]. You're welcome to submit again anytime."
+
+  "Subscription expired."
+  → "Your premium access has ended. Renew anytime from the
+     main menu to get back in. 💎"
+
+ADMIN MESSAGES must be:
+  ✓ Show full context: who, what, when, why
+  ✓ Action buttons labeled clearly
+  ✓ Confirm what happened after admin takes action
+  ✓ Never ambiguous
+
+====================================================================
+STEP 6 — FINAL CLEANUP PASS
+====================================================================
+
+After all fixes:
+
+1. Run: grep -r "print(" . --include="*.py"
+   Delete every print() found.
+
+2. Run: grep -r "TODO" . --include="*.py"
+   Fix every TODO or delete the comment.
+
+3. Run: grep -r "FIXME" . --include="*.py"
+   Fix every FIXME.
+
+4. Check requirements.txt:
+   - Remove any package not imported anywhere
+   - Add any package used but missing
+   - Pin all versions
+
+5. Check .env.example — must contain ALL of these:
+   BOT_TOKEN=
+   HUB_GROUP_ID=
+   HUB_TOPIC_PAYMENTS=
+   HUB_TOPIC_CONTENT_REVIEW=
+   HUB_TOPIC_SUPPORT=
+   HUB_TOPIC_TAKEDOWN=
+   HUB_TOPIC_MODERATION=
+   HUB_TOPIC_BROADCASTS=
+   HUB_TOPIC_AUDIT_LOGS=
+   PREMIUM_GROUP_ID=
+   MAIN_CHANNEL_ID=
+   DATABASE_URL=
+   REDIS_URL=
+   ADMIN_IDS=
+   WATERMARK_IMAGE_PATH=
+   PREMIUM_DAILY_LIMIT=
+   NSFW_DAILY_LIMIT=
+   QUEUE_INTERVAL_MINUTES=
+   VAULT_COOLDOWN_HOURS=
+   BOT_USERNAME=
+
+6. Verify README.md exists and contains:
+   - Project name and description
+   - Requirements (Python version, PostgreSQL, Redis, FFmpeg)
+   - Setup steps (clone, venv, pip install, .env, alembic, run)
+   - How to run: python main.py or equivalent
+   - ENV variable reference
+   Written in plain English, readable by a non-developer.
+
+7. Run: python -m py_compile on EVERY .py file.
+   Zero syntax errors allowed.
+
+====================================================================
+STEP 7 — PRE-PUSH FINAL CHECKLIST
+====================================================================
+
+Verify every item. Do not push until every box is YES.
+
+CLEANUP:
+  [ ] No __pycache__ anywhere
+  [ ] No print() statements anywhere
+  [ ] No TODO or FIXME comments
+  [ ] No unused imports
+  [ ] No empty placeholder files
+  [ ] No debug scripts or temp files
+  [ ] All .py files compile without errors
+
+DATABASE:
+  [ ] All 14 tables exist with all required columns
+  [ ] Alembic migrations are up to date
+  [ ] txid_registry has unique constraint on txid
+
+FLOWS:
+  [ ] /start: onboarding shown once (DB check), then main menu
+  [ ] Main menu: correct 4-row layout with correct button text
+  [ ] Exactly 3 commands registered: /start /takedown /help
+  [ ] ./prefix: auto-delete in 10 seconds, silent, private only
+  [ ] Payment: full flow D1→D8 working
+  [ ] TXID: duplicate rejected before admin sees proof
+  [ ] Subscription expiry: 7d/3d/0d notifications + auto-removal
+  [ ] Support: all 3 entry points, full card, 5-min check, bridge, closure
+  [ ] Takedown: reason → link → card → approve/reject → typed reason → auto-support
+  [ ] Content submission: membership gate → terms → submit → moderate → vault → queue
+  [ ] Broadcast: ALL types (text/photo/video/voice/audio/document/animation/sticker/album)
+  [ ] Broadcast: captions preserved on ALL types
+  [ ] Broadcast: FloodWait handled
+  [ ] Vault: random reposting with fair rotation and cooldown
+  [ ] Queue: PENDING→PROCESSING→SENT/FAILED→DEAD_LETTER states
+  [ ] Watermark photos: random position, 0.9 opacity, PNG overlay
+  [ ] Watermark videos: TWO text layers, random position, random timing
+  [ ] Referral: link generated on registration, points awarded correctly
+  [ ] My Status: all 19 fields displayed
+  [ ] Cleanup: all 5 rules implemented and running
+  [ ] Trust/Fraud: scores updated on relevant events
+  [ ] Audit: all events logged to DB and hub topic
+  [ ] Restart safety: sessions restored from DB on startup
+  [ ] All user messages: friendly, clear, no internal errors shown
+  [ ] All admin cards: full context, clear action buttons
+  [ ] All hub admin commands: work and are admin-gated
+  [ ] .env.example: all 20 variables listed
+  [ ] README.md: exists and is readable
+
+====================================================================
+STEP 8 — COMMIT AND PUSH TO GITHUB
+====================================================================
+
+Only after EVERY item in Step 7 is verified:
+
+git add -A
+
+git commit -m "fix: complete production audit and final delivery
+
+Systems completed and verified:
+- Onboarding: DB-based first-time check, shown once only
+- Main menu: correct 4-row layout
+- Commands: /start /takedown /help only, no extras
+- ./prefix: 10-second silent auto-delete
+- Payment: full flow, admin-manual details only, 20min timeout,
+  TXID uniqueness, atomic 9-step approval, one-time invite
+- Subscription lifecycle: 7d/3d/0d notifications, auto-removal
+- Support: 3 entry points, full card, bridge, 5min check, closure
+- Takedown: FSM, admin card, typed rejection, auto-support open
+- Content: membership gate, hash dedup, all types, moderation
+- Broadcast: text/photo/video/voice/audio/document/anim/sticker/album
+  with caption preservation and FloodWait protection
+- Vault: permanent archive with random fair-rotation reposting
+- Queue: full state machine + dead letter queue + daily limits
+- Watermark: random position photos, 2-layer random video
+- Referral: link on registration, 1ref=1pt, 3approvals=1pt
+- Dashboard: all 19 fields from DB
+- Cleanup: all 5 rules (60min/20min/7min/10sec/on-closure)
+- Trust/Fraud: score updates on all relevant events
+- Audit: all events → DB + hub topic
+- Restart safety: sessions, tickets, queue restored on startup
+- All user messages rewritten friendly and clear
+- All admin cards have full context
+- All hub commands admin-gated
+- .env.example complete with all 20 variables
+- README updated"
+
+git push origin main
+
+If push fails:
+  git remote -v                    → verify remote URL
+  git pull --rebase origin main    → resolve divergence
+  git push origin main             → retry
+
+After success: output the final commit hash and confirm:
+"All changes pushed to GitHub. Commit: [hash]"
+
+====================================================================
+END OF PROMPT
+====================================================================
+DO NOT REPORT DONE UNLESS EVERY STEP IS COMPLETE.
+DO NOT SKIP ANYTHING BECAUSE IT "LOOKS FINE".
+READ THE CODE. VERIFY THE CODE. FIX THE CODE.
+THIS IS PRODUCTION. THERE IS NO SECOND CHANCE AFTER DELIVERY.
+====================================================================

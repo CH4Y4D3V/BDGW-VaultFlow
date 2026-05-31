@@ -281,9 +281,12 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             else message.document.file_id
         )
 
-        await service.update_status(
+        success = await service.update_status(
             session.id, PaymentStatus.UNDER_REVIEW, screenshot_file_id=file_id
         )
+        if not success:
+            await message.reply_text("❌ Failed to update session status. Please try again or contact support.")
+            return
 
         text = build_proof_received_card(session.id)
         sent_msg = await message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -569,13 +572,13 @@ async def _notify_admins_of_request(
             extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
         )
 
-    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
+    from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_request_actions
 
     try:
         user = await client.get_users(session.user_id)
         plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
         text = build_admin_payment_review_card(user, session, plan)
-        reply_markup = build_admin_payment_actions(session.id, session.user_id)
+        reply_markup = build_admin_payment_request_actions(session.id, session.user_id)
 
         await client.send_message(
             chat_id=settings.VERIFICATION_GROUP_ID,

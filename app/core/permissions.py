@@ -15,6 +15,7 @@ logger = get_logger(__name__)
 class Role(str, Enum):
     OWNER = "owner"
     SUDO = "sudo"
+    SUPER_ADMIN = "super_admin"  # Explicit role
     MODERATOR = "moderator"
     SUPPORT_ADMIN = "support_admin"
     PAYMENT_ADMIN = "payment_admin"
@@ -27,6 +28,7 @@ def get_user_roles(user_id: int) -> list[Role]:
         roles.append(Role.OWNER)
     if user_id in settings.SUDO_IDS:
         roles.append(Role.SUDO)
+        roles.append(Role.SUPER_ADMIN)
     if user_id in settings.ADMIN_IDS or user_id in settings.MODERATOR_IDS:
         roles.append(Role.MODERATOR)
     if user_id in settings.SUPPORT_ADMIN_IDS:
@@ -39,7 +41,7 @@ def get_user_roles(user_id: int) -> list[Role]:
 
 
 def has_role(user_id: int, role: Role) -> bool:
-    """OWNER and SUDO inherit all roles."""
+    """OWNER and SUDO/SUPER_ADMIN inherit all roles."""
     if user_id == settings.OWNER_ID:
         return True
     if user_id in settings.SUDO_IDS:
@@ -49,6 +51,9 @@ def has_role(user_id: int, role: Role) -> bool:
 
 def is_sudo(user_id: int) -> bool:
     return user_id == settings.OWNER_ID or user_id in settings.SUDO_IDS
+
+def is_super_admin(user_id: int) -> bool:
+    return is_sudo(user_id)
 
 def is_moderator(user_id: int) -> bool:
     return has_role(user_id, Role.MODERATOR)
@@ -72,7 +77,7 @@ def is_any_admin(user_id: int) -> bool:
 
 # ── Startup Validation ────────────────────────────────────────────────────────
 
-REQUIRED_ROLES = ["OWNER", "SUDO", "MODERATOR", "SUPPORT_ADMIN", "PAYMENT_ADMIN", "SCHEDULER_ADMIN"]
+REQUIRED_ROLES = ["OWNER", "SUDO", "SUPER_ADMIN", "MODERATOR", "SUPPORT_ADMIN", "PAYMENT_ADMIN", "SCHEDULER_ADMIN"]
 for req_role in REQUIRED_ROLES:
     if not hasattr(Role, req_role):
         raise RuntimeError(f"Invalid role reference: Role.{req_role} used but not defined.")
@@ -145,6 +150,14 @@ def permission_required(role: Role, silent: bool = False):
                         logger.debug(
                             "permission_denial_reply_failed",
                             extra={"ctx_error": str(e)},
+                        )
+                return
+
+            return await func(client, update, *args, **kwargs)
+
+        return wrapper
+    return decorator
+ra={"ctx_error": str(e)},
                         )
                 return
 
