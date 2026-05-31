@@ -14,12 +14,6 @@ from app.health import start_health_server
 from app.referral.scheduler import ReferralScheduler
 
 
-# Handler registration is handled by Pyrogram's plugin system.
-# plugins=dict(root="app.handlers") in client.py loads all handler modules
-# and wires @Client.on_message decorators into the dispatcher automatically.
-# The circular import that previously broke callback_handler is fixed in
-# app/services/channel_service.py (lazy import of _get_watermark_config).
-
 logger = get_logger(__name__)
 
 
@@ -72,14 +66,13 @@ class AppLifecycle:
             logger.exception("lifecycle_channel_seeding_failed")
             sys.exit(1)
 
-
         # 3. Telegram Client
         try:
             logger.info("lifecycle_bot_start")
             await self._bot.start()
             me = await self._bot.get_me()
             set_bot_id(me.id)
-            
+
             from pyrogram.types import BotCommand
             await self._bot.set_bot_commands([
                 BotCommand("start", "Main Menu"),
@@ -104,9 +97,9 @@ class AppLifecycle:
                 },
             )
 
-            # --- GAP 8 FIX: Restore topic mapping cache from DB ---
+            # FIX: warm_cache_from_db (was incorrectly restore_cache which doesn't exist)
             from app.services.topic_manager import get_topic_manager
-            await get_topic_manager().restore_cache()
+            await get_topic_manager().warm_cache_from_db()
 
         except Exception as e:
             logger.exception(
@@ -147,15 +140,11 @@ class AppLifecycle:
             from app.referral.scheduler import ReferralScheduler
             from app.handlers.membership_handler import init_membership_handler
 
-            # 1. Repository & Indexes
             ref_repo = ReferralRepository(DatabaseManager.get_db())
             await ref_repo.create_indexes()
 
-            # 2. Service
             ref_service = ReferralService(ref_repo, self._bot)
 
-            # 3. Scheduler & Jobs
-            # We use the internal scheduler from DistributionEngine if available
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 self._referral_scheduler = ReferralScheduler(
@@ -168,7 +157,6 @@ class AppLifecycle:
             else:
                 logger.warning("lifecycle_referral_scheduler_skipped")
 
-            # 4. Membership Handler bridge
             init_membership_handler(ref_service)
 
         except Exception as e:
@@ -178,10 +166,10 @@ class AppLifecycle:
         try:
             from app.payments.repository import PaymentRepository
             from app.payments.timeouts import PaymentTimeoutMonitor
-            
+
             payment_repo = PaymentRepository(DatabaseManager.get_db())
             timeout_monitor = PaymentTimeoutMonitor(payment_repo)
-            
+
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 raw_scheduler.add_job(
@@ -194,8 +182,7 @@ class AppLifecycle:
                     coalesce=True
                 )
                 logger.info("lifecycle_payment_monitor_registered")
-                
-                # ── SYSTEM 25: STARTUP RECOVERY ──
+
                 from app.payments import get_payment_service
                 payment_service = get_payment_service()
                 asyncio.create_task(payment_service.resume_active_sessions())
@@ -207,7 +194,7 @@ class AppLifecycle:
         try:
             from app.services.support_monitor import SupportMonitor
             support_monitor = SupportMonitor(self._bot)
-            
+
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 raw_scheduler.add_job(
@@ -226,7 +213,7 @@ class AppLifecycle:
         try:
             from app.services.cleanup_service import get_cleanup_service
             cleanup_service = get_cleanup_service(self._bot)
-            
+
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 raw_scheduler.add_job(
@@ -245,11 +232,6 @@ class AppLifecycle:
         logger.info("lifecycle_startup_complete")
 
     async def _verify_channel_access(self) -> None:
-        """
-        Verify the bot can access critical channels at startup.
-        This forces Pyrogram to cache the peer. Only the VAULT_CHANNEL_ID is
-        considered a critical failure that aborts startup.
-        """
         logger.info("lifecycle_channel_verification_start")
         channels_to_check = {
             "VAULT_CHANNEL_ID": getattr(settings, "VAULT_CHANNEL_ID", None),
@@ -264,7 +246,7 @@ class AppLifecycle:
 
             if not raw_id:
                 if is_critical:
-                    logger.critical("lifecycle_critical_channel_unconfigured", extra={"ctx_channel": name})
+                    logger.error("lifecycle_critical_channel_unconfigured", extra={"ctx_channel": name})
                     critical_failure = True
                 continue
 
@@ -273,30 +255,17 @@ class AppLifecycle:
                 chat = await self._bot.get_chat(channel_id)
                 logger.info("lifecycle_channel_access_confirmed", extra={"ctx_channel": name, "ctx_title": chat.title})
             except Exception as e:
-                log_msg = (
-                    f"Failed to access channel {name} ({raw_id}). "
-                    f"Ensure the bot is a member with appropriate permissions. Error: {e}"
-                )
                 if is_critical:
-                    logger.critical("lifecycle_critical_channel_access_failed", extra={"ctx_error": str(e)})
+                    logger.error("lifecycle_critical_channel_access_failed", extra={"ctx_error": str(e)})
                     critical_failure = True
                 else:
-                    if name == "PREMIUM_CHANNEL_ID":
-                        logger.warning(
-                            "lifecycle_premium_channel_unreachable",
-                            extra={"ctx_error": str(e)}
-                        )
-                    else:
-                        logger.warning("lifecycle_channel_access_warning", extra={"ctx_msg": log_msg})
+                    logger.warning("lifecycle_channel_access_warning", extra={"ctx_channel": name, "ctx_error": str(e)})
 
         if critical_failure:
-            logger.critical("lifecycle_boot_aborted_channel_failure")
+            logger.error("lifecycle_boot_aborted_channel_failure")
             sys.exit(1)
 
     def _audit_handler_registration(self) -> int:
-        """
-        Emit a detailed breakdown of all registered Pyrogram handlers.
-        """
         total_handlers = 0
         breakdown: dict[int, list[str]] = {}
 
@@ -333,7 +302,7 @@ class AppLifecycle:
             return 0
 
         if total_handlers == 0:
-            logger.critical(
+            logger.error(
                 "lifecycle_audit_no_handlers",
                 extra={"ctx_groups": dict(breakdown)},
             )

@@ -27,8 +27,8 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# FIX GAP 7: BD phone number — must be exactly 11 digits, 01[3-9] prefix.
-# Lookbehind/lookahead prevent matching partial numbers embedded in longer digits.
+# FIX: Added r prefix to make this a raw string, eliminating SyntaxWarning
+# for \d inside a regular string in Python 3.12.
 _BD_PHONE_REGEX = re.compile(r"(?<!\d)01[3-9]\d{8}(?!\d)")
 
 
@@ -125,7 +125,6 @@ async def handle_prefix_auto_delete(client: Client, message: Message) -> None:
 
 
 # ── Idempotency cache ─────────────────────────────────────────────────────────
-# Prevents duplicate UPDATE_TRACE logs if loaded multiple times.
 
 _trace_cache: set[str] = set()
 _MAX_CACHE_SIZE = 200
