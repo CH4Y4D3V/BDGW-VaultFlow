@@ -471,16 +471,16 @@ class PaymentService:
     # ── Rejection ─────────────────────────────────────────────────────────────
 
     async def reject_payment(
-        self, payment_id: str, reason: str, admin_id: int
+        self, payment_id: str, reason: str, admin_id: int, admin_name: Optional[str] = None
     ) -> bool:
         """
-        Reject a payment. Works from UNDER_REVIEW (normal) or AWAITING_PAYMENT
-        (TXID fraud detection path) by using acquire_processing_lock only when
-        session is in UNDER_REVIEW.
+        Reject a payment.
         """
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
+
+        # ... (rest of logic will be updated in smaller blocks or full replacement if needed)
 
         # For TXID fraud path — session may be in AWAITING_PAYMENT
         if session.status == PaymentStatus.AWAITING_PAYMENT:
@@ -495,7 +495,16 @@ class PaymentService:
             await self.repository.log_event(
                 payment_id,
                 "payment_rejected_fraud",
-                {"reason": reason, "admin_id": admin_id},
+                {"reason": reason, "admin_id": admin_id, "admin_name": admin_name},
+            )
+
+            from app.services.audit_service import get_audit, AuditAction
+            await get_audit().log(
+                action=AuditAction.REJECT,
+                performed_by=admin_id,
+                performed_by_name=admin_name,
+                target_user_id=session.user_id,
+                details={"payment_id": payment_id, "reason": reason, "path": "fraud_txid"}
             )
             # Clear Redis
             try:

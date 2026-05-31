@@ -400,21 +400,25 @@ async def handle_admin_reject_request(
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
+    admin_name = callback.from_user.first_name or "Admin"
+    await callback_query.answer(f"❌ Rejecting request... (Admin: {admin_name})", show_alert=True)
+
     service = get_payment_service()
     success = await service.reject_payment(
-        session_id, "Payment request rejected by admin", admin_id
+        session_id, "Payment request rejected by admin", admin_id, admin_name
     )
 
     if success:
         session = await service.get_session(session_id)
         try:
-            await callback.message.edit_text(
-                (callback.message.text or "")
-                + f"\n\n❌ Request Rejected by {callback.from_user.first_name}",
+            await callback_query.message.edit_text(
+                (callback_query.message.text or "")
+                + f"\n\n❌ Request Rejected by {admin_name}",
                 reply_markup=None,
             )
         except Exception:
             pass
+
         if session:
             try:
                 await client.send_message(
@@ -427,7 +431,7 @@ async def handle_admin_reject_request(
                 pass
         await callback.answer("Request rejected.")
     else:
-        await callback.answer("Could not reject request.", show_alert=True)
+        await callback.answer("Coulck.answer("Could not reject requrt=True)
 
 
 # ── Admin: approve / reject decision ──────────────────────────────────────────
@@ -504,28 +508,31 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
 
     reason_text = {
         "txid": "Invalid Transaction ID",
-        "amount": "Incorrect Payment Amount",
+        "amount": "Incorrectnt": "Incorrect Payment Amount",
         "dup": "Duplicate Transaction Reference",
         "unclear": "Payment Screenshot is Unclear",
     }.get(reason_code, "Payment rejected")
 
+    admin_name = callback.from_user.first_name or "Admin"
+    await callback.answer(f"❌ Finalizing rejection... (Admin: {admin_name})", show_alert=True)
+    
     service = get_payment_service()
-    success = await service.reject_payment(session_id, reason_text, admin_id)
+    success = await service.reject_payment(session_id, reason_text, admin_id, admin_name)
 
     if success:
         session = await service.get_session(session_id)
         try:
-            # FIX: Use edit_text (card was text not photo initially)
+            # FIX GAP 4: use edit_text (card was text not photo initially)
             await callback.message.edit_text(
                 (callback.message.text or "")
-                + f"\n\n❌ Rejected: {reason_text}",
+                + f"\n\n❌ Rejected by {admin_name}\nReason: {reason_text}",
                 reply_markup=None,
             )
         except Exception:
             try:
                 await callback.message.edit_caption(
                     (callback.message.caption or "")
-                    + f"\n\n❌ Rejected: {reason_text}",
+                    + f"\n\n❌ Rejected by {admin_name}\nReason: {reason_text}",
                     reply_markup=None,
                 )
             except Exception:
@@ -542,7 +549,7 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
                     reply_markup=reply_markup,
                     parse_mode=ParseMode.HTML,
                 )
-            except Exception as e:
+            excep          except Exception as e:
                 logger.warning(
                     "rejection_notify_user_failed",
                     extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
@@ -614,14 +621,14 @@ async def _notify_admins_of_submission(
     from app.ui.admin_cards import build_admin_payment_review_card, build_admin_payment_actions
 
     try:
-        user = await client.get_users(session.user_id)
+        user = await client.get_usr_id)
         plan = PLANS.get(session.plan_id, {"label": "Unknown", "price": 0})
         text = build_admin_payment_review_card(user, session, plan)
         reply_markup = build_admin_payment_actions(session.id, session.user_id)
 
         try:
             await client.send_photo(
-                chat_id=settings.VERIFICATION_GROUP_ID,
+                chat_id=settings.VERIFIsettings.VERIFICATION_GROUP_ID,
                 photo=file_id,
                 caption=text,
                 reply_markup=reply_markup,
@@ -641,4 +648,6 @@ async def _notify_admins_of_submission(
         logger.error(
             "notify_admins_submission_failed",
             extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
+        )
+n.user_id, "ctx_error": str(e)},
         )

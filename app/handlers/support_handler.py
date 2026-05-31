@@ -330,19 +330,23 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
         await callback.answer("❌ Could not identify user to notify.", show_alert=True)
         return
 
+    admin_name = callback.from_user.first_name or "Admin"
+    
     # Notify user
     try:
         status_text = "resolved" if action == "resolve" else "closed"
         
         # ── SYSTEM 18: AUDIT LOG ──
         from app.services.audit_service import get_audit
-        # --- GAP 7 FIX: Use the actual tid from matches ---
         await get_audit().log(
             action=f"support_{action}",
             performed_by=callback.from_user.id,
+            performed_by_name=admin_name,
             target_user_id=user_id,
             details={"ticket_id": callback.matches[0].group("tid")}
         )
+
+        await callback.answer(f"✅ Ticket {status_text}! (Admin: {admin_name})", show_alert=True)
 
         await client.send_message(
             chat_id=user_id,

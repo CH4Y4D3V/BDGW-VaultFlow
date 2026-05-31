@@ -59,6 +59,8 @@ class AuditAction:
     MEMBER_KICK  = "member_kick"
     MEMBER_BAN   = "member_ban"
     MEMBER_UNBAN = "member_unban"
+    MEMBER_MUTE  = "member_mute"
+    BROADCAST    = "broadcast"
 
 
 class AuditService:

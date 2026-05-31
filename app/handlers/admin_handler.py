@@ -283,6 +283,16 @@ async def handle_warn_command(client: Client, message: Message) -> None:
             upsert=True,
         )
 
+        admin_name = message.from_user.first_name or "Admin"
+        from app.services.audit_service import get_audit
+        await get_audit().log(
+            action="member_warn",
+            performed_by=message.from_user.id,
+            performed_by_name=admin_name,
+            target_user_id=target_id,
+            details={"reason": reason}
+        )
+
         try:
             await client.send_message(
                 target_id,
@@ -291,13 +301,14 @@ async def handle_warn_command(client: Client, message: Message) -> None:
                 parse_mode=ParseMode.HTML,
             )
             await message.reply_text(
-                f"✅ Warning sent to <code>{target_id}</code>.",
+                f"✅ Warning sent to <code>{target_id}</code>.\nAdmin: {admin_name}",
                 parse_mode=ParseMode.HTML,
             )
         except Exception:
             await message.reply_text(
                 f"✅ Warning logged for <code>{target_id}</code>, "
-                "but could not DM user (blocked or not started).",
+                "but could not DM user.\n"
+                f"Admin: {admin_name}",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -462,9 +473,10 @@ async def handle_approve_command(client: Client, message: Message) -> None:
         from app.payments.service import get_payment_service
         service = get_payment_service()
         
+        admin_name = message.from_user.first_name or "Admin"
         success = await service.approve_payment(client, session_id, message.from_user.id)
         if success:
-            await message.reply_text(f"✅ Payment <code>{session_id}</code> approved.", parse_mode=ParseMode.HTML)
+            await message.reply_text(f"✅ Payment <code>{session_id}</code> approved.\nAdmin: {admin_name}", parse_mode=ParseMode.HTML)
         else:
             await message.reply_text("❌ Failed to approve payment. Check session status.")
     except Exception as e:
@@ -487,9 +499,10 @@ async def handle_reject_command(client: Client, message: Message) -> None:
         from app.payments.service import get_payment_service
         service = get_payment_service()
         
+        admin_name = message.from_user.first_name or "Admin"
         success = await service.reject_payment(session_id, reason, message.from_user.id)
         if success:
-            await message.reply_text(f"❌ Payment <code>{session_id}</code> rejected.\nReason: {reason}", parse_mode=ParseMode.HTML)
+            await message.reply_text(f"❌ Payment <code>{session_id}</code> rejected.\nReason: {reason}\nAdmin: {admin_name}", parse_mode=ParseMode.HTML)
         else:
             await message.reply_text("❌ Failed to reject payment.")
     except Exception as e:
@@ -823,6 +836,17 @@ async def handle_broadcast_confirm(client: Client, callback: CallbackQuery) -> N
     message_ids = [m.id for m in messages]
     caption = messages[0].caption or messages[0].text or None
     target = broadcast_data.get("target", "all")
+
+    admin_name = callback_query.from_user.first_name or "Admin"
+    await callback_query.answer(f"🚀 Broadcast started by {admin_name}!", show_alert=True)
+    
+    from app.services.audit_service import get_audit, AuditAction
+    await get_audit().log(
+        action=AuditAction.BROADCAST,
+        performed_by=admin_id,
+        performed_by_name=admin_name,
+        details={"target": target, "count": len(message_ids)}
+    )
 
     asyncio.create_task(
         _execute_broadcast(client, source_chat_id, message_ids, caption, admin_id, target),
