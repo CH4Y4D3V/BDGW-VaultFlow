@@ -1,0 +1,294 @@
+You are a senior Python production engineer doing a FINAL pre-production fix of BDGW VaultFlow — a Pyrogram + MongoDB Telegram bot deployed on Railway.
+
+STACK: Python 3.12, Pyrogram (pyrofork), Motor (MongoDB async), Redis, APScheduler, aiohttp. NOT aiogram. NOT PostgreSQL. Fix within the existing stack only.
+
+READ THE FULL CODEBASE FIRST. Every .py file. Understand what exists before touching anything.
+
+====================================================================
+CRITICAL ERRORS FROM PRODUCTION LOGS — FIX THESE FIRST
+====================================================================
+
+ERROR 1: handle_start crashed
+Log: "handle_start crashed" immediately on /start
+Root cause to find and fix: read app/handlers/user_handler.py fully.
+The /start handler is crashing silently. Find the exact exception, fix it.
+Common causes in this codebase:
+- UserRepository or SubscriptionService throwing on first call
+- ReferralRepository import failing at runtime
+- Redis get_redis() returning sync client but being awaited
+- Missing field in User document causing KeyError
+Fix: wrap each sub-operation in individual try/except with proper logging so the crash location is identified and fixed. The handler must NEVER crash — it must always show the main menu or onboarding.
+
+ERROR 2: lifecycle_referral_startup_failed
+Log: "lifecycle_referral_startup_failed" during bot startup
+File: app/core/lifecycle.py
+Root cause: ReferralRepository.create_indexes() is failing.
+Fix: read app/referral/repository.py — the create_indexes method likely has a duplicate index creation issue. Add try/except around each individual index creation (not the whole block) so one bad index doesn't kill the whole referral system. Also fix the ReferralService instantiation in lifecycle.py — it takes (repo, bot) but bot may not be fully started yet.
+
+ERROR 3: lifecycle_payment_monitor_failed  
+Log: "lifecycle_payment_monitor_failed" during bot startup
+File: app/core/lifecycle.py, app/payments/timeouts.py
+Root cause: PaymentTimeoutMonitor or its scheduler registration is failing.
+Fix: read both files. The scheduler job registration likely fails because the APScheduler instance isn't ready or the job function signature is wrong. Fix the registration and add proper error handling.
+
+ERROR 4: non_core_index_setup_failed / non_core_final_init_failed
+File: app/core/database.py
+Root cause: Index creation in ReferralRepository.create_indexes() throws and the outer try/except in database.py catches it but then non_core_final_init_failed fires too — meaning the PaymentRepository.create_indexes() also fails downstream.
+Fix: in app/core/database.py, wrap referral indexes and payment indexes in SEPARATE try/except blocks so one failure doesn't cascade. Log which specific index failed.
+
+====================================================================
+AFTER FIXING CRASHES — VERIFY AND FIX THESE FLOWS
+====================================================================
+
+Read BDGW_FLOW_BY_SHADOW_MASTER.txt in the project root. That is the product spec. Every flow must work exactly as described.
+
+FLOW 1: /start ONBOARDING (BROKEN — shows "system busy")
+File: app/handlers/user_handler.py
+
+Must work like this:
+1. User sends /start
+2. Check MongoDB users collection for this user_id
+3. If NOT found: insert user, show onboarding message (once only), then show main menu
+4. If found AND onboarded=False: show onboarding, set onboarded=True, show main menu  
+5. If found AND onboarded=True: show main menu directly
+
+Main menu keyboard EXACT layout per spec:
+Row 1: [ 💎 Premium Access ]
+Row 2: [ 📤 Submit Content Anonymously ]
+Row 3: [ 🎁 Referral Program ] [ 📊 My Status ]
+Row 4: [ 🆘 Need Help ]
+
+Onboarding message must explain:
+- This bot belongs to BD Gone Wild Community
+- Controls Premium Access
+- Handles Content Submission  
+- Handles Content Removal Requests
+- Handles User Status
+- Handles Support Requests
+- Community rules and submission rules
+
+The onboarding check must use DB (users collection), NOT FSM, NOT Redis alone.
+
+FLOW 2: BOT COMMAND REGISTRATION
+File: app/core/lifecycle.py or main_bot.py (wherever set_my_commands is called)
+
+Exactly 3 commands must be registered at startup:
+  /start    → Main Menu
+  /takedown → Remove Content  
+  /help     → Support
+
+Add this to the startup sequence:
+  await bot.set_bot_commands([
+      BotCommand("start", "Main Menu"),
+      BotCommand("takedown", "Remove Content"),
+      BotCommand("help", "Support"),
+  ])
+
+FLOW 3: /help COMMAND — SUPPORT TICKET ENTRY POINT
+File: app/handlers/support_handler.py or create app/handlers/help_handler.py
+
+/help must:
+1. Check if user has OPEN or ACTIVE support ticket in MongoDB user_topics collection
+2. If yes: tell user "You already have an open support ticket. An admin will respond shortly."
+3. If no: trigger the same support ticket creation flow as clicking 🆘 Need Help button
+   - Create topic in VERIFICATION_GROUP_ID hub
+   - Send user profile card as first message in topic
+   - Send user confirmation message
+   - Start 5-minute unattended check
+
+Register /help as a command handler in filters.private.
+
+FLOW 4: ./PREFIX AUTO-DELETE
+File: app/handlers/update_logger.py (handle_prefix_auto_delete exists but check it works)
+
+Verify the existing handler at group=-1 for messages starting with "./" actually:
+1. Catches the message BEFORE other handlers
+2. Sleeps 10 seconds
+3. Deletes silently
+4. Does NOT call stop_propagation (other handlers should still process if needed)
+5. Handles deletion failure silently (try/except)
+
+FLOW 5: TAKEDOWN FSM — MISSING ADMIN HUB FORWARDING
+File: app/handlers/takedown_handler.py
+
+Current state: collects reason and link, submits to DB, tells user "submitted". MISSING:
+- After DB insert, must forward formatted card to VERIFICATION_GROUP_ID hub topic HUB_TOPIC_TAKEDOWN (from settings)
+- Card format:
+  🗑 TAKEDOWN REQUEST
+  User: [Name] (@username)
+  User ID: [id]
+  Reason: [reason]
+  Link: [content_link]
+  Time: [timestamp]
+  Buttons: [ ✅ Approve & Delete ] [ ❌ Reject ]
+- Admin approve callback: update DB status=APPROVED, notify user "Your content removal request has been approved."
+- Admin reject callback: prompt admin "Type rejection reason", wait for reply, update DB status=REJECTED, notify user with reason, AUTO-OPEN support ticket (source=TAKEDOWN_REJECTION)
+- All takedown states must be saved to MongoDB takedown_requests collection
+
+FLOW 6: AUDIT LOGGING — IMPORT ERRORS
+File: app/services/audit_service.py
+
+The audit service has missing imports. Verify:
+- `settings` is imported from app.config
+- `ParseMode` is imported from pyrogram.enums
+- The hub logging try/except won't crash if bot isn't connected
+- The `is_connected` check uses correct Pyrogram attribute
+
+FLOW 7: WATERMARK — FIXED POSITION (SPEC SAYS RANDOM)
+File: app/watermark/ffmpeg_processor.py
+
+Current: BOTTOM_RIGHT hardcoded
+Spec requires:
+- Photos: random position from [top-left, top-right, bottom-left, bottom-right, center], randomize each call
+- Videos: TWO text watermarks, random positions (random x/y within safe margins), random timing
+
+Fix _process_photo to use random.choice(['top-left','top-right','bottom-left','bottom-right','center']) and calculate pixel coordinates accordingly.
+Fix _process_video to use TWO drawtext filters with:
+  - Random x position: random.randint(20, video_width-200) — use FFmpeg expressions like (w*0.1+0.0*random(0)) or fixed random values calculated before the command
+  - Random y position per watermark
+  - Both watermarks in a single FFmpeg command using two -vf drawtext filters chained
+
+FLOW 8: ADMIN HANDLER — DUPLICATE FUNCTION NAMES
+File: app/handlers/admin_handler.py
+
+There are TWO definitions of handle_ban_command and TWO of handle_unban_command. Python silently uses the last one, dropping the first. The first definitions use Role.SUDO, the second use Role.ADMIN/MODERATOR.
+Fix: remove duplicate definitions. Keep ONE handle_ban_command decorated with @permission_required(Role.ADMIN) with full ban logic from user_repository. Keep ONE handle_unban_command with Role.ADMIN.
+
+FLOW 9: CLEANUP WORKER — NEVER SCHEDULED
+File: app/core/lifecycle.py, app/services/cleanup_service.py
+
+The CleanupService exists but the background worker (run_cleanup_sweep) may not be scheduled properly. 
+Verify in lifecycle.py that:
+1. cleanup_service is initialized with the bot instance
+2. A scheduler job is registered to call cleanup_service.run_cleanup_sweep every 5 minutes
+3. The cleanup worker runs independently as an asyncio task OR APScheduler job
+4. BD phone number regex: r'(?:013|014|015|016|017|018|019)\d{8}' — must match 11-digit BD numbers
+
+FLOW 10: REFERRAL SYSTEM — STARTUP FAILURE
+File: app/referral/repository.py, app/core/lifecycle.py
+
+The referral system fails to start. Fix:
+1. In ReferralRepository.create_indexes(): wrap each create_index call in individual try/except. If index already exists with same options, ignore. If conflict, drop and recreate.
+2. In lifecycle.py referral startup block: the ReferralService takes (repo, bot). Bot must be fully started before passing it. Verify bot.start() completes before ReferralService is instantiated.
+3. After fixing, verify init_membership_handler(ref_service) is called correctly.
+
+FLOW 11: PAYMENT MONITOR — STARTUP FAILURE  
+File: app/core/lifecycle.py, app/payments/timeouts.py
+
+The payment monitor fails at startup. Fix:
+1. Read PaymentTimeoutMonitor.__init__ — it takes repository. Verify PaymentRepository is correctly instantiated before creating the monitor.
+2. The scheduler.add_job call passes args=[self._bot] but self._bot might not exist in that scope. Fix the argument passing.
+3. Add proper error handling around the entire payment monitor registration block.
+4. Also fix: app/payments/service.py — approve_payment uses `ParseMode.HTML` but ParseMode may not be imported. Check and add import.
+
+====================================================================
+AFTER ALL FIXES — VERIFY THESE CRITICAL ITEMS
+====================================================================
+
+1. Run through every handler file and check for undefined variables. Common ones found in this codebase:
+   - `tid` used in support_handler.py but never defined — fix to use proper variable
+   - `get_redis` imported in callback_handler.py but not imported — add import
+   - `Message` type not imported in callback_handler.py — add import from pyrogram.types
+   - `ChatType` used in topic_manager.py but may not be imported from pyrogram.enums
+   - `ReturnDocument` used in referral/service.py but not imported from pymongo
+   - `InlineKeyboardMarkup` used in admin_handler.py broadcast section but not imported
+   - `FloodWait` used in admin_handler.py but not imported
+   - `PaymentSession` referenced in payments/service.py approve method — verify import
+
+2. Check app/handlers/callback_handler.py:
+   - Line using `get_redis` — add: from app.core.redis_client import get_redis
+   - Line using `Message` type — add to imports: from pyrogram.types import Message, CallbackQuery
+
+3. Check app/referral/service.py:
+   - `ReturnDocument` from pymongo is used but may not be imported — add: from pymongo import ReturnDocument
+
+4. Check app/payments/service.py:
+   - `ParseMode` used in approve_payment — add: from pyrogram.enums import ParseMode
+
+5. Check app/services/topic_manager.py:
+   - `ChatType` — add: from pyrogram.enums import ChatType
+   - The TopicManager uses `__clinit__` instead of `__init__` — this is a bug. Fix to `__init__`.
+
+6. Check app/core/lifecycle.py startup sequence:
+   - Payment recovery task: `asyncio.create_task(payment_service.resume_active_sessions())` — verify payment_service is defined in that scope
+
+7. Check all handler files for `from pyrogram.types import Message` — many handlers receive Message but don't import it explicitly (Pyrogram plugins load differently but type hints still need imports for isinstance checks)
+
+====================================================================
+FINAL STEPS AFTER ALL FIXES
+====================================================================
+
+1. Verify app/config/settings.py has WATERMARK_POSITION field:
+   If missing, add: WATERMARK_POSITION: str = "BOTTOM_RIGHT"
+
+2. Verify .env.example has ALL these variables (add any missing):
+   API_ID=
+   API_HASH=
+   BOT_TOKEN=
+   SESSION_NAME=vaultflow_bot
+   MONGO_URI=
+   MONGO_DB_NAME=vaultflow
+   REDIS_URL=redis://localhost:6379/0
+   VERIFICATION_GROUP_ID=
+   VAULT_CHANNEL_ID=
+   NSFW_GROUP_ID=0
+   PREMIUM_GROUP_ID=0
+   PREMIUM_CHANNEL_ID=0
+   LOG_CHANNEL_ID=0
+   OWNER_ID=
+   ADMIN_IDS=[]
+   SUDO_IDS=[]
+   MODERATOR_IDS=[]
+   SUPPORT_ADMIN_IDS=[]
+   PAYMENT_ADMIN_IDS=[]
+   HUB_TOPIC_PAYMENTS=0
+   HUB_TOPIC_CONTENT_REVIEW=0
+   HUB_TOPIC_SUPPORT=0
+   HUB_TOPIC_TAKEDOWN=0
+   HUB_TOPIC_USER_MOD=0
+   HUB_TOPIC_BROADCASTS=0
+   HUB_TOPIC_AUDIT=0
+   DAILY_CAP_NSFW=75
+   DAILY_CAP_PREMIUM=140
+   WATERMARK_ENABLED=false
+   WATERMARK_POSITION=BOTTOM_RIGHT
+   QUEUE_DEADLINE_HOURS=24
+   GRACE_PERIOD_DAYS=3
+   INVITE_EXPIRY_MINUTES=30
+   NSFW_DISPLAY_NAME=BD GONE WILD VIDEO
+   PREMIUM_DISPLAY_NAME=BD GONE WILD PREMIUM
+
+3. Commit and push:
+   git add -A
+   git commit -m "fix: production crash fixes - /start handler, referral startup, payment monitor, audit imports, duplicate admin handlers, missing imports across handlers"
+   git push origin main
+
+4. After push, output:
+   "DONE. Commit hash: [hash]. All critical errors fixed:
+   - /start no longer crashes
+   - Referral system starts cleanly  
+   - Payment monitor registers correctly
+   - Audit logging imports fixed
+   - Duplicate admin handlers removed
+   - Missing imports added across all handlers
+   - Watermark uses random positions
+   - ./prefix auto-delete verified
+   - /help command registered
+   - Takedown hub forwarding added"
+
+====================================================================
+RULES YOU MUST FOLLOW
+====================================================================
+
+1. Read EVERY file before changing ANYTHING
+2. Never truncate output — full file every time
+3. Never use placeholder comments like # ... rest unchanged
+4. Never change the stack (keep Pyrogram, Motor, MongoDB)
+5. Never break existing working functionality while fixing crashes
+6. Every Telegram API call must be in try/except
+7. The bot must handle FloodWait on every send operation
+8. Database is source of truth — never FSM alone
+9. After every fix, verify the file compiles: python -m py_compile filename.py
+10. If you find additional bugs beyond this list while reading code — FIX THEM. Don't report and skip.
+
+START NOW. Read every file. Fix every error. Push to GitHub.
