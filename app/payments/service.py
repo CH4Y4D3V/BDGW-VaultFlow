@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.referral.repository import ReferralRepository
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode

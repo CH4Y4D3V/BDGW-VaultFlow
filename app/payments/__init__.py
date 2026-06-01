@@ -3,16 +3,16 @@ from __future__ import annotations
 from typing import Optional
 
 from app.core.database import DatabaseManager
-from app.payments.repository import PaymentRepository
-from app.payments.service import PaymentService
-from app.referral.repository import ReferralRepository
-
 _payment_service: Optional[PaymentService] = None
 
 
-def get_payment_service() -> PaymentService:
+def get_payment_service() -> "PaymentService":
     global _payment_service
     if _payment_service is None:
+        from app.payments.repository import PaymentRepository
+        from app.payments.service import PaymentService
+        from app.referral.repository import ReferralRepository
+        
         db = DatabaseManager.get_db()
         repo = PaymentRepository(db)
         referral_repo = ReferralRepository(db)
