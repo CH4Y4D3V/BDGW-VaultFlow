@@ -16,38 +16,36 @@ from pyrogram.errors import (
 )
 
 from app.config import settings
+from app.core.database import DatabaseManager
 from app.services.subscription_service import SubscriptionService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_SWEEP_INTERVAL_SECONDS = 300  # 5 minutes
+_SWEEP_INTERVAL_SECONDS = 300   # Full sweep every 5 minutes
+_REMINDER_INTERVAL_SECONDS = 3600  # Reminder check every hour
 _MAX_NOTIFY_RETRIES = 2
 
 
 class SubscriptionWorker:
     """
-    Background worker responsible for the subscription state machine.
+    Background worker for the subscription state machine.
 
     Sweep cycle (every 5 minutes):
-      1. Pre-expiry notifications: 7 days and 3 days (two warnings, 24h apart)
-      2. Active → Grace: expires_at has passed
-      3. Grace → Expired: grace_until has passed → remove from chats
+      1. Active → Grace   : expires_at has passed
+      2. Grace  → Expired : grace_until has passed → remove from chats
 
-    FIX (GAP 2): Three-day second warning now uses a timestamp-based check
-    rather than a window overlap check. Previously, subs with 48-72h remaining
-    would receive both three-day warnings immediately. Now the second warning
-    only fires if at least 20 hours have passed since the first warning timestamp.
-
-    Notification flags are stored in subscription.metadata and persisted to DB
-    via update_subscription(), so they survive restarts.
+    Reminder cycle (every hour):
+      3. Send 7-day expiry warning (once per subscription)
+      4. Send 3-day expiry warning (once per subscription)
     """
 
     def __init__(self) -> None:
         self._service = SubscriptionService()
         self._bot: Optional[Client] = None
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._sweep_task: Optional[asyncio.Task] = None
+        self._reminder_task: Optional[asyncio.Task] = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -56,24 +54,28 @@ class SubscriptionWorker:
             return
         self._bot = bot
         self._running = True
-        self._task = asyncio.create_task(
-            self._run_loop(), name="subscription-worker"
+        self._sweep_task = asyncio.create_task(
+            self._run_sweep_loop(), name="subscription-sweep"
+        )
+        self._reminder_task = asyncio.create_task(
+            self._run_reminder_loop(), name="subscription-reminders"
         )
         logger.info("Subscription worker started")
 
     async def stop(self) -> None:
         self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        for task in (self._sweep_task, self._reminder_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         logger.info("Subscription worker stopped")
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # ── Sweep loop (state machine) ────────────────────────────────────────────
 
-    async def _run_loop(self) -> None:
+    async def _run_sweep_loop(self) -> None:
         while self._running:
             try:
                 await self._sweep()
@@ -86,81 +88,9 @@ class SubscriptionWorker:
             except asyncio.CancelledError:
                 break
 
-    # ── Sweep ─────────────────────────────────────────────────────────────────
-
     async def _sweep(self) -> None:
         now = datetime.now(timezone.utc)
-        logger.debug(
-            "Subscription sweep running",
-            extra={"ctx_time": now.isoformat()},
-        )
-
-        # ── Step 0: Pre-expiry notifications ─────────────────────────────────
-
-        # 7-day warning (sent once)
-        try:
-            seven_day_docs = await self._service.get_expiring_soon(within_hours=168)
-            for sub in seven_day_docs:
-                if "seven_day_warned" not in sub.metadata:
-                    await self._notify(
-                        sub.user_id,
-                        "⏰ <b>Your subscription expires in 7 days.</b>\n\n"
-                        "Renew now to keep your premium access uninterrupted.",
-                    )
-                    sub.metadata["seven_day_warned"] = True
-                    sub.metadata["seven_day_warned_at"] = now.isoformat()
-                    await self._service.update_subscription(sub)
-        except Exception as e:
-            logger.error("7-day warning sweep failed", exc_info=e)
-
-        # 3-day warning (two warnings, 24h apart)
-        # FIX: Use timestamp comparison to enforce 24h gap between warnings.
-        # Previous code checked `expires_at < now + 48h` which fired both
-        # warnings simultaneously for subs with 48-72h remaining.
-        try:
-            three_day_docs = await self._service.get_expiring_soon(within_hours=72)
-            for sub in three_day_docs:
-                meta = sub.metadata
-
-                # First 3-day warning
-                if "three_day_warned_1" not in meta:
-                    await self._notify(
-                        sub.user_id,
-                        "⏰ <b>Your subscription expires in 3 days.</b>\n\n"
-                        "Renew now to keep your premium access uninterrupted.",
-                    )
-                    meta["three_day_warned_1"] = True
-                    meta["three_day_warned_1_at"] = now.isoformat()
-                    await self._service.update_subscription(sub)
-                    continue  # Don't check for second warning in same sweep
-
-                # Second 3-day warning — only if ≥20 hours since first warning
-                # (20h instead of 24h to handle slight sweep timing drift)
-                elif "three_day_warned_2" not in meta:
-                    warned_1_at_raw = meta.get("three_day_warned_1_at")
-                    if warned_1_at_raw:
-                        try:
-                            warned_1_at = datetime.fromisoformat(warned_1_at_raw)
-                            if warned_1_at.tzinfo is None:
-                                warned_1_at = warned_1_at.replace(tzinfo=timezone.utc)
-                            hours_since_first = (now - warned_1_at).total_seconds() / 3600
-                        except (ValueError, TypeError):
-                            hours_since_first = 0
-                    else:
-                        hours_since_first = 0
-
-                    if hours_since_first >= 20:
-                        await self._notify(
-                            sub.user_id,
-                            "⚠️ <b>Your subscription expires in less than 48 hours!</b>\n\n"
-                            "Renew now to avoid losing access.",
-                        )
-                        meta["three_day_warned_2"] = True
-                        meta["three_day_warned_2_at"] = now.isoformat()
-                        await self._service.update_subscription(sub)
-
-        except Exception as e:
-            logger.error("3-day warning sweep failed", exc_info=e)
+        logger.debug("Subscription sweep running", extra={"ctx_time": now.isoformat()})
 
         # ── Step 1: Active → Grace ────────────────────────────────────────────
         newly_expired = await self._service.get_newly_expired()
@@ -189,7 +119,6 @@ class SubscriptionWorker:
         for sub in grace_expired:
             try:
                 await self._service.expire(sub)
-                # Section 7.8: Group removal notification IS allowed
                 await self._notify(
                     sub.user_id,
                     "❌ <b>Your subscription has fully expired.</b>\n\n"
@@ -215,6 +144,121 @@ class SubscriptionWorker:
                 },
             )
 
+    # ── Reminder loop ─────────────────────────────────────────────────────────
+
+    async def _run_reminder_loop(self) -> None:
+        while self._running:
+            try:
+                await self._sweep_reminders()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Subscription reminder sweep error", exc_info=e)
+            try:
+                await asyncio.sleep(_REMINDER_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+
+    async def _sweep_reminders(self) -> None:
+        """
+        Check for subscriptions expiring in ~7 days and ~3 days.
+        Uses a ±12-hour window around each threshold to avoid missing subs.
+        Tracks sent reminders directly on the subscription document via
+        reminder_7d_sent / reminder_3d_sent boolean fields.
+        These fields are NOT on the Subscription model — they are set directly
+        in MongoDB so the model class doesn't need changing.
+        """
+        now = datetime.now(timezone.utc)
+        db = DatabaseManager.get_db()
+        col = db["subscriptions"]
+
+        # ── 7-day reminder (window: 6.5d → 7.5d) ─────────────────────────────
+        min_7d = now + timedelta(days=6, hours=12)
+        max_7d = now + timedelta(days=7, hours=12)
+
+        subs_7d = await col.find({
+            "status": "active",
+            "expires_at": {"$gte": min_7d, "$lte": max_7d},
+            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "reminder_7d_sent": {"$ne": True},
+        }).to_list(length=None)
+
+        for sub_doc in subs_7d:
+            user_id = sub_doc["user_id"]
+            expires_at = sub_doc.get("expires_at")
+            days_left = (
+                (expires_at - now).days
+                if expires_at else 7
+            )
+            try:
+                await self._notify(
+                    user_id,
+                    f"⏰ <b>Subscription expiring in {days_left} days</b>\n\n"
+                    f"Your premium subscription expires on "
+                    f"<b>{expires_at.strftime('%Y-%m-%d') if expires_at else 'soon'}</b>.\n\n"
+                    "Renew early to avoid losing access. Contact an admin to resubscribe.",
+                )
+                await col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"reminder_7d_sent": True}},
+                )
+                logger.info(
+                    "7-day expiry reminder sent",
+                    extra={"ctx_user_id": user_id},
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to send 7-day reminder",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+
+        # ── 3-day reminder (window: 2.5d → 3.5d) ─────────────────────────────
+        min_3d = now + timedelta(days=2, hours=12)
+        max_3d = now + timedelta(days=3, hours=12)
+
+        subs_3d = await col.find({
+            "status": "active",
+            "expires_at": {"$gte": min_3d, "$lte": max_3d},
+            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "reminder_3d_sent": {"$ne": True},
+        }).to_list(length=None)
+
+        for sub_doc in subs_3d:
+            user_id = sub_doc["user_id"]
+            expires_at = sub_doc.get("expires_at")
+            days_left = (
+                (expires_at - now).days
+                if expires_at else 3
+            )
+            try:
+                await self._notify(
+                    user_id,
+                    f"⚠️ <b>Subscription expiring in {days_left} days!</b>\n\n"
+                    f"Your premium access expires on "
+                    f"<b>{expires_at.strftime('%Y-%m-%d') if expires_at else 'soon'}</b>.\n\n"
+                    "Renew NOW to avoid being removed from premium channels.",
+                )
+                await col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"reminder_3d_sent": True}},
+                )
+                logger.info(
+                    "3-day expiry reminder sent",
+                    extra={"ctx_user_id": user_id},
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to send 3-day reminder",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+
+        total = len(subs_7d) + len(subs_3d)
+        if total:
+            logger.info(
+                "Expiry reminders sent",
+                extra={"ctx_7d": len(subs_7d), "ctx_3d": len(subs_3d)},
+            )
+
     # ── Telegram helpers ──────────────────────────────────────────────────────
 
     async def _notify(self, user_id: int, text: str) -> None:
@@ -230,9 +274,7 @@ class SubscriptionWorker:
                 )
                 return
             except FloodWait as e:
-                await asyncio.sleep(
-                    int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-                )
+                await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
             except (UserIsBlocked, InputUserDeactivated, PeerIdInvalid):
                 return  # User unreachable — not an error
             except RPCError as e:
@@ -251,9 +293,10 @@ class SubscriptionWorker:
 
     async def _remove_from_chats(self, user_id: int) -> None:
         """
-        Kick the user from managed destination chats (Section 7.8).
+        Kick the user from all managed destination chats.
         Immediately unbans so they can rejoin after resubscribing.
-        Section 21: Bot mute/ban notifications NOT sent — only remove silently.
+        Only acts if the bot is admin in the target chat.
+        Silently ignores if user already left.
         """
         if not self._bot:
             return
@@ -267,6 +310,7 @@ class SubscriptionWorker:
         for chat_id in target_chats:
             try:
                 await self._bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                # Unban immediately so they can re-enter after resubscribing
                 await self._bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
                 logger.info(
                     "Expired user removed from chat",
@@ -280,15 +324,9 @@ class SubscriptionWorker:
             except UserNotParticipant:
                 pass  # Already not in chat
             except FloodWait as e:
-                await asyncio.sleep(
-                    int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
-                )
+                await asyncio.sleep(int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER)
             except Exception as e:
                 logger.debug(
                     "Could not remove user from chat",
-                    extra={
-                        "ctx_user_id": user_id,
-                        "ctx_chat_id": chat_id,
-                        "ctx_error": str(e),
-                    },
+                    extra={"ctx_user_id": user_id, "ctx_chat_id": chat_id, "ctx_error": str(e)},
                 )

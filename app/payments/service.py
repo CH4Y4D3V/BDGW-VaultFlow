@@ -31,22 +31,10 @@ SESSION_TIMEOUT_MINUTES = 20  # Timer starts ONLY after payment details are deli
 ALLOWED_TRANSITIONS: dict[PaymentStatus, set[PaymentStatus]] = {
     PaymentStatus.WAITING_PAYMENT_DETAILS: {
         PaymentStatus.WAITING_TXID,
-        PaymentStatus.AWAITING_PAYMENT,
-        PaymentStatus.CANCELLED,
-        PaymentStatus.EXPIRED,
-    },
-    PaymentStatus.PENDING_DETAILS: {
-        PaymentStatus.WAITING_TXID,
-        PaymentStatus.AWAITING_PAYMENT,
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
     },
     PaymentStatus.WAITING_TXID: {
-        PaymentStatus.WAITING_SCREENSHOT,
-        PaymentStatus.CANCELLED,
-        PaymentStatus.EXPIRED,
-    },
-    PaymentStatus.AWAITING_PAYMENT: {
         PaymentStatus.WAITING_SCREENSHOT,
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
