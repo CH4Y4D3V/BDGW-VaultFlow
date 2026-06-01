@@ -204,32 +204,38 @@ class DatabaseManager:
             ref_repo = ReferralRepository(cls._db)
             try:
                 await ref_repo.create_indexes()
+                logger.info("referral_indexes_verified")
             except Exception as e:
-                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
-                    "non_core_index_setup_failed",
-                    extra={
-                        "ctx_collection": "referral",
-                        "ctx_index_name": index_name,
-                        "ctx_mongo_error": str(e)
-                    },
+                    "referral_index_setup_failed",
+                    extra={"ctx_mongo_error": str(e)},
                     exc_info=True
                 )
 
-            from app.payments.repository import PaymentRepository
-            payment_repo = PaymentRepository(cls._db)
             try:
+                from app.payments.repository import PaymentRepository
+                payment_repo = PaymentRepository(cls._db)
                 await payment_repo.create_indexes()
+                logger.info("payment_indexes_verified")
             except Exception as e:
-                logger.error("payment_index_setup_failed", extra={"ctx_error": str(e)}, exc_info=True)
+                logger.error(
+                    "payment_index_setup_failed", 
+                    extra={"ctx_mongo_error": str(e)}, 
+                    exc_info=True
+                )
 
-            from app.repositories.txid_repository import TXIDRepository
-            txid_repo = TXIDRepository(cls._db)
             try:
+                from app.repositories.txid_repository import TXIDRepository
+                txid_repo = TXIDRepository(cls._db)
                 await txid_repo.create_indexes()
-                logger.info("mongodb_initialization_complete")
+                logger.info("txid_indexes_verified")
             except Exception as e:
-                logger.error("txid_index_setup_failed", extra={"ctx_error": str(e)})
+                logger.error(
+                    "txid_index_setup_failed", 
+                    extra={"ctx_mongo_error": str(e)}
+                )
+            
+            logger.info("mongodb_initialization_complete")
             
         except Exception as e:
             logger.error(

@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from pymongo import ReturnDocument  # FIX BUG E: was missing
+from pymongo import ReturnDocument  # FIX BUG E: now imported
 from pyrogram import Client
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import FloodWait, UserNotParticipant

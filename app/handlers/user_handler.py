@@ -268,22 +268,28 @@ async def _delete_after(message: Message, delay: float = 10.0) -> None:
 
 @Client.on_message(filters.command("start") & filters.private)
 async def handle_start(client: Client, message: Message) -> None:
+    """
+    Unified entry point — handles new users, resumed onboarding, and main menu.
+    Flow 1 Implementation.
+    """
+    if not message.from_user:
+        return
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name or "Creator"
+
+    # ── Anti-Spam / Cooldown
+    spam_key = f"onboarding:spam:{user_id}"
+    if await _check_spam_guard(spam_key, ttl_seconds=5):
+        asyncio.create_task(_delete_after(message, delay=0))
+        return
+
+    logger.info("/start command received", extra={"ctx_user_id": user_id})
+
     try:
-        if not message.from_user:
-            return
-        user_id = message.from_user.id
-        first_name = message.from_user.first_name or "Creator"
+        from app.repositories.user_repository import UserRepository
+        user_repo = UserRepository()
+        user_doc = await user_repo.find_one({"_id": user_id})
 
-        # ── Anti-Spam / Cooldown
-        spam_key = f"onboarding:spam:{user_id}"
-        if await _check_spam_guard(spam_key, ttl_seconds=5):
-            # Failed auth/spam cleanup (immediate)
-            asyncio.create_task(_delete_after(message, delay=0))
-            return
-
-        logger.info("/start command received", extra={"ctx_user_id": user_id})
-
-        # ── Referral Payload Handling ──
         referred_by = None
         if len(message.command) > 1:
             payload = message.command[1]
@@ -293,20 +299,24 @@ async def handle_start(client: Client, message: Message) -> None:
                 except (IndexError, ValueError):
                     pass
 
-        # ── SYSTEM 1: USER REGISTRATION ──
-        from app.repositories.user_repository import UserRepository
-        user_repo = UserRepository()
-        await user_repo.upsert_user(
-            user_id=user_id,
-            full_name=f"{first_name} {message.from_user.last_name or ''}".strip(),
-            username=message.from_user.username,
-            referred_by=referred_by
-        )
+        onboarding_service = _get_onboarding_service()
 
-        # Ensure free sub exists
-        sub_service = _get_sub_service()
-        existing_sub = await sub_service.get_subscription(user_id)
-        if existing_sub is None:
+        if user_doc is None:
+            # Step 1: New User Registration
+            logger.info("new_user_detected", extra={"ctx_user_id": user_id})
+            await user_repo.insert_one({
+                "_id": user_id,
+                "first_name": first_name,
+                "last_name": message.from_user.last_name,
+                "username": message.from_user.username,
+                "onboarded": False,
+                "referred_by": referred_by,
+                "created_at": datetime.now(timezone.utc),
+                "join_date": datetime.now(timezone.utc),
+            })
+            
+            # Ensure free sub exists
+            sub_service = _get_sub_service()
             from app.models.subscription import Plan
             await sub_service.grant(
                 user_id=user_id,
@@ -315,26 +325,37 @@ async def handle_start(client: Client, message: Message) -> None:
                 granted_by=0,
                 notes="Auto-registered on /start"
             )
+            
+            # Show Onboarding
+            text, keyboard = await onboarding_service.render_start(user_id, first_name)
+            await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+            
+            # Referral registration
+            if referred_by:
+                try:
+                    from app.core.lifecycle import get_lifecycle
+                    lifecycle = get_lifecycle()
+                    if hasattr(lifecycle, "_referral_scheduler") and lifecycle._referral_scheduler:
+                        ref_service = lifecycle._referral_scheduler._service
+                        await ref_service.register_referral(referred_by, user_id)
+                except Exception as ref_err:
+                    logger.warning("referral_registration_failed", extra={"ctx_error": str(ref_err)})
 
-        onboarding_service = _get_onboarding_service()
-        text, keyboard = await onboarding_service.render_start(
-            user_id,
-            first_name
-        )
+        elif not user_doc.get("onboarded", False):
+            # Step 2: Resumed Onboarding
+            logger.info("resumed_onboarding", extra={"ctx_user_id": user_id})
+            text, keyboard = await onboarding_service.render_start(user_id, first_name)
+            await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
-        await message.reply_text(
-            text=text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard
-        )
-        
+        else:
+            # Step 3: Main Menu
+            logger.info("returning_user_menu", extra={"ctx_user_id": user_id})
+            text, keyboard = await onboarding_service.render_onboarding(user_id, first_name)
+            await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
     except Exception as e:
-        logger.error(
-            "handle_start crashed",
-            extra={"ctx_user_id": getattr(message.from_user, "id", "?"), "ctx_error": str(e)},
-            exc_info=True,
-        )
-        await message.reply_text("❌ System busy. Please try again in a moment.")
+        logger.exception("handle_start_crashed", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+        await message.reply_text("⚠️ Something went wrong. Please try /start again.")
 
 
 # ── Onboarding Callbacks ──────────────────────────────────────────────────────
@@ -516,16 +537,94 @@ async def handle_rules(client: Client, message: Message) -> None:
 async def handle_mystatus(client: Client, message: Message) -> None:
     if not message.from_user:
         return
-    await handle_mystatus_direct(client, message)
-    logger.info("/mystatus", extra={"ctx_user_id": message.from_user.id})
+    user_id = message.from_user.id
+    
+    try:
+        from app.ui.status_cards import build_user_status_card
+        from app.models.subscription import SubscriptionStatus
+        
+        sub_service = _get_sub_service()
+        sub = await sub_service.get_subscription(user_id)
+        
+        from app.referral.repository import ReferralRepository
+        ref_repo = ReferralRepository(DatabaseManager.get_db())
+        wallet = await ref_repo.get_wallet(user_id) or {
+            "points_balance": 0,
+            "total_earned": 0,
+            "total_spent": 0,
+            "active_referrals": 0
+        }
+        
+        onboarding_service = _get_onboarding_service()
+        user_state = await onboarding_service.get_user_state(user_id)
+        
+        sub_data = None
+        if sub and sub.status == SubscriptionStatus.ACTIVE:
+            sub_data = {
+                "plan_label": sub.plan.value.upper(),
+                "expiry": sub.expires_at.strftime("%Y-%m-%d") if sub.expires_at else "Lifetime"
+            }
+
+        from app.services.trust_service import TrustService
+        trust_service = TrustService()
+        trust_metrics = await trust_service.get_user_metrics(user_id)
+        
+        queue_repo = _get_queue_repo()
+        recent_jobs = await queue_repo.get_user_queue(user_id)
+
+        wallet.update({
+            "trust_level": trust_metrics["level"],
+            "fraud_score": trust_metrics["fraud_score"],
+            "recent_jobs": recent_jobs
+        })
+
+        text, keyboard = build_user_status_card(
+            user_id=user_id,
+            username=message.from_user.username,
+            state=user_state.value,
+            subscription=sub_data,
+            wallet=wallet
+        )
+        
+        await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        logger.info("/mystatus", extra={"ctx_user_id": user_id})
+
+    except Exception as e:
+        logger.exception("handle_mystatus_failed", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+        await message.reply_text("⚠️ Account dashboard is currently unavailable.")
 
 
 @Client.on_message(filters.command("help") & filters.private)
 async def handle_help(client: Client, message: Message) -> None:
-    from app.ui.help_cards import build_help_card_v2, build_help_keyboard
-    text = build_help_card_v2()
-    keyboard = build_help_keyboard()
-    await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+    """
+    Support & Guide entry point.
+    Flow 3: Checks for active support tickets before showing general help.
+    """
+    user_id = message.from_user.id
+    
+    try:
+        from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
+        topic_manager = get_topic_manager()
+        topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
+        
+        if topic_id:
+            await message.reply_text(
+                "🆘 <b>Active Support Ticket Found</b>\n\n"
+                "Our team is already looking into your request. "
+                "You can send additional messages or files directly here, "
+                "and an admin will respond shortly.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        from app.ui.help_cards import build_help_card_v2, build_help_keyboard
+        text = build_help_card_v2()
+        keyboard = build_help_keyboard()
+        await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error("handle_help_failed", extra={"ctx_user_id": user_id, "ctx_error": str(e)})
+        await message.reply_text("Support & Guide are currently unavailable. Please try again later.")
 
 
 # ── /ping ─────────────────────────────────────────────────────────────────────

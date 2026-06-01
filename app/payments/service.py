@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 from app.config import settings
 from app.models.subscription import Plan
@@ -452,6 +453,37 @@ class PaymentService:
         return True
 
     # ── Recovery helpers ──────────────────────────────────────────────────────
+
+    async def resume_active_sessions(self) -> int:
+        """
+        Flow 11: Startup recovery.
+        Resets stuck PROCESSING sessions and restores timeout monitors.
+        """
+        # 1. Reset stuck processing
+        await self.repository.reset_stuck_processing()
+
+        # 2. Cleanup expired sessions missed during downtime
+        count = 0
+        try:
+            from app.bot.client import get_bot
+            client = get_bot()
+            
+            expired = await self.repository.get_expired_timeouts()
+            if expired:
+                from app.payments.timeouts import PaymentTimeoutMonitor
+                monitor = PaymentTimeoutMonitor(self.repository)
+                for doc in expired:
+                    try:
+                        await monitor.expire_session(client, doc["payment_id"])
+                        count += 1
+                    except Exception as e:
+                        logger.error("failed_to_expire_on_resume", extra={"ctx_payment_id": doc.get("payment_id"), "ctx_error": str(e)})
+
+            logger.info("payment_recovery_complete", extra={"ctx_recovered": count})
+            return count
+        except Exception as e:
+            logger.error("resume_active_sessions_failed", extra={"ctx_error": str(e)})
+            return 0
 
     async def get_sessions_for_recovery(self) -> list[PaymentSession]:
         """

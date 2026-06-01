@@ -149,4 +149,27 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
             "The content has been automatically locked pending final decision.",
             parse_mode=ParseMode.HTML
         )
+
+        # ── SYSTEM 15: HUB FORWARDING ──
+        try:
+            hub_text = (
+                "⚖️ <b>NEW TAKEDOWN REQUEST</b>\n"
+                f"┣ 🆔 <b>Record:</b> <code>{record_id}</code>\n"
+                f"┣ 📦 <b>Content:</b> <code>{data['content_id']}</code>\n"
+                f"┣ 👤 <b>Reporter:</b> <code>{user_id}</code>\n"
+                f"┗ 📝 <b>Reason:</b> {data['reason']}\n\n"
+                f"🔗 <b>Proof:</b> {data['link']}"
+            )
+            
+            # Forward to Hub Audit or Moderation topic
+            target_topic = getattr(settings, "HUB_TOPIC_AUDIT", None)
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=hub_text,
+                message_thread_id=target_topic,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as hub_err:
+            logger.warning("takedown_hub_forward_failed", extra={"ctx_error": str(hub_err)})
+
         return

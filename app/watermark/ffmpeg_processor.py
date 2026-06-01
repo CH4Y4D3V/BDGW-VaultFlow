@@ -133,19 +133,31 @@ class FFmpegProcessor:
         start1 = round(random.uniform(0, 5), 1)
         start2 = round(random.uniform(0, 5), 1)
 
-        # Randomize positions
-        pos_options = [
-            "x=20:y=20", # TOP_LEFT
-            "x=(w-text_w)-20:y=20", # TOP_RIGHT
-            "x=20:y=(h-text_h)-20", # BOTTOM_LEFT
-            "x=(w-text_w)-20:y=(h-text_h)-20", # BOTTOM_RIGHT
-            "x=(w-text_w)/2:y=(h-text_h)/2" # CENTER
-        ]
+        # ── RANDOM POSITION (TRUE RANDOM) ──
+        # pos1 = random.randint(20, width-text_w-20)
+        # In FFmpeg filter syntax, we use 'w' and 'h' as variables.
+        # We'll use a mix of FFmpeg expressions and pre-calculated random offsets.
         
-        pos1 = random.choice(pos_options)
-        pos2 = random.choice(pos_options)
-        while pos2 == pos1:
-            pos2 = random.choice(pos_options)
+        offset_x1 = random.randint(20, 100)
+        offset_y1 = random.randint(20, 100)
+        offset_x2 = random.randint(20, 100)
+        offset_y2 = random.randint(20, 100)
+        
+        # Corner selection for pos1
+        corner1 = random.choice(["TL", "TR", "BL", "BR", "C"])
+        if corner1 == "TL": pos1 = f"x={offset_x1}:y={offset_y1}"
+        elif corner1 == "TR": pos1 = f"x=w-text_w-{offset_x1}:y={offset_y1}"
+        elif corner1 == "BL": pos1 = f"x={offset_x1}:y=h-text_h-{offset_y1}"
+        elif corner1 == "BR": pos1 = f"x=w-text_w-{offset_x1}:y=h-text_h-{offset_y1}"
+        else: pos1 = f"x=(w-text_w)/2:y=(h-text_h)/2"
+
+        # Corner selection for pos2 (different from pos1 if possible)
+        corner2 = random.choice([c for c in ["TL", "TR", "BL", "BR", "C"] if c != corner1])
+        if corner2 == "TL": pos2 = f"x={offset_x2}:y={offset_y2}"
+        elif corner2 == "TR": pos2 = f"x=w-text_w-{offset_x2}:y={offset_y2}"
+        elif corner2 == "BL": pos2 = f"x={offset_x2}:y=h-text_h-{offset_y2}"
+        elif corner2 == "BR": pos2 = f"x=w-text_w-{offset_x2}:y=h-text_h-{offset_y2}"
+        else: pos2 = f"x=(w-text_w)/2:y=(h-text_h)/2"
 
         drawtext1 = (
             f"drawtext=text='{text1}':"
