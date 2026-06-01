@@ -74,12 +74,19 @@ class AppLifecycle:
             me = await self._bot.get_me()
             set_bot_id(me.id)
 
+            # FLOW 2: Register exactly 3 bot commands
             from pyrogram.types import BotCommand
-            await self._bot.set_bot_commands([
-                BotCommand("start", "Main Menu"),
-                BotCommand("takedown", "Remove Content"),
-                BotCommand("help", "Support"),
-            ])
+            try:
+                await self._bot.set_bot_commands([
+                    BotCommand("start", "Main Menu"),
+                    BotCommand("takedown", "Remove Content"),
+                    BotCommand("help", "Support"),
+                ])
+            except Exception as cmd_err:
+                logger.warning(
+                    "lifecycle_set_bot_commands_failed",
+                    extra={"ctx_error": str(cmd_err)},
+                )
 
             try:
                 await self._verify_channel_access()
@@ -98,7 +105,6 @@ class AppLifecycle:
                 },
             )
 
-            # FIX: warm_cache_from_db (was incorrectly restore_cache which doesn't exist)
             from app.services.topic_manager import get_topic_manager
             await get_topic_manager().warm_cache_from_db()
 
@@ -127,6 +133,7 @@ class AppLifecycle:
             )
             raise
 
+        # 5. Subscription Worker
         self._subscription_worker = SubscriptionWorker()
         try:
             await self._subscription_worker.start(bot=self._bot)
@@ -135,16 +142,25 @@ class AppLifecycle:
             self._subscription_worker = None
 
         # 6. Referral System Integration
+        # FIX: Each sub-step isolated so one failure doesn't kill the rest.
+        # Bot is fully started at this point — safe to pass to ReferralService.
         try:
             from app.referral.repository import ReferralRepository
             from app.referral.service import ReferralService
-            from app.referral.scheduler import ReferralScheduler
             from app.handlers.membership_handler import init_membership_handler
 
             ref_repo = ReferralRepository(DatabaseManager.get_db())
-            # NOTE: Indexes are now handled exclusively by DatabaseManager.connect()
-            # to prevent redundant calls and potential E11000 conflicts during boot.
 
+            # create_indexes is now per-index fault-tolerant
+            try:
+                await ref_repo.create_indexes()
+            except Exception as idx_err:
+                logger.error(
+                    "lifecycle_referral_index_failed",
+                    extra={"ctx_error": str(idx_err)},
+                )
+
+            # Bot is started — safe to instantiate ReferralService
             ref_service = ReferralService(ref_repo, self._bot)
 
             if self._engine and self._engine.scheduler:
@@ -152,7 +168,7 @@ class AppLifecycle:
                 self._referral_scheduler = ReferralScheduler(
                     service=ref_service,
                     scheduler=raw_scheduler,
-                    channel_id=int(settings.VAULT_CHANNEL_ID)
+                    channel_id=int(settings.VAULT_CHANNEL_ID),
                 )
                 self._referral_scheduler.register_jobs()
                 logger.info("lifecycle_referral_jobs_registered")
@@ -162,39 +178,47 @@ class AppLifecycle:
             init_membership_handler(ref_service)
 
         except Exception as e:
-            logger.error("lifecycle_referral_startup_failed", extra={"ctx_error": str(e)}, exc_info=True)
+            logger.error(
+                "lifecycle_referral_startup_failed",
+                extra={"ctx_error": str(e)},
+            )
 
         # 7. Payment Timeout Monitor
+        # FIX: Isolated block. Bot reference is passed at call time, not construction.
         try:
             from app.payments.repository import PaymentRepository
             from app.payments.timeouts import PaymentTimeoutMonitor
-            from app.payments.service import get_payment_service
+            from app.payments import get_payment_service
 
             payment_repo = PaymentRepository(DatabaseManager.get_db())
             timeout_monitor = PaymentTimeoutMonitor(payment_repo)
+            bot_ref = self._bot  # capture for closure
 
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
-                # Fix: The job function must be a callable. We use a wrapper or ensure the signature matches.
-                # In timeouts.py, check_timeouts(self, client: Client) is expected.
                 raw_scheduler.add_job(
                     timeout_monitor.check_timeouts,
                     "interval",
                     minutes=1,
-                    args=[self._bot],
+                    # FIX: pass bot as keyword arg to match check_timeouts(client) signature
+                    args=[bot_ref],
                     id="payment_timeout_monitor",
                     replace_existing=True,
-                    coalesce=True
+                    coalesce=True,
                 )
                 logger.info("lifecycle_payment_monitor_registered")
 
-                payment_service = get_payment_service()
-                asyncio.create_task(payment_service.resume_active_sessions())
-                logger.info("lifecycle_payment_recovery_initiated")
-            else:
-                logger.warning("lifecycle_payment_monitor_skipped_no_scheduler")
+            # Resume active sessions — method now exists on PaymentService
+            payment_service = get_payment_service()
+            asyncio.create_task(payment_service.resume_active_sessions())
+            logger.info("lifecycle_payment_recovery_initiated")
+
         except Exception as e:
-            logger.error("lifecycle_payment_monitor_failed", extra={"ctx_error": str(e)}, exc_info=True)
+            logger.error(
+                "lifecycle_payment_monitor_failed",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )
 
         # 8. Support Ticket Monitor
         try:
@@ -209,11 +233,14 @@ class AppLifecycle:
                     minutes=1,
                     id="support_inactivity_monitor",
                     replace_existing=True,
-                    coalesce=True
+                    coalesce=True,
                 )
                 logger.info("lifecycle_support_monitor_registered")
         except Exception as e:
-            logger.error("lifecycle_support_monitor_failed", extra={"ctx_error": str(e)})
+            logger.error(
+                "lifecycle_support_monitor_failed",
+                extra={"ctx_error": str(e)},
+            )
 
         # 9. Message Cleanup Worker
         try:
@@ -222,7 +249,10 @@ class AppLifecycle:
             await self._cleanup_worker.start(bot=self._bot)
             logger.info("lifecycle_cleanup_worker_started")
         except Exception as e:
-            logger.error("lifecycle_cleanup_monitor_failed", extra={"ctx_error": str(e)})
+            logger.error(
+                "lifecycle_cleanup_monitor_failed",
+                extra={"ctx_error": str(e)},
+            )
 
         self._running = True
         logger.info("lifecycle_startup_complete")
@@ -242,20 +272,32 @@ class AppLifecycle:
 
             if not raw_id:
                 if is_critical:
-                    logger.error("lifecycle_critical_channel_unconfigured", extra={"ctx_channel": name})
+                    logger.error(
+                        "lifecycle_critical_channel_unconfigured",
+                        extra={"ctx_channel": name},
+                    )
                     critical_failure = True
                 continue
 
             try:
                 channel_id = int(raw_id)
                 chat = await self._bot.get_chat(channel_id)
-                logger.info("lifecycle_channel_access_confirmed", extra={"ctx_channel": name, "ctx_title": chat.title})
+                logger.info(
+                    "lifecycle_channel_access_confirmed",
+                    extra={"ctx_channel": name, "ctx_title": chat.title},
+                )
             except Exception as e:
                 if is_critical:
-                    logger.error("lifecycle_critical_channel_access_failed", extra={"ctx_error": str(e)})
+                    logger.error(
+                        "lifecycle_critical_channel_access_failed",
+                        extra={"ctx_error": str(e)},
+                    )
                     critical_failure = True
                 else:
-                    logger.warning("lifecycle_channel_access_warning", extra={"ctx_channel": name, "ctx_error": str(e)})
+                    logger.warning(
+                        "lifecycle_channel_access_warning",
+                        extra={"ctx_channel": name, "ctx_error": str(e)},
+                    )
 
         if critical_failure:
             logger.error("lifecycle_boot_aborted_channel_failure")

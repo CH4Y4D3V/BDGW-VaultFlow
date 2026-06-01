@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pyrogram import Client
+from pyrogram.enums import ParseMode  # FIX: moved to top-level, not bottom of file
 
 from app.config import settings
 from app.models.subscription import Plan
@@ -153,9 +154,6 @@ class PaymentService:
     async def check_txid_unique(self, txid: str) -> bool:
         """
         Returns True if the TXID has not been used in any payment record.
-
-        Checks ALL statuses including cancelled/expired to prevent
-        TXID reuse across different payment attempts (fraud prevention).
         """
         if not txid or not txid.strip():
             return False
@@ -254,13 +252,7 @@ class PaymentService:
         admin_id: int,
     ) -> bool:
         """
-        Atomically approve a payment:
-          1. Acquire processing lock (UNDER_REVIEW → PROCESSING)
-          2. Activate subscription
-          3. Generate one-time invite link
-          4. Deliver invite to user
-          5. Persist approval and subscription history
-
+        Atomically approve a payment.
         Returns False if lock cannot be acquired (already handled by another admin).
         """
         # Step 1: Atomic lock — prevents duplicate approval
@@ -394,10 +386,7 @@ class PaymentService:
         admin_id: int,
     ) -> bool:
         """
-        Atomically reject a payment:
-          1. Acquire processing lock (UNDER_REVIEW → PROCESSING)
-          2. Restore referral points if any were used
-          3. Mark as REJECTED
+        Atomically reject a payment.
         """
         lock_acquired = await self.repository.acquire_processing_lock(payment_id)
         if not lock_acquired:
@@ -456,7 +445,6 @@ class PaymentService:
     async def get_sessions_for_recovery(self) -> list[PaymentSession]:
         """
         Return all sessions in active states for startup recovery.
-        Called by lifecycle.py on_startup to restore timeout tasks.
         """
         active_statuses = [
             PaymentStatus.WAITING_PAYMENT_DETAILS.value,
@@ -470,6 +458,29 @@ class PaymentService:
         ).to_list(length=None)
         return [PaymentSession.from_dict(d) for d in docs]
 
+    async def resume_active_sessions(self) -> None:
+        """
+        FIX: Added missing method that lifecycle.py calls at startup.
+        Resets any sessions stuck in PROCESSING state back to UNDER_REVIEW
+        (crash recovery), then logs how many active sessions exist.
+        Does NOT re-send messages — admins must action from the hub.
+        """
+        try:
+            recovered = await self.repository.reset_stuck_processing()
+            if recovered:
+                logger.warning(
+                    "payment_recovery_reset_stuck",
+                    extra={"ctx_count": recovered},
+                )
 
-# Import needed for send_message in approve_payment
-from pyrogram.enums import ParseMode  # noqa: E402
+            sessions = await self.get_sessions_for_recovery()
+            logger.info(
+                "payment_recovery_active_sessions",
+                extra={"ctx_count": len(sessions)},
+            )
+        except Exception as e:
+            logger.error(
+                "payment_resume_active_sessions_failed",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )

@@ -32,6 +32,8 @@ async def async_main() -> None:
         # Address already in use.
         await lifecycle.start()
 
+        # FIX: was logger.info("boot_stage", stage="idle_entered") — bare kwarg
+        # crashes stdlib logging with TypeError. Must use extra={}.
         logger.info("boot_stage", extra={"ctx_stage": "idle_entered"})
         logger.info("VaultFlow idle — waiting for shutdown signal.")
         await stop_event.wait()
