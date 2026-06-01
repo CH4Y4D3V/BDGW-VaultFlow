@@ -14,16 +14,19 @@ logger = get_logger(__name__)
 
 class Role(str, Enum):
     OWNER = "owner"
+    SUDO = "sudo"
     ADMIN = "admin"
+    MODERATOR = "moderator"
 
 
 def get_user_roles(user_id: int) -> list[Role]:
     roles: list[Role] = []
     if user_id == settings.OWNER_ID:
-        roles.append(Role.OWNER)
-        roles.append(Role.ADMIN)  # Owner is always Admin
+        roles.extend([Role.OWNER, Role.SUDO, Role.ADMIN, Role.MODERATOR])
+    elif user_id in (settings.SUDO_IDS or []):
+        roles.extend([Role.SUDO, Role.ADMIN, Role.MODERATOR])
     elif user_id in (settings.ADMIN_IDS or []):
-        roles.append(Role.ADMIN)
+        roles.extend([Role.ADMIN, Role.MODERATOR])
     return roles
 
 

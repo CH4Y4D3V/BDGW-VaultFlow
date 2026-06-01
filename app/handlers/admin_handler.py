@@ -184,21 +184,9 @@ _broadcast_content_filter = filters.create(_admin_in_broadcast_state)
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
-@filters.command("ping")
-@permission_required(Role.MODERATOR)
-async def handle_ping(client: Client, message: Message) -> None:
-    logger.info(
-        "HANDLER: handle_ping entered",
-        extra={"ctx_from_user": message.from_user.id if message.from_user else None},
-    )
-    db_status, latency_ms = await _probe_mongodb()
-    latency_line = f" <code>({latency_ms} ms)</code>" if latency_ms is not None else ""
-    await _safe_reply(message, f"🏓 <b>Pong!</b>\n\n<b>Database:</b> {db_status}{latency_line}")
-
-
 @Client.on_message(filters.command("ping"))
 @permission_required(Role.MODERATOR)
-async def _handle_ping(client: Client, message: Message) -> None:
+async def handle_ping(client: Client, message: Message) -> None:
     logger.info(
         "HANDLER: handle_ping entered",
         extra={"ctx_from_user": message.from_user.id if message.from_user else None},
@@ -209,6 +197,76 @@ async def _handle_ping(client: Client, message: Message) -> None:
         await _safe_reply(message, f"🏓 <b>Pong!</b>\n\n<b>Database:</b> {db_status}{latency_line}")
     except Exception as e:
         logger.error("handle_ping unhandled", extra={"ctx_error": str(e)}, exc_info=True)
+
+
+@Client.on_message(filters.command("ban") & filters.chat(settings.VERIFICATION_GROUP_ID))
+@permission_required(Role.ADMIN)
+async def handle_ban_command(client: Client, message: Message) -> None:
+    """/ban {user_id} [reason] — Permanent bot ban (Silent)."""
+    try:
+        if len(message.command) < 2:
+            await message.reply_text("❌ Usage: `/ban {user_id} [reason]`")
+            return
+
+        target_id = int(message.command[1])
+        reason = " ".join(message.command[2:]) if len(message.command) > 2 else "Banned by admin"
+
+        from app.repositories.user_repository import UserRepository
+        repo = UserRepository()
+        success = await repo.ban_user(target_id, reason)
+
+        if success:
+            await message.reply_text(
+                f"🚫 User <code>{target_id}</code> has been permanently banned.\n"
+                f"Reason: {reason}",
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("user_banned", extra={"ctx_target": target_id, "ctx_admin": message.from_user.id})
+        else:
+            await message.reply_text("❌ Failed to ban user. They might not exist.")
+
+    except ValueError:
+        await message.reply_text("❌ Invalid User ID.")
+    except Exception as e:
+        logger.error("handle_ban_command error", exc_info=True)
+        await message.reply_text(f"❌ Error: {e}")
+
+
+@Client.on_message(filters.command("unban") & filters.chat(settings.VERIFICATION_GROUP_ID))
+@permission_required(Role.ADMIN)
+async def handle_unban_command(client: Client, message: Message) -> None:
+    """/unban {user_id} — Removes bot ban."""
+    try:
+        if len(message.command) < 2:
+            await message.reply_text("❌ Usage: `/unban {user_id}`")
+            return
+
+        target_id = int(message.command[1])
+
+        from app.repositories.user_repository import UserRepository
+        repo = UserRepository()
+        
+        # We perform a manual unban update
+        db = DatabaseManager.get_db()
+        result = await db["users"].update_one(
+            {"_id": target_id},
+            {"$set": {"is_banned": False, "unbanned_at": datetime.now(timezone.utc)}}
+        )
+
+        if result.modified_count:
+            await message.reply_text(
+                f"✅ User <code>{target_id}</code> has been unbanned.",
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("user_unbanned", extra={"ctx_target": target_id, "ctx_admin": message.from_user.id})
+        else:
+            await message.reply_text("❌ User is not banned or not found.")
+
+    except ValueError:
+        await message.reply_text("❌ Invalid User ID.")
+    except Exception as e:
+        logger.error("handle_unban_command error", exc_info=True)
+        await message.reply_text(f"❌ Error: {e}")
 
 
 @Client.on_message(filters.command("status"))
