@@ -350,7 +350,7 @@ async def handle_start(client: Client, message: Message) -> None:
         else:
             # Step 3: Main Menu
             logger.info("returning_user_menu", extra={"ctx_user_id": user_id})
-            text, keyboard = await onboarding_service.render_onboarding(user_id, first_name)
+            text, keyboard = await onboarding_service.render_start(user_id, first_name)
             await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
     except Exception as e:

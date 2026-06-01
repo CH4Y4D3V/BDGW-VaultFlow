@@ -14,7 +14,6 @@ from app.config import settings
 from app.models.subscription import Plan
 from app.payments.models import PaymentSession, PaymentStatus
 from app.payments.repository import PaymentRepository
-from app.referral.repository import ReferralRepository
 from app.services.subscription_service import SubscriptionService
 from app.utils.logger import get_logger
 
@@ -507,4 +506,5 @@ class PaymentService:
 
 
 # Import needed for send_message in approve_payment
+from pyrogram.enums import ParseMode  # noqa: E402 needed for send_message in approve_payment
 from pyrogram.enums import ParseMode  # noqa: E402

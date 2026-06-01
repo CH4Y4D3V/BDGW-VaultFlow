@@ -10,6 +10,11 @@ from app.models.payment import TXIDRegistry
 from app.repositories.base import BaseRepository
 
 
+from app.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
 class TXIDRepository(BaseRepository):
     collection_name = "txid_registry"
 
@@ -31,5 +36,12 @@ class TXIDRepository(BaseRepository):
         return TXIDRegistry.from_dict(doc) if doc else None
 
     async def create_indexes(self) -> None:
-        await self.collection.create_index([("user_id", ASCENDING)])
-        await self.collection.create_index([("payment_id", ASCENDING)])
+        try:
+            await self.collection.create_index([("user_id", ASCENDING)])
+        except Exception as e:
+            logger.warning(f"Failed to create txid user_id index: {e}")
+            
+        try:
+            await self.collection.create_index([("payment_id", ASCENDING)])
+        except Exception as e:
+            logger.warning(f"Failed to create txid payment_id index: {e}")
