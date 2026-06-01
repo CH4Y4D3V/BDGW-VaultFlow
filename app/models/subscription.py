@@ -119,16 +119,25 @@ class Subscription:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Subscription":
+        # Ensure plan is correctly mapped from the 'plan' or 'package_id' string
+        plan_val = data.get("plan") or data.get("package_id")
+        plan_enum = None
+        if plan_val:
+            try:
+                plan_enum = Plan(plan_val)
+            except ValueError:
+                plan_enum = Plan.FREE
+
         return cls(
             subscription_id=str(data.get("_id", data.get("subscription_id"))),
             user_id=data["user_id"],
-            package_id=data.get("package_id", data.get("plan", "unknown")),
+            package_id=str(plan_val or "free"),
             started_at=data.get("started_at"),
             expires_at=data.get("expires_at"),
             status=SubscriptionStatus(data.get("status", SubscriptionStatus.PENDING)),
             created_at=data.get("created_at", datetime.now(timezone.utc)),
             updated_at=data.get("updated_at", datetime.now(timezone.utc)),
             grace_until=data.get("grace_until"),
-            plan=Plan(data.get("plan", Plan.FREE)) if data.get("plan") else None,
+            plan=plan_enum,
             metadata=data.get("metadata", {}),
         )

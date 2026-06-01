@@ -23,10 +23,13 @@ class SupportRepository(BaseRepository):
         )
 
     async def update_ticket_status(self, user_id: int, topic_type: str, status: str) -> bool:
-        """Update the status of a specific user topic."""
+        """Update the status of a specific user topic in the user_topics collection."""
         result = await self.db["user_topics"].update_one(
             {"user_id": user_id, "topic_type": topic_type},
-            {"$set": {"status": status, "updated_at": datetime.now(timezone.utc)}}
+            {"$set": {
+                "status": status,
+                "updated_at": datetime.now(timezone.utc)
+            }}
         )
         return result.modified_count > 0
 

@@ -150,19 +150,26 @@ class TopicManager:
             title = f"{icon} {user_name}"
             topic_id = await self._create_telegram_topic(client, title)
 
-            await db["user_topics"].update_one(
+            # ── ATOMIC UPSERT ──
+            # We use find_one_and_update to ensure the status 'pending' is set
+            # correctly on creation, preventing the topic_router bridge guard
+            # from failing if the doc was partially created elsewhere.
+            await db["user_topics"].find_one_and_update(
                 {"user_id": user_id, "topic_type": topic_type},
                 {
                     "$set": {
+                        "topic_id": topic_id,
+                        "status": "pending",
+                        "updated_at": datetime.now(timezone.utc),
+                        "hub_chat_id": settings.VERIFICATION_GROUP_ID,
+                    },
+                    "$setOnInsert": {
                         "user_id": user_id,
                         "topic_type": topic_type,
-                        "topic_id": topic_id,
                         "created_at": datetime.now(timezone.utc),
-                        "hub_chat_id": settings.VERIFICATION_GROUP_ID,
-                        "status": "pending",
                     }
                 },
-                upsert=True,
+                upsert=True
             )
 
             logger.info(

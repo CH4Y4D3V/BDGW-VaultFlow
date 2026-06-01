@@ -23,16 +23,28 @@ class SubscriptionService:
 
     async def get_effective_plan(self, user_id: int) -> Plan:
         """Return the highest plan the user currently holds, including hardcoded roles."""
+        # 1. Hardcoded Owner/Sudo overrides
         if user_id == settings.OWNER_ID:
             return Plan.OWNER
         if user_id in settings.SUDO_IDS:
             return Plan.SUDO
+            
+        # 2. Check Database Subscription
         sub = await self._repo.get_by_user_id(user_id)
         if not sub:
             return Plan.FREE
-        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.BANNED):
+            
+        # 3. Verify Status
+        # Banned or Expired (without grace) users get FREE plan
+        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.BANNED, SubscriptionStatus.CANCELLED):
             return Plan.FREE
-        return sub.plan
+            
+        # 4. Handle Grace Period
+        if sub.status == SubscriptionStatus.GRACE:
+            # Still grant access during grace
+            return sub.plan or Plan.FREE
+            
+        return sub.plan or Plan.FREE
 
     async def has_access(self, user_id: int, required_plan: Plan) -> bool:
         effective = await self.get_effective_plan(user_id)

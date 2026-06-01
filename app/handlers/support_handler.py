@@ -336,6 +336,10 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
     try:
         status_text = "resolved" if action == "resolve" else "closed"
         
+        # Update DB status (Flow 10 sync)
+        repo = SupportRepository()
+        await repo.update_ticket_status(user_id, TOPIC_SUPPORT, status_text)
+
         # ── SYSTEM 18: AUDIT LOG ──
         from app.services.audit_service import get_audit
         await get_audit().log(
