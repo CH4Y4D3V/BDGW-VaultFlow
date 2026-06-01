@@ -32,6 +32,11 @@ class PaymentRepository:
         doc = await self._collection.find_one({"_id": payment_id})
         return PaymentSession.from_dict(doc) if doc else None
 
+    async def get_by_txid(self, txid: str) -> Optional[PaymentSession]:
+        """Fetches a session by its transaction ID."""
+        doc = await self._collection.find_one({"txid": txid})
+        return PaymentSession.from_dict(doc) if doc else None
+
     async def get_active_session(self, user_id: int) -> Optional[PaymentSession]:
         """Returns the most recent non-final session for a user."""
         doc = await self._collection.find_one(

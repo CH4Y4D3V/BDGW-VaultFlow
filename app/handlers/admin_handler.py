@@ -614,7 +614,7 @@ async def _execute_broadcast(
     duration = (datetime.now(timezone.utc) - start_time).total_seconds()
     summary = (
         f"✅ <b>Broadcast Complete</b>\n\n"
-        f"┣ 👤 <b>Targets:</b> {total_users}\n"
+        f"┣ 👤 <b>Targets:</b> {total_targets}\n"
         f"┣ ✨ <b>Delivered:</b> {sent_count}\n"
         f"┣ ❌ <b>Failed:</b> {fail_count}\n"
         f"┗ ⏱ <b>Duration:</b> {duration:.1f}s"
@@ -837,8 +837,8 @@ async def handle_broadcast_confirm(client: Client, callback: CallbackQuery) -> N
     caption = messages[0].caption or messages[0].text or None
     target = broadcast_data.get("target", "all")
 
-    admin_name = callback_query.from_user.first_name or "Admin"
-    await callback_query.answer(f"🚀 Broadcast started by {admin_name}!", show_alert=True)
+    admin_name = callback.from_user.first_name or "Admin"
+    await callback.answer(f"🚀 Broadcast started by {admin_name}!", show_alert=True)
     
     from app.services.audit_service import get_audit, AuditAction
     await get_audit().log(

@@ -31,6 +31,7 @@ class AppLifecycle:
     def __init__(self):
         self._engine: Optional[DistributionEngine] = None
         self._subscription_worker: Optional[SubscriptionWorker] = None
+        self._cleanup_worker: Optional[Any] = None
         self._referral_scheduler: Optional[ReferralScheduler] = None
         self._bot = get_bot()
         self._health_runner: Optional[Any] = None
@@ -211,20 +212,10 @@ class AppLifecycle:
 
         # 9. Message Cleanup Worker
         try:
-            from app.services.cleanup_service import get_cleanup_service
-            cleanup_service = get_cleanup_service(self._bot)
-
-            if self._engine and self._engine.scheduler:
-                raw_scheduler = self._engine.scheduler._scheduler
-                raw_scheduler.add_job(
-                    cleanup_service.run_cleanup_sweep,
-                    "interval",
-                    minutes=1,
-                    id="message_cleanup_sweep",
-                    replace_existing=True,
-                    coalesce=True
-                )
-                logger.info("lifecycle_cleanup_monitor_registered")
+            from app.utils.cleanup_worker import CleanupWorker
+            self._cleanup_worker = CleanupWorker()
+            await self._cleanup_worker.start(bot=self._bot)
+            logger.info("lifecycle_cleanup_worker_started")
         except Exception as e:
             logger.error("lifecycle_cleanup_monitor_failed", extra={"ctx_error": str(e)})
 
@@ -349,6 +340,12 @@ class AppLifecycle:
                 await self._subscription_worker.stop()
             except Exception:
                 logger.error("lifecycle_shutdown_sub_worker_failed", exc_info=True)
+
+        if self._cleanup_worker:
+            try:
+                await self._cleanup_worker.stop()
+            except Exception:
+                logger.error("lifecycle_shutdown_cleanup_worker_failed", exc_info=True)
 
         if self._engine and self._engine.is_running:
             try:
