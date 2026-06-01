@@ -85,7 +85,7 @@ def build_payment_status_card(session: Any, plan: Dict[str, Any]) -> tuple[str, 
     )
     
     buttons = []
-    if session.status.value in ["waiting_payment_details", "requested", "awaiting_payment"]:
+    if session.status.value in ["waiting_payment_details", "requested", "awaiting_payment", "waiting_txid"]:
          buttons.append([InlineKeyboardButton("❌ Cancel Session", callback_data=f"pay:cancel:{session.id}")])
     
     buttons.append([InlineKeyboardButton("← Back", callback_data="menu:premium")])

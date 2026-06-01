@@ -11,6 +11,7 @@ class PaymentStatus(str, Enum):
     REQUESTED = "requested"
     PENDING_DETAILS = "pending_details"
     AWAITING_PAYMENT = "awaiting_payment"
+    WAITING_TXID = "waiting_txid"
     WAITING_SCREENSHOT = "waiting_screenshot"
     SUBMITTED = "submitted"
     UNDER_REVIEW = "under_review"
@@ -73,10 +74,6 @@ class PaymentSession:
 
     @classmethod
     def from_dict(cls, data: dict) -> PaymentSession:
-        raw_status = data["status"]
-        if raw_status == "waiting_txid":
-            raw_status = "awaiting_payment"
-            
         return cls(
             id=data["_id"],
             user_id=data["user_id"],
@@ -84,7 +81,7 @@ class PaymentSession:
             locked_amount=data["locked_amount"],
             points_used=data.get("points_used", 0),
             currency=data.get("currency", "BDT"),
-            status=PaymentStatus(raw_status),
+            status=PaymentStatus(data["status"]),
             payment_method=data.get("payment_method"),
             txid=data.get("txid"),
             screenshot_file_id=data.get("screenshot_file_id"),
