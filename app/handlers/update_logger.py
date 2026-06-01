@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""
+r"""
 Global Telegram update interceptor — update_logger.py
 
 Registered at group=-1 (fires BEFORE all other handlers except ban guard at -2).

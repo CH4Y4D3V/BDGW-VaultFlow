@@ -221,7 +221,7 @@ class DatabaseManager:
             try:
                 await payment_repo.create_indexes()
             except Exception as e:
-                logger.error("payment_index_setup_failed", extra={"ctx_error": str(e)})
+                logger.error("payment_index_setup_failed", extra={"ctx_error": str(e)}, exc_info=True)
 
             from app.repositories.txid_repository import TXIDRepository
             txid_repo = TXIDRepository(cls._db)
