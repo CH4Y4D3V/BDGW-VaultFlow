@@ -69,7 +69,8 @@ async def _check_spam_guard(key: str, ttl_seconds: int) -> bool:
     Never raises.
     """
     try:
-        redis = get_redis()
+        from app.core.redis_client import RedisClient
+        redis = await RedisClient.get_client()
         if redis is None:
             return False
         if await redis.exists(key):
@@ -203,7 +204,12 @@ async def handle_start(client: Client, message: Message) -> None:
     try:
         from app.repositories.user_repository import UserRepository
         user_repo = UserRepository()
-        user_doc = await user_repo.find_one({"_id": user_id})
+        
+        try:
+            user_doc = await user_repo.find_one({"_id": user_id})
+        except Exception as repo_err:
+            logger.error("start_repo_find_failed", extra={"ctx_error": str(repo_err)})
+            user_doc = None
 
         referred_by = None
         if len(message.command) > 1:
@@ -214,7 +220,33 @@ async def handle_start(client: Client, message: Message) -> None:
                 except (IndexError, ValueError):
                     pass
 
-        onboarding_service = _get_onboarding_service()
+        # Define the exact main menu keyboard
+        main_menu_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Premium Access", callback_data="menu:premium")],
+            [InlineKeyboardButton("📤 Submit Content Anonymously", callback_data="menu:queue")],
+            [InlineKeyboardButton("🎁 Referral Program", callback_data="menu:referrals"),
+             InlineKeyboardButton("📊 My Status", callback_data="menu:mystatus")],
+            [InlineKeyboardButton("🆘 Need Help", callback_data="menu:support")]
+        ])
+
+        onboarding_text = (
+            "👋 <b>Welcome to BD Gone Wild Community!</b>\n\n"
+            "This bot is your central hub for the community. It handles:\n"
+            "• Controls Premium Access\n"
+            "• Handles Content Submission\n"
+            "• Handles Content Removal Requests\n"
+            "• Handles User Status\n"
+            "• Handles Support Requests\n\n"
+            "<b>Community Rules:</b>\n"
+            "1. Respect all community members.\n"
+            "2. No spam or unsolicited promotions.\n"
+            "3. Keep content relevant to the community.\n"
+            "4. Follow Telegram's Terms of Service at all times.\n"
+            "5. Admins have final say on all moderation decisions.\n\n"
+            "<i>Violation of rules may result in removal.</i>"
+        )
+
+        main_menu_text = f"👋 <b>Welcome to BD Gone Wild, {first_name}!</b>\n\nUse the menu below to navigate."
 
         if user_doc is None:
             # New User Registration
@@ -227,47 +259,28 @@ async def handle_start(client: Client, message: Message) -> None:
                     "referral_code": uuid.uuid4().hex[:8],
                     "last_name": message.from_user.last_name,
                     "username": message.from_user.username,
-                    "onboarded": False,
+                    "onboarded": True,
                     "referred_by": referred_by,
                     "created_at": datetime.now(timezone.utc),
                     "join_date": datetime.now(timezone.utc),
                 })
             except Exception as insert_err:
-                logger.warning(
-                    "new_user_insert_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(insert_err)},
-                )
+                logger.warning("new_user_insert_failed", extra={"ctx_error": str(insert_err)})
 
             # Ensure free sub exists
             try:
                 sub_service = _get_sub_service()
                 from app.models.subscription import Plan
-                await sub_service.grant(
-                    user_id=user_id,
-                    plan=Plan.FREE,
-                    duration_days=None,
-                    granted_by=0,
-                    notes="Auto-registered on /start"
-                )
+                await sub_service.grant(user_id, Plan.FREE, None, 0, "Auto-registered on /start")
             except Exception as sub_err:
-                logger.warning(
-                    "new_user_sub_grant_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(sub_err)},
-                )
+                logger.warning("new_user_sub_grant_failed", extra={"ctx_error": str(sub_err)})
 
-            # Show Onboarding
+            # Show onboarding message once
             try:
-                text, keyboard = await onboarding_service.render_start(user_id, first_name)
-                await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                await message.reply_text(onboarding_text, parse_mode=ParseMode.HTML)
+                await message.reply_text(main_menu_text, reply_markup=main_menu_keyboard, parse_mode=ParseMode.HTML)
             except Exception as render_err:
-                logger.error(
-                    "new_user_render_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(render_err)},
-                )
-                await message.reply_text(
-                    f"👋 Welcome to BD Gone Wild, {first_name}!\n\nUse the menu below to get started.",
-                    reply_markup=KeyboardBuilder.build_main_menu("new"),
-                )
+                logger.error("new_user_render_failed", extra={"ctx_error": str(render_err)})
 
             # Referral registration (non-fatal)
             if referred_by:
@@ -279,52 +292,34 @@ async def handle_start(client: Client, message: Message) -> None:
                     ref_service = ReferralService(ref_repo, get_bot())
                     await ref_service.register_referral(referred_by, user_id)
                 except Exception as ref_err:
-                    logger.warning(
-                        "referral_registration_failed",
-                        extra={"ctx_error": str(ref_err)},
-                    )
+                    logger.warning("referral_registration_failed", extra={"ctx_error": str(ref_err)})
 
         elif not user_doc.get("onboarded", False):
-            # Resumed Onboarding
+            # Found AND onboarded=False
             logger.info("resumed_onboarding", extra={"ctx_user_id": user_id})
             try:
-                text, keyboard = await onboarding_service.render_start(user_id, first_name)
-                await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                await user_repo.update_one({"_id": user_id}, {"$set": {"onboarded": True, "updated_at": datetime.now(timezone.utc)}})
+            except Exception as update_err:
+                logger.warning("set_onboarded_failed", extra={"ctx_error": str(update_err)})
+
+            try:
+                await message.reply_text(onboarding_text, parse_mode=ParseMode.HTML)
+                await message.reply_text(main_menu_text, reply_markup=main_menu_keyboard, parse_mode=ParseMode.HTML)
             except Exception as render_err:
-                logger.error(
-                    "resumed_onboarding_render_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(render_err)},
-                )
-                await message.reply_text(
-                    f"👋 Welcome back, {first_name}!",
-                    reply_markup=KeyboardBuilder.build_main_menu("returning"),
-                )
+                logger.error("resumed_onboarding_render_failed", extra={"ctx_error": str(render_err)})
 
         else:
-            # Returning User → Main Menu
+            # Returning User → Main Menu directly
             logger.info("returning_user_menu", extra={"ctx_user_id": user_id})
             try:
-                text, keyboard = await onboarding_service.render_start(user_id, first_name)
-                await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                await message.reply_text(main_menu_text, reply_markup=main_menu_keyboard, parse_mode=ParseMode.HTML)
             except Exception as render_err:
-                logger.error(
-                    "returning_user_render_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(render_err)},
-                )
-                await message.reply_text(
-                    f"👋 Welcome back, {first_name}!",
-                    reply_markup=KeyboardBuilder.build_main_menu("returning"),
-                )
+                logger.error("returning_user_render_failed", extra={"ctx_error": str(render_err)})
 
     except Exception as e:
-        logger.exception(
-            "handle_start_crashed",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-        )
+        logger.exception("handle_start_crashed", extra={"ctx_error": str(e)})
         try:
-            await message.reply_text(
-                "⚠️ Something went wrong. Please try /start again.",
-            )
+            await message.reply_text("⚠️ Something went wrong. Please try /start again.")
         except Exception:
             pass
 

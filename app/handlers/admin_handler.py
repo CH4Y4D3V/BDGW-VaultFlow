@@ -129,18 +129,9 @@ async def handle_ban_command(client: Client, message: Message) -> None:
             else "Banned by admin"
         )
 
-        db = DatabaseManager.get_db()
-        await db["users"].update_one(
-            {"_id": target_id},
-            {
-                "$set": {
-                    "is_banned": True,
-                    "ban_reason": reason,
-                    "banned_at": datetime.now(timezone.utc),
-                    "banned_by": message.from_user.id,
-                }
-            },
-        )
+        from app.repositories.user_repository import UserRepository
+        user_repo = UserRepository()
+        await user_repo.ban_user(target_id, reason)
 
         await message.reply_text(
             f"🚫 User <code>{target_id}</code> has been permanently banned.\n"
@@ -165,8 +156,9 @@ async def handle_unban_command(client: Client, message: Message) -> None:
             return
 
         target_id = int(message.command[1])
-        db = DatabaseManager.get_db()
-        result = await db["users"].update_one(
+        from app.repositories.user_repository import UserRepository
+        user_repo = UserRepository()
+        result = await user_repo.collection.update_one(
             {"_id": target_id},
             {"$set": {"is_banned": False, "unbanned_at": datetime.now(timezone.utc)}}
         )

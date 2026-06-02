@@ -211,7 +211,7 @@ class AppLifecycle:
                     "interval",
                     minutes=1,
                     # FIX: pass bot as keyword arg to match check_timeouts(client) signature
-                    args=[bot_ref],
+                    kwargs={"client": bot_ref},
                     id="payment_timeout_monitor",
                     replace_existing=True,
                     coalesce=True,

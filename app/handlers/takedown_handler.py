@@ -17,6 +17,7 @@ from app.config import settings
 from app.core.redis_client import get_redis
 from app.core.database import DatabaseManager
 from app.services.takedown_service import TakedownService
+from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -138,6 +139,44 @@ async def _post_takedown_card_to_hub(
             return
 
 
+async def _resolve_content_id_or_link(text: str) -> Optional[str]:
+    """
+    Resolves either a direct content_id or a Telegram message link
+    to a valid content_id from the vault.
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    db = DatabaseManager.get_db()
+    vault = db[settings.VAULT_COLLECTION]
+
+    # 1. Try direct content_id match
+    exists = await vault.find_one({"content_id": text})
+    if exists:
+        return text
+
+    # 2. Try parsing as Telegram link
+    # Format: https://t.me/c/2505469098/1934
+    import re
+    match = re.search(r"t\.me/c/(\d+)/(\d+)", text)
+    if match:
+        chat_id_raw = match.group(1)
+        msg_id = int(match.group(2))
+        # Pyrogram uses -100 prefix for supergroups/channels
+        chat_id = f"-100{chat_id_raw}"
+        
+        # Search by vault coordinates
+        doc = await vault.find_one({
+            "vault_channel_id": chat_id,
+            "vault_message_id": msg_id
+        })
+        if doc:
+            return doc["content_id"]
+
+    return None
+
+
 @Client.on_message(filters.command("takedown") & filters.private)
 async def handle_takedown_start(client: Client, message: Message) -> None:
     user_id = message.from_user.id
@@ -154,14 +193,12 @@ async def handle_takedown_start(client: Client, message: Message) -> None:
     # ── Check for direct argument
     parts = message.text.split(None, 1)
     if len(parts) > 1:
-        content_id = parts[1].strip()
-
-        db = DatabaseManager.get_db()
-        exists = await db[settings.VAULT_COLLECTION].find_one({"content_id": content_id})
-        if not exists:
+        content_id = await _resolve_content_id_or_link(parts[1])
+        if not content_id:
             await message.reply_text("❌ Invalid Content ID or Link. Please check and try again.")
             return
 
+        db = DatabaseManager.get_db()
         reported = await db["takedown_requests"].find_one({
             "content_id": content_id,
             "reported_by": user_id,
@@ -220,11 +257,21 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
         return
 
     if state == STATE_AWAITING_ID:
-        content_id = (message.text or "").strip()
-        db = DatabaseManager.get_db()
-        exists = await db[settings.VAULT_COLLECTION].find_one({"content_id": content_id})
-        if not exists:
-            await message.reply_text("❌ Invalid Content ID. Please check and send again.")
+        # ── SUPPORT CONFLICT FIX ──
+        # If the user has an active support topic, they are likely trying to
+        # talk to support. We clear the takedown FSM and return.
+        try:
+            topic_manager = get_topic_manager()
+            topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
+            if topic_id:
+                await _set_fsm(user_id, STATE_IDLE, {})
+                return
+        except Exception:
+            pass
+
+        content_id = await _resolve_content_id_or_link(message.text or "")
+        if not content_id:
+            await message.reply_text("❌ Invalid Content ID or Link. Please check and send again.")
             return
 
         data["content_id"] = content_id

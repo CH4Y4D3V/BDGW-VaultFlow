@@ -64,52 +64,41 @@ class ReferralRepository:
     @staticmethod
     async def _safe_create_indexes(collection, indexes: list, label: str) -> None:
         """
-        Attempt to create indexes. On IndexOptionsConflict (name already exists
+        Attempt to create indexes one by one. On IndexOptionsConflict (name already exists
         with different options, or same options under a different name), drop
-        conflicting indexes by name and retry once.
+        conflicting index and retry.
         """
-        try:
-            await collection.create_indexes(indexes)
-        except OperationFailure as e:
-            if e.code == 85:  # IndexOptionsConflict
-                # Drop all indexes that conflict with the ones we want to create
-                try:
-                    existing = await collection.list_indexes().to_list(length=100)
-                    existing_names = {idx["name"] for idx in existing if idx["name"] != "_id_"}
-                    desired_names = {idx.document["name"] for idx in indexes}
-
-                    # Drop any index whose name is NOT in our desired set
-                    # (old names left over from a previous schema)
-                    to_drop = existing_names - desired_names
-                    for name in to_drop:
-                        try:
-                            await collection.drop_index(name)
-                        except Exception as drop_err:
-                            from app.utils.logger import get_logger
-                            get_logger(__name__).warning(
-                                f"Could not drop index {name} on {label}",
-                                extra={"ctx_error": str(drop_err)},
-                            )
-
-                    # Retry creation
-                    await collection.create_indexes(indexes)
-                    from app.utils.logger import get_logger
-                    get_logger(__name__).info(
-                        f"{label} indexes reconciled successfully after conflict resolution",
-                    )
-                except Exception as retry_err:
+        for index in indexes:
+            idx_name = index.document.get("name")
+            try:
+                await collection.create_indexes([index])
+            except OperationFailure as e:
+                if e.code == 85:  # IndexOptionsConflict
+                    try:
+                        from app.utils.logger import get_logger
+                        get_logger(__name__).warning(
+                            f"IndexOptionsConflict for {idx_name} on {label}, dropping and recreating."
+                        )
+                        # We try to drop by name
+                        await collection.drop_index(idx_name)
+                        await collection.create_indexes([index])
+                    except Exception as retry_err:
+                        from app.utils.logger import get_logger
+                        get_logger(__name__).error(
+                            f"Failed to reconcile index {idx_name} for {label}",
+                            extra={"ctx_error": str(retry_err)},
+                        )
+                else:
                     from app.utils.logger import get_logger
                     get_logger(__name__).error(
-                        f"Failed to reconcile indexes for {label}",
-                        extra={"ctx_error": str(retry_err)},
-                        exc_info=True,
+                        f"Index creation failed for {idx_name} on {label}",
+                        extra={"ctx_error": str(e), "ctx_code": e.code},
                     )
-            else:
+            except Exception as ex:
                 from app.utils.logger import get_logger
                 get_logger(__name__).error(
-                    f"Index creation failed for {label}",
-                    extra={"ctx_error": str(e), "ctx_code": e.code},
-                    exc_info=True,
+                    f"Unexpected error creating index {idx_name} on {label}",
+                    extra={"ctx_error": str(ex)},
                 )
 
     async def create_pending(self, referrer_id: int, referred_id: int) -> bool:

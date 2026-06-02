@@ -81,7 +81,7 @@ class FairnessSelector:
 
         for group_id, items in groups.items():
             # Sort deterministically within album to preserve Telegram delivery order
-            items.sort(key=lambda x: x.get("message_id", x.get("content_id", "")))
+            items.sort(key=lambda x: x.get("vault_message_id", x.get("message_id", x.get("content_id", ""))))
             
             primary = items[0]
             created_at = primary.get("created_at")

@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 
 # FIX: Added r prefix to make this a raw string, eliminating SyntaxWarning
 # for \d inside a regular string in Python 3.12.
-_BD_PHONE_REGEX = re.compile(r"(?<!\d)01[3-9]\d{8}(?!\d)")
+_BD_PHONE_REGEX = re.compile(r"(?:013|014|015|016|017|018|019)\d{8}")
 
 
 # ── Ban guard (group -2 — highest priority) ───────────────────────────────────
@@ -117,11 +117,14 @@ async def handle_prefix_auto_delete(client: Client, message: Message) -> None:
     Section 4.3 / Section 20: Messages starting with ./ deleted after 10 seconds.
     Silent — no notification to user.
     """
-    await asyncio.sleep(10)
-    try:
-        await message.delete()
-    except Exception:
-        pass
+    async def _delayed_delete():
+        await asyncio.sleep(10)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    asyncio.create_task(_delayed_delete())
 
 
 # ── Idempotency cache ─────────────────────────────────────────────────────────

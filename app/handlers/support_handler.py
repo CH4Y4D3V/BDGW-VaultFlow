@@ -77,6 +77,70 @@ async def _safe_reply(
 from app.ui.support_cards import build_support_welcome_card, build_ticket_created_card
 from app.ui.common import build_back_button
 
+# ── Command: /help ────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.command("help") & filters.private)
+async def handle_help_command(client: Client, message: Message) -> None:
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    
+    # ── Anti-Spam / Debounce ──
+    redis = get_redis()
+    spam_key = f"cmd:spam:help:{user_id}"
+    if await redis.exists(spam_key):
+        return
+    await redis.set(spam_key, "1", ex=2)
+
+    # Clear Takedown FSM
+    await redis.delete(f"state:takedown:{user_id}", f"data:takedown:{user_id}")
+
+    topic_manager = get_topic_manager()
+    topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
+    
+    if topic_id is not None:
+        await _safe_reply(message, "💬 You already have an open support ticket. An admin will respond shortly.")
+        return
+        
+    try:
+        text, reply_markup = build_support_welcome_card()
+        sent_msg = await message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+        )
+
+        try:
+            from app.services.cleanup_service import get_cleanup_service
+            await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="general")
+        except Exception:
+            pass
+
+        try:
+            await topic_manager.get_or_create_user_topic(
+                client, user_id, TOPIC_SUPPORT
+            )
+        except Exception as e:
+            logger.exception(
+                "forum_topic_creation_failed_help_cmd",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
+            await _safe_reply(message, "Support is temporarily unavailable. Please try again in a few minutes.")
+            return
+
+        logger.info(
+            "Support ticket flow initiated via /help",
+            extra={"ctx_user_id": user_id},
+        )
+    except Exception as e:
+        logger.error(
+            "HANDLER: handle_help_command unhandled exception",
+            extra={"ctx_error": str(e)},
+            exc_info=True,
+        )
+        await _safe_reply(message, "⚠️ Could not open support. Please try again.")
+
 # ── Callback: menu:support ────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^menu:support$"))
@@ -93,6 +157,10 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
     await redis.set(spam_key, "1", ex=1)
+
+    # ── STATE MANAGEMENT FIX: Clear Takedown FSM ──
+    # If the user enters support, they should no longer be in the takedown flow.
+    await redis.delete(f"state:takedown:{user_id}", f"data:takedown:{user_id}")
 
     await callback.answer()
 
@@ -180,6 +248,19 @@ async def handle_private_message_support(client: Client, message: Message) -> No
     user_id = message.from_user.id
 
     try:
+        # ── PRIORITY FIX: Payment Sessions ──
+        # If the user is in a state requiring payment input (TXID/Screenshot),
+        # we skip support routing to allow handle_payment_inputs to run.
+        from app.payments import get_payment_service
+        from app.payments.models import PaymentStatus
+        payment_service = get_payment_service()
+        session = await payment_service.get_active_session(user_id)
+        if session and session.status in (
+            PaymentStatus.WAITING_TXID,
+            PaymentStatus.WAITING_SCREENSHOT,
+        ):
+            return
+
         topic_manager = get_topic_manager()
         topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
 

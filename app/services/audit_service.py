@@ -106,7 +106,7 @@ class AuditService:
             # ── SYSTEM 18: HUB LOGGING ──
             from app.bot.client import get_bot
             client = get_bot()
-            if settings.HUB_TOPIC_AUDIT and client.is_connected:
+            if settings.HUB_TOPIC_AUDIT and getattr(client, "is_connected", False):
                 log_text = f"🛡 <b>[AUDIT]</b>\n"
                 log_text += f"┣ 🏷 <b>Action:</b> <code>{action}</code>\n"
                 log_text += f"┣ 👤 <b>Admin:</b> <code>{performed_by}</code>\n"

@@ -44,9 +44,6 @@ class TopicManager:
     _instance: Optional["TopicManager"] = None
     _lock = asyncio.Lock()
 
-    def __clinit__(self):
-        pass
-
     @classmethod
     def get_instance(cls) -> "TopicManager":
         if cls._instance is None:

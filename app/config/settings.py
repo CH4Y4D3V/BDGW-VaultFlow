@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     FFMPEG_TIMEOUT: float = 120.0
 
     # ── Watermark toggle ─────────────────────────────────────────────────────
-    WATERMARK_ENABLED: bool = False  # Set True only when logo assets exist
+    WATERMARK_ENABLED: bool = True  # Set True only when logo assets exist
 
     # ── Watermark assets — per-destination logos ──────────────────────────────
     WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"

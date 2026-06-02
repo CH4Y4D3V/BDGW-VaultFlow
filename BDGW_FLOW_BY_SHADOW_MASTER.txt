@@ -601,12 +601,9 @@ Fraud Score Components:
 SECTION 19 — ADMIN ROLES
 ====================================================================
 
-  SUPER_ADMIN
+  OWNER
   ADMIN
-  MODERATOR
-  SUPPORT_AGENT
-  CONTENT_REVIEWER
-
+ 
 ====================================================================
 SECTION 20 — MESSAGE CLEANUP POLICY
 ====================================================================
@@ -749,8 +746,8 @@ SECTION 30 — STEP-BY-STEP BUILD PLAN
 PHASE 0 — PROJECT SETUP
   Step 01. Create project folder structure
   Step 02. Set up virtual environment (Python 3.11+)
-  Step 03. Install aiogram 3.x as framework
-  Step 04. Set up PostgreSQL database
+  Step 03. Install Pyrogram as framework
+  Step 04. Set up MongoDB database
   Step 05. Set up Redis (FSM storage + distributed locks)
   Step 06. Create .env file with all config variables
   Step 07. Create alembic for DB migrations

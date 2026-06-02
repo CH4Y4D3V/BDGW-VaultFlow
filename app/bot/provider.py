@@ -64,7 +64,7 @@ async def fetch_distribution_content() -> List[Dict]:
                 {"cooldown_until": {"$exists": False}},
                 {"cooldown_until": {"$lte": now}},
             ],
-        }).sort("message_id", 1).limit(getattr(settings, "MAX_JOBS_PER_CYCLE", 100))
+        }).sort("vault_message_id", 1).limit(getattr(settings, "MAX_JOBS_PER_CYCLE", 100))
 
         content = await cursor.to_list(length=None)
 
