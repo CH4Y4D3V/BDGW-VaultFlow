@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone  # FIX 1A: Added missing imports
 from typing import Optional
 
 from pyrogram import Client, filters
@@ -330,16 +331,17 @@ async def handle_start(client: Client, message: Message) -> None:
             text, keyboard = await onboarding_service.render_start(user_id, first_name)
             await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
             
-            # Referral registration
+            # FIX 1B: Referral registration — replaced get_lifecycle() with direct instantiation
             if referred_by:
                 try:
-                    from app.core.lifecycle import get_lifecycle
-                    lifecycle = get_lifecycle()
-                    if hasattr(lifecycle, "_referral_scheduler") and lifecycle._referral_scheduler:
-                        ref_service = lifecycle._referral_scheduler._service
-                        await ref_service.register_referral(referred_by, user_id)
+                    from app.referral.repository import ReferralRepository
+                    from app.referral.service import ReferralService
+                    ref_repo = ReferralRepository(DatabaseManager.get_db())
+                    ref_service = ReferralService(ref_repo, client)
+                    await ref_service.register_referral(referred_by, user_id)
                 except Exception as ref_err:
-                    logger.warning("referral_registration_failed", extra={"ctx_error": str(ref_err)})
+                    logger.warning("referral_registration_failed",
+                                   extra={"ctx_error": str(ref_err)})
 
         elif not user_doc.get("onboarded", False):
             # Step 2: Resumed Onboarding
@@ -369,10 +371,6 @@ async def handle_accept_terms(client: Client, callback_query: CallbackQuery) -> 
     
     onboarding_service = _get_onboarding_service()
     await onboarding_service.complete_onboarding(user_id)
-    
-    # ── Flow O: Onboarding Cleanup ──
-    # We edit the message to show main menu, so no need to delete the card itself.
-    # But we could delete user's previous /start if it wasn't already.
     
     # Refresh to show main menu
     text, keyboard = await onboarding_service.render_start(user_id, first_name)

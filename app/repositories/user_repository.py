@@ -92,8 +92,25 @@ class UserRepository(BaseRepository):
         return result.modified_count > 0
 
     async def create_indexes(self) -> None:
-        await self.collection.create_index([("user_id", ASCENDING)], unique=True)
-        await self.collection.create_index([("username", ASCENDING)])
-        await self.collection.create_index([("referral_code", ASCENDING)], unique=True)
-        await self.collection.create_index([("referred_by", ASCENDING)])
-        await self.collection.create_index([("join_date", ASCENDING)])
+        # _id IS the user_id — MongoDB enforces uniqueness automatically
+        # Only create indexes on secondary lookup fields
+        await self.collection.create_index(
+            [("username", ASCENDING)],
+            sparse=True,
+            name="user_username_lookup"
+        )
+        await self.collection.create_index(
+            [("referral_code", ASCENDING)],
+            unique=True,
+            sparse=True,
+            name="user_referral_code_unique"
+        )
+        await self.collection.create_index(
+            [("referred_by", ASCENDING)],
+            sparse=True,
+            name="user_referred_by_lookup"
+        )
+        await self.collection.create_index(
+            [("join_date", ASCENDING)],
+            name="user_join_date"
+        )

@@ -42,7 +42,7 @@ check_vault.py
 # =========================
 .env
 .env.*
-!.env.example
+
 .env.production
 
 # Secrets

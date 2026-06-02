@@ -92,7 +92,6 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
     if await redis.exists(spam_key):
         await callback.answer("Slow down! Processing...", show_alert=False)
         return
-    # FIX 12: was `await redis.set(...)` — redis is not defined; local var is `redis`
     await redis.set(spam_key, "1", ex=1)
 
     await callback.answer()
@@ -163,20 +162,6 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
 
 
 # ── RC-4 FIX: Private message routing — correct command exclusion ─────────────
-#
-# BEFORE (buggy):
-#   @Client.on_message(filters.private & ~filters.command([]))
-#
-# WHY IT WAS BROKEN:
-#   filters.command([]) checks if message.text starts with "/" AND the command
-#   name is in the provided list. With an empty list [], no command name can
-#   ever match — so filters.command([]) NEVER fires. Its inverse (~) therefore
-#   ALWAYS fires, meaning this handler ran on ALL private messages including
-#   /start, /ping, etc.
-#
-# FIX:
-#   Use ~filters.regex(r"^/") to explicitly exclude slash-prefixed messages.
-#   This correctly targets only non-command private messages.
 
 @Client.on_message(filters.private & ~filters.regex(r"^/"))
 async def handle_private_message_support(client: Client, message: Message) -> None:
@@ -186,6 +171,8 @@ async def handle_private_message_support(client: Client, message: Message) -> No
     RC-4 fix: filter now correctly excludes commands using regex instead of
     the broken ~filters.command([]) which matched everything.
 
+    FIX 3: Never intercept payment flow messages.
+
     Returns early (no-op) for users without an existing support topic.
     For users WITH a support topic, their private text/media is routed there.
     """
@@ -193,6 +180,11 @@ async def handle_private_message_support(client: Client, message: Message) -> No
         return
 
     user_id = message.from_user.id
+
+    # FIX 3: Never intercept payment flow messages
+    redis = get_redis()
+    if await redis.exists(f"pay_session:{user_id}"):
+        return
 
     try:
         topic_manager = get_topic_manager()

@@ -142,6 +142,15 @@ async def _post_takedown_card_to_hub(
 async def handle_takedown_start(client: Client, message: Message) -> None:
     user_id = message.from_user.id
 
+    # FIX 2: Payment session guard — never intercept payment flow messages
+    redis = get_redis()
+    if await redis.exists(f"pay_session:{user_id}"):
+        await message.reply_text(
+            "You have an active payment session. Please complete or cancel "
+            "it before submitting a takedown request."
+        )
+        return
+
     # ── Check for direct argument
     parts = message.text.split(None, 1)
     if len(parts) > 1:
@@ -199,6 +208,12 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
     if not message.from_user:
         return
     user_id = message.from_user.id
+
+    # FIX 2: Payment session guard — never intercept payment flow messages
+    redis = get_redis()
+    if await redis.exists(f"pay_session:{user_id}"):
+        return
+
     state, data = await _get_fsm(user_id)
 
     if state == STATE_IDLE:
