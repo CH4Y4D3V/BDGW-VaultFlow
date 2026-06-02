@@ -320,10 +320,9 @@ async def _finalize_submission(
     5. Register in pending registry
     6. Notify user
 
-    FIX GAP 5: archive_to_vault called with dest="pending" was wrong.
-    Vault requires a valid moderation_destination. We use "nsfw" as the
-    default staging destination; moderator approval callback overrides this
-    with the actual destination chosen.
+    FIX: archive_to_vault called with dest="nsfw" as safe staging default.
+    The actual destination is overridden by the moderator's approval action.
+    initial_status uses .value to pass a string as expected by the function.
     """
     first_msg = messages[0]
 
@@ -334,16 +333,15 @@ async def _finalize_submission(
         await redis.expire(cap_key, 86400)
 
         # Archive to vault immediately as PENDING staging
-        # (so content is safe even if bot restarts before moderation)
         from app.moderation.moderation_actions import archive_to_vault
         from app.core.models import ModerationState
 
-        # FIX GAP 5: Use "nsfw" as staging dest — will be overridden by moderator action.
-        # This ensures the vault doc has a valid moderation_destination field.
+        # FIX BUG A: dest="nsfw" — valid staging destination, overridden on approve/queue
+        # FIX BUG B: initial_status=ModerationState.PENDING.value — pass string not enum
         await archive_to_vault(
             client=client,
             messages=messages,
-            dest="nsfw",  # staging — overridden on approve/queue
+            dest="nsfw",
             submitter_user_id=user_id,
             initial_status=ModerationState.PENDING.value,
         )

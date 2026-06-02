@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     API_ID: int
     API_HASH: str
     BOT_TOKEN: str
+    BOT_USERNAME: str = ""
     SESSION_NAME: str = "vaultflow_bot"
     SESSION_DIR: str = "./sessions"
     MAX_CONCURRENT_TRANSMISSIONS: int = 10
@@ -49,25 +50,17 @@ class Settings(BaseSettings):
     PREMIUM_CHANNEL_ID: int = 0
     LOG_CHANNEL_ID: int = 0
 
-    # ── Hub Topic IDs ──
-    HUB_TOPIC_PAYMENTS: int = 0
-    HUB_TOPIC_CONTENT_REVIEW: int = 0
-    HUB_TOPIC_SUPPORT: int = 0
-    HUB_TOPIC_TAKEDOWN: int = 0
-    HUB_TOPIC_USER_MOD: int = 0
-    HUB_TOPIC_BROADCASTS: int = 0
-    HUB_TOPIC_AUDIT: int = 0
-
     # ── Destination display names ─────────────────────────────────────────────
     NSFW_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
 
     # ── Access Control ────────────────────────────────────────────────────────
+    # Only OWNER_ID and ADMIN_IDS are used. All admins have full access.
     OWNER_ID: int = Field(..., description="Telegram user_id of the bot owner. Required.")
     ADMIN_IDS: List[int] = Field(default_factory=list)
-    SUDO_IDS: List[int] = Field(default_factory=list)
 
-    # ── Granular role lists ───────────────────────────────────────────────────
+    # ── Legacy role lists (kept for backward compat, not used in logic) ───────
+    SUDO_IDS: List[int] = Field(default_factory=list)
     MODERATOR_IDS: List[int] = Field(default_factory=list)
     SUPPORT_ADMIN_IDS: List[int] = Field(default_factory=list)
     PAYMENT_ADMIN_IDS: List[int] = Field(default_factory=list)
@@ -110,6 +103,7 @@ class Settings(BaseSettings):
 
     # ── Media Group ───────────────────────────────────────────────────────────
     MEDIA_GROUP_TIMEOUT_SECONDS: float = 3.0
+    MEDIA_GROUP_TIMEOUT: float = 3.0
     MEDIA_GROUP_MAX_SIZE: int = 10
 
     # ── Media Processing ──────────────────────────────────────────────────────
@@ -123,16 +117,14 @@ class Settings(BaseSettings):
     # ── Watermark assets — per-destination logos ──────────────────────────────
     WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"
     WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
+    WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
 
     WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
     WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
     WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
-    # FIX: WATERMARK_POSITION was referenced in moderation_actions.py but missing here.
-    # Added with safe default. Valid values match WatermarkPosition enum:
-    # BOTTOM_RIGHT | BOTTOM_LEFT | TOP_RIGHT | TOP_LEFT | CENTER
+    # Accepted values: BOTTOM_RIGHT, BOTTOM_LEFT, TOP_RIGHT, TOP_LEFT, CENTER
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
-    WATERMARK_ROTATION: int = 0
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15
 
@@ -169,6 +161,17 @@ class Settings(BaseSettings):
     @classmethod
     def _normalise_log_level(cls, v: str) -> str:
         return v.upper()
+
+    @field_validator("WATERMARK_POSITION", mode="before")
+    @classmethod
+    def _normalise_watermark_position(cls, v: str) -> str:
+        v = v.upper()
+        allowed = {"BOTTOM_RIGHT", "BOTTOM_LEFT", "TOP_RIGHT", "TOP_LEFT", "CENTER"}
+        if v not in allowed:
+            raise ValueError(
+                f"WATERMARK_POSITION must be one of {allowed}, got: {v!r}"
+            )
+        return v
 
 
 settings = Settings()  # type: ignore

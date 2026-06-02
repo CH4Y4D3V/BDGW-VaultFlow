@@ -110,12 +110,12 @@ async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
             reply_markup=reply_markup,
             parse_mode=ParseMode.HTML,
         )
-        
+
         # ── SYSTEM 20: CLEANUP ──
         try:
             from app.services.cleanup_service import get_cleanup_service
             await get_cleanup_service().log_message(user_id, sent_msg.id, text, category="general")
-        except:
+        except Exception:
             pass
 
         await callback.answer()
@@ -171,8 +171,6 @@ async def handle_private_message_support(client: Client, message: Message) -> No
     RC-4 fix: filter now correctly excludes commands using regex instead of
     the broken ~filters.command([]) which matched everything.
 
-    FIX 3: Never intercept payment flow messages.
-
     Returns early (no-op) for users without an existing support topic.
     For users WITH a support topic, their private text/media is routed there.
     """
@@ -180,11 +178,6 @@ async def handle_private_message_support(client: Client, message: Message) -> No
         return
 
     user_id = message.from_user.id
-
-    # FIX 3: Never intercept payment flow messages
-    redis = get_redis()
-    if await redis.exists(f"pay_session:{user_id}"):
-        return
 
     try:
         topic_manager = get_topic_manager()
@@ -201,9 +194,9 @@ async def handle_private_message_support(client: Client, message: Message) -> No
 
         support_service = get_support_service()
         is_first = await support_service.handle_user_message(client, message)
-        
+
         if is_first:
-            ticket_id = f"T-{user_id}-{topic_id}" # Simplified ticket ID for UI
+            ticket_id = f"T-{user_id}-{topic_id}"
             text = build_ticket_created_card(ticket_id)
             await message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -230,10 +223,10 @@ async def handle_support_accept_callback(client: Client, callback: CallbackQuery
     """Updates ticket status to accepted and notifies the user."""
     user_id = int(callback.matches[0].group("uid"))
     admin_name = callback.from_user.first_name
-    
+
     from app.repositories.support_repository import SupportRepository
     repo = SupportRepository()
-    
+
     # 1. Update DB
     success = await repo.update_ticket_status(user_id, TOPIC_SUPPORT, "accepted")
     if not success:
@@ -264,17 +257,15 @@ async def handle_support_accept_callback(client: Client, callback: CallbackQuery
 
     # 3. Update admin card
     try:
-        # Extract ticket_id from message text (formatted as Ticket ID: abc-123)
         import re
         ticket_id_match = re.search(r"Ticket ID: ([\w-]+)", callback.message.text or "")
         ticket_id = ticket_id_match.group(1) if ticket_id_match else "unknown"
-        
+
         from app.ui.support_cards import build_admin_support_actions
         await callback.message.edit_reply_markup(
             reply_markup=build_admin_support_actions(ticket_id, user_id, status="accepted")
         )
-        
-        # Also edit text to show who accepted
+
         await callback.message.edit_text(
             callback.message.text.replace("⏳ Awaiting Response", f"✅ <b>Accepted by {admin_name}</b>"),
             reply_markup=build_admin_support_actions(ticket_id, user_id, status="accepted"),
@@ -299,9 +290,9 @@ async def handle_support_reply_callback(client: Client, callback: CallbackQuery)
 async def handle_support_closure_callback(client: Client, callback: CallbackQuery) -> None:
     """Closes the ticket and notifies the user."""
     action = callback.matches[0].group(1)
-    
+    tid = callback.matches[0].group("tid")
+
     # Extract user_id from the card text or via topic_manager
-    # Card usually has "User ID: 123456"
     import re
     user_id_match = re.search(r"User ID: (\d+)", callback.message.text or "")
     user_id = int(user_id_match.group(1)) if user_id_match else None
@@ -323,23 +314,18 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
         return
 
     admin_name = callback.from_user.first_name or "Admin"
-    
+
     # Notify user
     try:
         status_text = "resolved" if action == "resolve" else "closed"
-        
-        # Update DB status (Flow 10 sync)
-        repo = SupportRepository()
-        await repo.update_ticket_status(user_id, TOPIC_SUPPORT, status_text)
 
         # ── SYSTEM 18: AUDIT LOG ──
         from app.services.audit_service import get_audit
         await get_audit().log(
             action=f"support_{action}",
             performed_by=callback.from_user.id,
-            performed_by_name=admin_name,
             target_user_id=user_id,
-            details={"ticket_id": callback.matches[0].group("tid")}
+            details={"ticket_id": tid}
         )
 
         await callback.answer(f"✅ Ticket {status_text}! (Admin: {admin_name})", show_alert=True)
@@ -352,12 +338,12 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
             ),
             parse_mode=ParseMode.HTML,
         )
-        
+
         # ── SYSTEM 15.5: USER-SIDE DELETION (GAP 7 FIX) ──
         try:
             from app.services.cleanup_service import get_cleanup_service
             await get_cleanup_service().delete_user_support_history(user_id)
-        except:
+        except Exception:
             pass
     except Exception as e:
         logger.warning(
@@ -391,7 +377,7 @@ async def handle_support_closure_callback(client: Client, callback: CallbackQuer
         )
     except Exception:
         pass
-        
+
     await callback.answer(f"Ticket {action}d.")
 
 

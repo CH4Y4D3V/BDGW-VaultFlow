@@ -5,11 +5,11 @@ from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import CallbackQuery, ForceReply, Message  # Message needed for reject reply handler
+from pyrogram.types import CallbackQuery, ForceReply, Message
 
 from app.config import settings
 from app.core.permissions import is_moderator
-from app.core.redis_client import get_redis  # FIX BUG A: was missing
+from app.core.redis_client import get_redis
 from app.moderation.verification_hub import parse_callback_data
 from app.moderation.moderation_actions import (
     execute_queue,
@@ -178,7 +178,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
                 )
 
             # Store context in Redis for the reply handler to pick up
-            redis = get_redis()  # FIX BUG A: now imported
+            redis = get_redis()
             ctx_key = f"mod_reject_ctx:{callback.message.chat.id}:{callback.message.id}"
             import json
             await redis.set(
@@ -246,7 +246,7 @@ async def handle_mod_reject_reason_reply(
     if not card_message:
         return
 
-    redis = get_redis()  # FIX BUG A: now imported
+    redis = get_redis()
     ctx_key = f"mod_reject_ctx:{card_message.chat.id}:{card_message.id}"
     ctx_raw = await redis.get(ctx_key)
     if not ctx_raw:

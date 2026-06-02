@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-r"""
+"""
 Global Telegram update interceptor — update_logger.py
 
 Registered at group=-1 (fires BEFORE all other handlers except ban guard at -2).
@@ -46,7 +46,7 @@ async def handle_ban_guard(client: Client, update: Message | CallbackQuery) -> N
         return
 
     # Owner and sudo are never banned
-    from app.core.permissions import is_sudo
+    from app.core.permissions import is_sudo, is_any_admin
     if is_sudo(user_id):
         return
 

@@ -1,4 +1,3 @@
-
 """
 app/watermark/worker_pool.py
 
@@ -169,8 +168,6 @@ class WatermarkWorker:
     # ── Job processing ────────────────────────────────────────────────────────
 
     async def _process_group(self, jobs: list[dict]) -> None:
-        # FIX 13: type annotation was List[dict] requiring typing import;
-        # using native list[dict] (Python 3.12) removes that dependency.
         group_id = jobs[0].get("media_group_id") or str(jobs[0]["_id"])
         corr_token = set_correlation_id(f"wm_grp_{group_id}")
 
@@ -202,7 +199,8 @@ class WatermarkWorker:
                 temp_files.append(media_path)
 
                 # 2. Watermark
-                position_str = watermark_config.get("position", settings.WATERMARK_POSITION)
+                # FIX: Use getattr with fallback to protect against missing settings attribute
+                position_str = watermark_config.get("position") or getattr(settings, "WATERMARK_POSITION", "BOTTOM_RIGHT")
                 position = WatermarkPosition(position_str) if position_str in WatermarkPosition.__members__ else WatermarkPosition.BOTTOM_RIGHT
                 opacity = watermark_config.get("opacity", settings.WATERMARK_OPACITY)
                 scale = watermark_config.get("scale", settings.WATERMARK_SCALE)

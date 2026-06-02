@@ -236,14 +236,6 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
         delivered = await _deliver_to_user(client, user_id, message)
 
         if delivered:
-            # ── SYSTEM 20: CLEANUP ──
-            try:
-                from app.services.cleanup_service import get_cleanup_service
-                text_to_check = message.text or message.caption or ""
-                await get_cleanup_service().log_message(user_id, delivered.id, text_to_check, category="general")
-            except:
-                pass
-
             logger.info(
                 "Admin reply routed to user",
                 extra={
@@ -256,30 +248,25 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
             # RC-6 fix: persist support message after successful delivery
             if topic_type == TOPIC_SUPPORT:
                 await _persist_support_message(user_id, thread_id, message)
-            
+
             # RC-12 fix: automatically advance payment session on admin reply
             elif topic_type == "payment":
-                # --- 7.3 FULL PAYMENT FLOW ---
-                # "Only AFTER delivery success: Payment Session Activated (DB), Session Timeout Timer Starts"
                 try:
                     from app.payments import get_payment_service
                     from app.payments.models import PaymentStatus
-                    
+
                     payment_service = get_payment_service()
                     session = await payment_service.get_active_session(user_id)
-                    
+
                     if session and session.status == PaymentStatus.PENDING_DETAILS:
-                        # ── SYSTEM 7.3: CONFIRMED DELIVERY ──
-                        # delivered is True here, so we advance
                         await payment_service.update_status(session.id, PaymentStatus.AWAITING_PAYMENT)
                         await payment_service.start_timeout(session.id)
-                        
+
                         logger.info(
                             "Payment session activated after confirmed delivery",
                             extra={"ctx_payment_id": session.id, "ctx_user_id": user_id}
                         )
-                        
-                        # Notify admin in topic that session started
+
                         try:
                             await client.send_message(
                                 chat_id=message.chat.id,
@@ -288,7 +275,7 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                                 reply_to_message_id=message.id,
                                 parse_mode=ParseMode.HTML
                             )
-                        except:
+                        except Exception:
                             pass
                 except Exception as e:
                     logger.warning(

@@ -16,6 +16,7 @@ class ActivityAction(str, Enum):
 
     # Content
     UPLOAD = "upload"
+    REJECT = "reject"
     INTERACTION = "interaction"
 
     # Subscription lifecycle
