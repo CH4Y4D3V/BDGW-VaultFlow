@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timezone  # FIX: was missing — datetime.now(timezone.utc) used below
 from typing import Optional
 
@@ -222,6 +223,8 @@ async def handle_start(client: Client, message: Message) -> None:
                 await user_repo.insert_one({
                     "_id": user_id,
                     "first_name": first_name,
+                    "full_name": f"{first_name} {message.from_user.last_name or ''}".strip(),
+                    "referral_code": uuid.uuid4().hex[:8],
                     "last_name": message.from_user.last_name,
                     "username": message.from_user.username,
                     "onboarded": False,

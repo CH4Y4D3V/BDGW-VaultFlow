@@ -8,14 +8,14 @@ from pydantic import BaseModel, Field
 class User(BaseModel):
     user_id: int = Field(..., alias="_id")
     username: Optional[str] = None
-    full_name: str
+    full_name: str = ""
     join_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     onboarded: bool = False
     is_banned: bool = False
     is_muted: bool = False
     trust_score: int = 0
     fraud_score: int = 0
-    referral_code: str
+    referral_code: str = ""
     referred_by: Optional[int] = None
     referral_points: int = 0
     warn_count: int = 0

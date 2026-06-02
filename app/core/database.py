@@ -226,7 +226,7 @@ class DatabaseManager:
 
             try:
                 from app.repositories.txid_repository import TXIDRepository
-                txid_repo = TXIDRepository(cls._db)
+                txid_repo = TXIDRepository()
                 await txid_repo.create_indexes()
                 logger.info("txid_indexes_verified")
             except Exception as e:

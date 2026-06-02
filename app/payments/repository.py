@@ -113,6 +113,29 @@ class PaymentRepository:
         doc = await self._topics_collection.find_one({"_id": topic_id})
         return doc["payment_id"] if doc else None
 
+    async def get_sessions_by_status(self, statuses: list) -> list:
+        """Fetch all payment sessions matching any of the given statuses."""
+        status_values = [s.value if hasattr(s, "value") else str(s) for s in statuses]
+        docs = await self._collection.find(
+            {"status": {"$in": status_values}}
+        ).to_list(length=None)
+        from app.payments.models import PaymentSession
+        return [PaymentSession.from_dict(d) for d in docs]
+
+    async def reset_stuck_processing(self) -> int:
+        """Reset sessions stuck in PROCESSING back to UNDER_REVIEW (crash recovery)."""
+        from datetime import datetime, timezone
+        result = await self._collection.update_many(
+            {"status": "processing"},
+            {
+                "$set": {
+                    "status": "under_review",
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return result.modified_count
+
     async def create_indexes(self) -> None:
         """
         Create payment collection indexes with conflict-safe drop-and-recreate.
