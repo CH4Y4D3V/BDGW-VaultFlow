@@ -106,7 +106,7 @@ class AppLifecycle:
             )
 
             from app.services.topic_manager import get_topic_manager
-            await get_topic_manager().warm_cache_from_db()
+            await get_topic_manager().restore_cache()
 
         except Exception as e:
             logger.exception(
