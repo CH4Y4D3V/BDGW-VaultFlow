@@ -5,6 +5,7 @@ from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import OperationFailure
 
 from app.payments.models import PaymentSession, PaymentStatus
 from app.utils.logger import get_logger
@@ -13,7 +14,7 @@ logger = get_logger(__name__)
 
 
 class PaymentRepository:
-    def __init__(self, db: AsyncIOMotorDatabase) -> None:
+    def __init__(self, db: AsyncIOMotorDatabase):
         self._db = db
         self._collection = db["payments"]
         self._audit_collection = db["payment_audit"]
@@ -21,13 +22,11 @@ class PaymentRepository:
         self._timeouts_collection = db["payment_timeouts"]
         self._history_collection = db["subscription_history"]
 
-    # ── Session CRUD ──────────────────────────────────────────────────────────
-
     async def save_session(self, session: PaymentSession) -> None:
         await self._collection.replace_one(
             {"_id": session.id},
             session.to_dict(),
-            upsert=True,
+            upsert=True
         )
 
     async def get_session(self, payment_id: str) -> Optional[PaymentSession]:
@@ -35,77 +34,41 @@ class PaymentRepository:
         return PaymentSession.from_dict(doc) if doc else None
 
     async def get_active_session(self, user_id: int) -> Optional[PaymentSession]:
-        """Return the most recent non-terminal session for a user."""
-        terminal = [
-            PaymentStatus.APPROVED.value,
-            PaymentStatus.REJECTED.value,
-            PaymentStatus.EXPIRED.value,
-            PaymentStatus.CANCELLED.value,
-        ]
+        """Returns the most recent non-final session for a user."""
         doc = await self._collection.find_one(
             {
                 "user_id": user_id,
-                "status": {"$nin": terminal},
+                "status": {"$in": [
+                    PaymentStatus.WAITING_PAYMENT_DETAILS.value,
+                    PaymentStatus.WAITING_TXID.value,
+                    PaymentStatus.WAITING_SCREENSHOT.value,
+                    PaymentStatus.SUBMITTED.value,
+                    PaymentStatus.UNDER_REVIEW.value,
+                    PaymentStatus.PROCESSING.value
+                ]}
             },
-            sort=[("created_at", -1)],
+            sort=[("created_at", -1)]
         )
         return PaymentSession.from_dict(doc) if doc else None
 
-    # ── TXID uniqueness ───────────────────────────────────────────────────────
-
-    async def get_by_txid(self, txid: str) -> Optional[dict]:
-        """
-        Return ANY payment document that has this TXID, regardless of status.
-
-        Checking all statuses (including cancelled/expired) is intentional —
-        it prevents TXID reuse across separate payment attempts, which is a
-        common fraud vector.
-
-        Returns the raw dict (not a PaymentSession) for minimal overhead.
-        """
-        if not txid:
-            return None
-        return await self._collection.find_one(
-            {"txid": txid.strip()},
-            {"_id": 1, "user_id": 1, "status": 1},  # projection — we only need existence
-        )
-
-    # ── Atomic processing lock ────────────────────────────────────────────────
-
     async def acquire_processing_lock(self, payment_id: str) -> bool:
-        """
-        Atomically transition UNDER_REVIEW → PROCESSING.
-
-        Returns True if the lock was acquired (this admin claimed it first).
-        Returns False if another admin already claimed it or the session is
-        no longer in UNDER_REVIEW state.
-
-        This is the critical guard against double-approval/double-rejection.
-        """
+        """Atomic lock to prevent duplicate approval/rejection."""
         result = await self._collection.find_one_and_update(
             {
                 "_id": payment_id,
-                "status": PaymentStatus.UNDER_REVIEW.value,
+                "status": PaymentStatus.UNDER_REVIEW.value
             },
             {
                 "$set": {
                     "status": PaymentStatus.PROCESSING.value,
-                    "locked_at": datetime.now(timezone.utc),
-                    "updated_at": datetime.now(timezone.utc),
+                    "locked_at": datetime.now(timezone.utc)
                 }
             },
-            return_document=ReturnDocument.AFTER,
+            return_document=ReturnDocument.AFTER
         )
         return result is not None
 
-    # ── Timeout scheduling ────────────────────────────────────────────────────
-
-    async def schedule_timeout(
-        self,
-        payment_id: str,
-        user_id: int,
-        expires_at: datetime,
-    ) -> None:
+    async def schedule_timeout(self, payment_id: str, user_id: int, expires_at) -> None:
         await self._timeouts_collection.update_one(
             {"_id": payment_id},
             {
@@ -124,113 +87,137 @@ class PaymentRepository:
     async def clear_timeout(self, payment_id: str) -> None:
         await self._timeouts_collection.delete_one({"_id": payment_id})
 
-    async def get_expired_timeouts(self) -> list[dict]:
-        """Return timeout records whose expires_at has passed (for recovery worker)."""
-        now = datetime.now(timezone.utc)
-        return await self._timeouts_collection.find(
-            {"expires_at": {"$lte": now}}
-        ).to_list(length=None)
-
-    async def get_pending_warnings(self, warning_field: str, cutoff: datetime) -> list[dict]:
-        """
-        Return timeout records where the warning hasn't been sent yet
-        and the cutoff time has passed.
-        Used by the timeout monitor to send 5-min and 10-min warnings.
-        """
-        return await self._timeouts_collection.find(
-            {
-                warning_field: False,
-                "expires_at": {"$lte": cutoff},
-            }
-        ).to_list(length=None)
-
-    async def mark_warning_sent(self, payment_id: str, warning_field: str) -> None:
-        await self._timeouts_collection.update_one(
-            {"_id": payment_id},
-            {"$set": {warning_field: True}},
-        )
-
-    # ── Audit log ─────────────────────────────────────────────────────────────
-
-    async def log_event(
-        self,
-        payment_id: str,
-        event: str,
-        metadata: dict,
-    ) -> None:
-        await self._audit_collection.insert_one({
-            "payment_id": payment_id,
-            "event": event,
-            "metadata": metadata,
-            "timestamp": datetime.now(timezone.utc),
-        })
-
-    # ── Topic mapping ─────────────────────────────────────────────────────────
-
-    async def map_topic(self, topic_id: int, payment_id: str) -> None:
-        await self._topics_collection.update_one(
-            {"_id": topic_id},
-            {"$set": {"payment_id": payment_id}},
-            upsert=True,
-        )
-
-    async def get_payment_by_topic(self, topic_id: int) -> Optional[str]:
-        doc = await self._topics_collection.find_one({"_id": topic_id})
-        return doc["payment_id"] if doc else None
-
-    # ── Subscription history ──────────────────────────────────────────────────
-
-    async def record_subscription_history(
-        self,
-        payment_id: str,
-        data: dict,
-    ) -> None:
+    async def record_subscription_history(self, payment_id: str, data: dict) -> None:
         await self._history_collection.insert_one({
             "payment_id": payment_id,
             "created_at": datetime.now(timezone.utc),
             **data,
         })
 
-    # ── Stuck session recovery ────────────────────────────────────────────────
+    async def log_event(self, payment_id: str, event: str, metadata: dict) -> None:
+        await self._audit_collection.insert_one({
+            "payment_id": payment_id,
+            "event": event,
+            "metadata": metadata,
+            "timestamp": datetime.now(timezone.utc)
+        })
 
-    async def reset_stuck_processing(self) -> int:
-        """
-        On startup: sessions stuck in PROCESSING state indicate a crash
-        during approval/rejection. Reset them to UNDER_REVIEW so admins
-        can action them again.
-        """
-        result = await self._collection.update_many(
-            {"status": PaymentStatus.PROCESSING.value},
-            {
-                "$set": {
-                    "status": PaymentStatus.UNDER_REVIEW.value,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
+    async def map_topic(self, topic_id: int, payment_id: str) -> None:
+        await self._topics_collection.update_one(
+            {"_id": topic_id},
+            {"$set": {"payment_id": payment_id}},
+            upsert=True
         )
-        if result.modified_count:
-            logger.warning(
-                "Reset stuck PROCESSING sessions to UNDER_REVIEW",
-                extra={"ctx_count": result.modified_count},
-            )
-        return result.modified_count
 
-    # ── Index creation ────────────────────────────────────────────────────────
+    async def get_payment_by_topic(self, topic_id: int) -> Optional[str]:
+        doc = await self._topics_collection.find_one({"_id": topic_id})
+        return doc["payment_id"] if doc else None
 
     async def create_indexes(self) -> None:
-        await self._collection.create_index([("user_id", ASCENDING)])
-        await self._collection.create_index([("status", ASCENDING)])
-        await self._collection.create_index(
-            [("txid", ASCENDING)],
-            sparse=True,  # sparse: sessions without txid don't pollute the index
-        )
-        await self._collection.create_index([("created_at", ASCENDING)])
-        await self._collection.create_index(
-            [("user_id", ASCENDING), ("status", ASCENDING)],
-            name="user_active_session_lookup",
-        )
-        await self._audit_collection.create_index([("payment_id", ASCENDING)])
-        await self._timeouts_collection.create_index([("expires_at", ASCENDING)])
-        await self._history_collection.create_index([("user_id", ASCENDING)])
-        await self._history_collection.create_index([("payment_id", ASCENDING)])
+        """
+        Create payment collection indexes with conflict-safe drop-and-recreate.
+
+        The txid unique index previously failed silently if an old index with a
+        different name existed on the same field. This method now drops conflicting
+        indexes before retrying, making it idempotent across deployments.
+        """
+        index_specs = [
+            # payments collection
+            (self._collection, "payments", [
+                {"keys": [("user_id", ASCENDING)], "name": "payments_user_id"},
+                {"keys": [("status", ASCENDING)], "name": "payments_status"},
+                {"keys": [("user_id", ASCENDING), ("status", ASCENDING)], "name": "payments_user_status"},
+                # txid must be globally unique to prevent duplicate transaction abuse
+                {
+                    "keys": [("txid", ASCENDING)],
+                    "name": "payments_txid_unique",
+                    "unique": True,
+                    "sparse": True,   # NULL txid allowed (session not yet submitted)
+                },
+            ]),
+            # audit collection
+            (self._audit_collection, "payment_audit", [
+                {"keys": [("payment_id", ASCENDING)], "name": "audit_payment_id"},
+            ]),
+            # topics collection
+            (self._topics_collection, "payment_topics", [
+                {"keys": [("payment_id", ASCENDING)], "name": "topic_payment_id"},
+            ]),
+            # timeouts collection
+            (self._timeouts_collection, "payment_timeouts", [
+                {"keys": [("expires_at", ASCENDING)], "name": "timeout_expiry"},
+            ]),
+            # subscription history
+            (self._history_collection, "subscription_history", [
+                {"keys": [("user_id", ASCENDING)], "name": "history_user_id"},
+                {"keys": [("payment_id", ASCENDING)], "name": "history_payment_id"},
+            ]),
+        ]
+
+        for collection, label, specs in index_specs:
+            await self._safe_create_indexes(collection, label, specs)
+
         logger.info("Payment repository indexes created")
+
+    @staticmethod
+    async def _safe_create_indexes(collection, label: str, specs: list) -> None:
+        """
+        Create indexes from a list of spec dicts. On IndexOptionsConflict (code 85),
+        drop conflicting old indexes by name and retry once.
+        """
+        from pymongo import IndexModel
+
+        index_models = [
+            IndexModel(
+                spec.pop("keys"),
+                **spec
+            )
+            for spec in [dict(s) for s in specs]   # copy to avoid mutating originals
+        ]
+
+        try:
+            await collection.create_indexes(index_models)
+        except OperationFailure as e:
+            if e.code == 85:  # IndexOptionsConflict
+                logger.warning(
+                    f"Index conflict on {label} — dropping stale indexes and retrying",
+                    extra={"ctx_error": str(e)},
+                )
+                try:
+                    # Rebuild index models (originals were consumed above)
+                    index_models_retry = [
+                        IndexModel(s["keys"], **{k: v for k, v in s.items() if k != "keys"})
+                        for s in specs
+                    ]
+                    desired_names = {m.document.get("name") for m in index_models_retry}
+
+                    existing = await collection.list_indexes().to_list(length=100)
+                    for idx in existing:
+                        if idx["name"] == "_id_":
+                            continue
+                        if idx["name"] not in desired_names:
+                            try:
+                                await collection.drop_index(idx["name"])
+                                logger.info(
+                                    f"Dropped stale index '{idx['name']}' from {label}",
+                                )
+                            except Exception as drop_err:
+                                logger.warning(
+                                    f"Could not drop index '{idx['name']}' from {label}",
+                                    extra={"ctx_error": str(drop_err)},
+                                )
+
+                    await collection.create_indexes(index_models_retry)
+                    logger.info(f"{label} indexes reconciled after conflict resolution")
+                except Exception as retry_err:
+                    logger.error(
+                        f"Failed to reconcile indexes for {label}",
+                        extra={"ctx_error": str(retry_err)},
+                        exc_info=True,
+                    )
+            else:
+                logger.error(
+                    f"Index creation error for {label}",
+                    extra={"ctx_error": str(e), "ctx_code": e.code},
+                    exc_info=True,
+                )

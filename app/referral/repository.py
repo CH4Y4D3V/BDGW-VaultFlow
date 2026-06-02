@@ -3,11 +3,9 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import IndexModel, ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from app.referral.models import ReferralStatus
-from app.utils.logger import get_logger
 
-logger = get_logger(__name__)
 
 class ReferralRepository:
     def __init__(self, db: AsyncIOMotorDatabase):
@@ -15,52 +13,104 @@ class ReferralRepository:
         self._wallets = db['referral_wallets']
 
     async def create_indexes(self) -> None:
-        # Index 1: unique index on referred_user_id (prevents double referral)
-        try:
-            await self._referrals.create_index(
+        """
+        Create or reconcile indexes for referral collections.
+
+        Uses drop-and-recreate only for conflicting indexes (name mismatch on
+        the same key pattern). All indexes are idempotent on re-run.
+        """
+        # ── referrals collection ──────────────────────────────────────────────
+
+        referral_indexes = [
+            # Unique: one referral record per referred user
+            IndexModel(
                 [("referred_user_id", ASCENDING)],
                 unique=True,
-                name="unique_referral_user"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create unique_referral_user index: {e}")
-        
-        # Index 2: compound index on (referrer_user_id, status) for wallet sync
-        try:
-            await self._referrals.create_index(
+                name="unique_referral_user",
+            ),
+            # Compound: wallet sync queries
+            IndexModel(
                 [("referrer_user_id", ASCENDING), ("status", ASCENDING)],
-                name="referrer_status_lookup"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create referrer_status_lookup index: {e}")
-        
-        # Index 3: index on (status, created_at) for background job and manual purging
-        try:
-            await self._referrals.create_index(
+                name="referrer_status_lookup",
+            ),
+            # Partial TTL: auto-expire PENDING records after 48 h
+            IndexModel(
+                [("created_at", ASCENDING)],
+                name="pending_ttl",
+                expireAfterSeconds=172800,
+                partialFilterExpression={"status": ReferralStatus.PENDING},
+            ),
+            # Compound: background qualification job
+            IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
-                name="qualification_job_lookup"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create qualification_job_lookup index: {e}")
+                name="qualification_job_lookup",
+            ),
+        ]
 
-        # Wallet unique index
-        try:
-            await self._wallets.create_index(
+        await self._safe_create_indexes(self._referrals, referral_indexes, "referrals")
+
+        # ── referral_wallets collection ───────────────────────────────────────
+
+        wallet_indexes = [
+            IndexModel(
                 [("user_id", ASCENDING)],
                 unique=True,
-                name="unique_wallet_user"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to create unique_wallet_user index: {e}")
+                name="unique_wallet_user",
+            ),
+        ]
 
-    async def purge_stale_pending(self, hours: int = 48) -> int:
-        """Manually purge PENDING referrals older than N hours."""
-        threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-        result = await self._referrals.delete_many({
-            "status": ReferralStatus.PENDING,
-            "created_at": {"$lt": threshold}
-        })
-        return result.deleted_count
+        await self._safe_create_indexes(self._referrals.database['referral_wallets'], wallet_indexes, "referral_wallets")
+
+    @staticmethod
+    async def _safe_create_indexes(collection, indexes: list, label: str) -> None:
+        """
+        Attempt to create indexes. On IndexOptionsConflict (name already exists
+        with different options, or same options under a different name), drop
+        conflicting indexes by name and retry once.
+        """
+        try:
+            await collection.create_indexes(indexes)
+        except OperationFailure as e:
+            if e.code == 85:  # IndexOptionsConflict
+                # Drop all indexes that conflict with the ones we want to create
+                try:
+                    existing = await collection.list_indexes().to_list(length=100)
+                    existing_names = {idx["name"] for idx in existing if idx["name"] != "_id_"}
+                    desired_names = {idx.document["name"] for idx in indexes}
+
+                    # Drop any index whose name is NOT in our desired set
+                    # (old names left over from a previous schema)
+                    to_drop = existing_names - desired_names
+                    for name in to_drop:
+                        try:
+                            await collection.drop_index(name)
+                        except Exception as drop_err:
+                            from app.utils.logger import get_logger
+                            get_logger(__name__).warning(
+                                f"Could not drop index {name} on {label}",
+                                extra={"ctx_error": str(drop_err)},
+                            )
+
+                    # Retry creation
+                    await collection.create_indexes(indexes)
+                    from app.utils.logger import get_logger
+                    get_logger(__name__).info(
+                        f"{label} indexes reconciled successfully after conflict resolution",
+                    )
+                except Exception as retry_err:
+                    from app.utils.logger import get_logger
+                    get_logger(__name__).error(
+                        f"Failed to reconcile indexes for {label}",
+                        extra={"ctx_error": str(retry_err)},
+                        exc_info=True,
+                    )
+            else:
+                from app.utils.logger import get_logger
+                get_logger(__name__).error(
+                    f"Index creation failed for {label}",
+                    extra={"ctx_error": str(e), "ctx_code": e.code},
+                    exc_info=True,
+                )
 
     async def create_pending(self, referrer_id: int, referred_id: int) -> bool:
         doc = {
@@ -152,23 +202,21 @@ class ReferralRepository:
         )
 
     async def increment_balance(self, user_id: int, amount: int) -> None:
-        update = {"$inc": {"points_balance": amount}}
+        update: dict = {"$inc": {"points_balance": amount}}
         if amount > 0:
             update["$inc"]["total_earned"] = amount
             update["$inc"]["active_referrals"] = 1
         else:
-            # Note: The decrement case for active_referrals
             update["$inc"]["active_referrals"] = -1
-            
+
         await self._wallets.update_one({"user_id": user_id}, update, upsert=True)
 
     async def decrement_balance(self, user_id: int) -> None:
-        # Atomic points_balance = max(0, points_balance - 1), active_referrals -= 1
         await self._wallets.update_one(
             {"user_id": user_id},
             {"$inc": {"points_balance": -1, "active_referrals": -1}}
         )
-        # Safeguard: clamp negative balance
+        # Clamp negative balance
         await self._wallets.update_one(
             {"user_id": user_id, "points_balance": {"$lt": 0}},
             {"$set": {"points_balance": 0}}
