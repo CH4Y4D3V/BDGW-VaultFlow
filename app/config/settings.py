@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_GROUP_ID: int
     VAULT_CHANNEL_ID: int
+    NSFW_VAULT_CHANNEL_ID: int = 0
     PREMIUM_VAULT_CHANNEL_ID: int = 0
     NSFW_GROUP_ID: int = 0
     PREMIUM_GROUP_ID: int = 0

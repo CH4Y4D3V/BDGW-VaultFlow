@@ -32,7 +32,7 @@ class ChannelService:
                 destination=ModerationDestination.NSFW.value,
                 doc={
                     "destination": ModerationDestination.NSFW.value,
-                    "source_channel_id": f"submission_{ModerationDestination.NSFW.value}",
+                    "source_channel_id": str(settings.VAULT_CHANNEL_ID),
                     "target_channel_ids": [str(settings.NSFW_GROUP_ID)],
                     "is_active": True,
                     "watermark_config": _get_watermark_config(ModerationDestination.NSFW),
@@ -54,7 +54,7 @@ class ChannelService:
                 destination=ModerationDestination.PREMIUM.value,
                 doc={
                     "destination": ModerationDestination.PREMIUM.value,
-                    "source_channel_id": f"submission_{ModerationDestination.PREMIUM.value}",
+                    "source_channel_id": str(settings.PREMIUM_VAULT_CHANNEL_ID),
                     "target_channel_ids": [str(settings.PREMIUM_GROUP_ID)],
                     "is_active": True,
                     "watermark_config": _get_watermark_config(ModerationDestination.PREMIUM),
