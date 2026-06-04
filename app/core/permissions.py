@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import functools
 from enum import Enum
-from typing import Callable, Set
+from typing import Callable, List
 
 from pyrogram.types import CallbackQuery, Message
 
@@ -14,64 +15,69 @@ logger = get_logger(__name__)
 
 class Role(str, Enum):
     OWNER = "owner"
-    SUDO = "sudo"
+    SUPER_ADMIN = "super_admin"
     MODERATOR = "moderator"
     SUPPORT_ADMIN = "support_admin"
     PAYMENT_ADMIN = "payment_admin"
     SCHEDULER_ADMIN = "scheduler_admin"
 
 
-def get_user_roles(user_id: int) -> Set[Role]:
-    """Returns all roles assigned to a given user."""
-    roles: Set[Role] = set()
+def get_user_roles(user_id: int) -> List[Role]:
+    roles: List[Role] = []
     if user_id == settings.OWNER_ID:
-        roles.add(Role.OWNER)
-
-    # For backward compatibility and migration, ADMIN_IDS grants SUDO role
-    if user_id in settings.ADMIN_IDS:
-        roles.add(Role.SUDO)
-
+        roles.append(Role.OWNER)
     if user_id in settings.SUDO_IDS:
-        roles.add(Role.SUDO)
-    if user_id in settings.MODERATOR_IDS:
-        roles.add(Role.MODERATOR)
+        roles.append(Role.SUPER_ADMIN)
+    if user_id in settings.ADMIN_IDS or user_id in settings.MODERATOR_IDS:
+        roles.append(Role.MODERATOR)
     if user_id in settings.SUPPORT_ADMIN_IDS:
-        roles.add(Role.SUPPORT_ADMIN)
+        roles.append(Role.SUPPORT_ADMIN)
     if user_id in settings.PAYMENT_ADMIN_IDS:
-        roles.add(Role.PAYMENT_ADMIN)
+        roles.append(Role.PAYMENT_ADMIN)
     if user_id in settings.SCHEDULER_ADMIN_IDS:
-        roles.add(Role.SCHEDULER_ADMIN)
+        roles.append(Role.SCHEDULER_ADMIN)
     return roles
 
 
-def has_role(user_id: int, required_role: Role) -> bool:
-    """
-    Checks if a user has the required role, respecting hierarchy.
-    - OWNER has all permissions.
-    - SUDO has all permissions except OWNER.
-    """
-    user_roles = get_user_roles(user_id)
-    if not user_roles:
-        return False
-
-    if Role.OWNER in user_roles:
+def has_role(user_id: int, role: Role) -> bool:
+    """OWNER and SUPER_ADMIN inherit all roles."""
+    if user_id == settings.OWNER_ID:
         return True
-
-    if Role.SUDO in user_roles and required_role != Role.OWNER:
+    if user_id in settings.SUDO_IDS:
         return True
+    return role in get_user_roles(user_id)
 
-    return required_role in user_roles
 
+def is_moderator(user_id: int) -> bool:
+    return has_role(user_id, Role.MODERATOR)
+
+
+def is_support_admin(user_id: int) -> bool:
+    return has_role(user_id, Role.SUPPORT_ADMIN)
+
+
+def is_payment_admin(user_id: int) -> bool:
+    return has_role(user_id, Role.PAYMENT_ADMIN)
+
+
+def is_scheduler_admin(user_id: int) -> bool:
+    return has_role(user_id, Role.SCHEDULER_ADMIN)
+
+
+def is_any_admin(user_id: int) -> bool:
+    return bool(get_user_roles(user_id))
+
+
+# ── Permission guard decorator ────────────────────────────────────────────────
 
 def permission_required(role: Role, silent: bool = False):
     """
     Pyrogram handler decorator that enforces role-based access control.
 
-    Checks if a user has the specified `role` or a higher-ranking role.
     Works on both Message and CallbackQuery handlers.
 
     Args:
-        role:   The minimum role required to access the decorated handler.
+        role:   The minimum Role required to execute the handler.
         silent: If True, unauthorized calls are dropped without any reply.
                 If False (default), unauthorized users receive a denial message.
     """
@@ -92,11 +98,13 @@ def permission_required(role: Role, silent: bool = False):
             if not from_user:
                 return
 
-            if not has_role(from_user.id, role):
+            user_id = from_user.id
+
+            if not has_role(user_id, role):
                 logger.warning(
                     "permission_required: access denied",
                     extra={
-                        "ctx_user_id": from_user.id,
+                        "ctx_user_id": user_id,
                         "ctx_required_role": role.value,
                         "ctx_handler": func.__name__,
                     },
