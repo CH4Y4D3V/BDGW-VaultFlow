@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 class Role(str, Enum):
     OWNER = "owner"
     SUPER_ADMIN = "super_admin"
+    SUDO = "sudo"           # alias — treated identically to SUPER_ADMIN
     MODERATOR = "moderator"
     SUPPORT_ADMIN = "support_admin"
     PAYMENT_ADMIN = "payment_admin"
@@ -28,6 +29,7 @@ def get_user_roles(user_id: int) -> List[Role]:
         roles.append(Role.OWNER)
     if user_id in settings.SUDO_IDS:
         roles.append(Role.SUPER_ADMIN)
+        roles.append(Role.SUDO)
     if user_id in settings.ADMIN_IDS or user_id in settings.MODERATOR_IDS:
         roles.append(Role.MODERATOR)
     if user_id in settings.SUPPORT_ADMIN_IDS:
@@ -40,7 +42,7 @@ def get_user_roles(user_id: int) -> List[Role]:
 
 
 def has_role(user_id: int, role: Role) -> bool:
-    """OWNER and SUPER_ADMIN inherit all roles."""
+    """OWNER inherits all roles. SUPER_ADMIN/SUDO also inherit all roles."""
     if user_id == settings.OWNER_ID:
         return True
     if user_id in settings.SUDO_IDS:
@@ -68,18 +70,10 @@ def is_any_admin(user_id: int) -> bool:
     return bool(get_user_roles(user_id))
 
 
-# ── Permission guard decorator ────────────────────────────────────────────────
-
 def permission_required(role: Role, silent: bool = False):
     """
     Pyrogram handler decorator that enforces role-based access control.
-
     Works on both Message and CallbackQuery handlers.
-
-    Args:
-        role:   The minimum Role required to execute the handler.
-        silent: If True, unauthorized calls are dropped without any reply.
-                If False (default), unauthorized users receive a denial message.
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
