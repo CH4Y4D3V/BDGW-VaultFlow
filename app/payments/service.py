@@ -75,7 +75,12 @@ class PaymentService:
         self.repository = repository
         self.referral_repo = referral_repo
 
-    async def create_session(self, user_id: int, plan_id: str) -> PaymentSession:
+    async def create_session(
+        self,
+        user_id: int,
+        plan_id: str,
+        method: Optional[str] = None,
+    ) -> PaymentSession:
         if plan_id not in PLANS:
             raise ValueError(f"Invalid plan: {plan_id}")
 
@@ -105,6 +110,7 @@ class PaymentService:
             plan_id=plan_id,
             locked_amount=locked_amount,
             points_used=points,
+            payment_method=method,
         )
 
         await self.repository.save_session(session)
@@ -280,6 +286,14 @@ class PaymentService:
         --- GAP 8 FIX: RESTART SAFE TIMER ---
         """
         try:
+            # Recover sessions stuck in PROCESSING from a previous crash
+            reset_count = await self.repository.reset_stuck_processing()
+            if reset_count:
+                logger.info(
+                    "resume_active_sessions: recovered stuck PROCESSING sessions",
+                    extra={"ctx_count": reset_count},
+                )
+
             active_sessions = await self.repository.get_sessions_by_status([
                 PaymentStatus.AWAITING_PAYMENT,
                 PaymentStatus.WAITING_SCREENSHOT,

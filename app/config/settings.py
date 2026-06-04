@@ -45,14 +45,15 @@ class Settings(BaseSettings):
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_GROUP_ID: int
     VAULT_CHANNEL_ID: int
+    PREMIUM_VAULT_CHANNEL_ID: int = 0
     NSFW_GROUP_ID: int = 0
     PREMIUM_GROUP_ID: int = 0
-    PREMIUM_CHANNEL_ID: int = 0
     LOG_CHANNEL_ID: int = 0
+    MAIN_CHANNEL_ID: int = 0
 
     # ── Destination display names ─────────────────────────────────────────────
-    NSFW_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
-    PREMIUM_DISPLAY_NAME: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
+    NSFW_DISPLAY_NAME: str = "BD GONE WILD"
+    PREMIUM_DISPLAY_NAME: str = "BD GONE WILD ✦ PREMIUM"
 
     # ── Access Control ────────────────────────────────────────────────────────
     # Only OWNER_ID and ADMIN_IDS are used. All admins have full access.
@@ -119,15 +120,24 @@ class Settings(BaseSettings):
     WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
     WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
 
-    WATERMARK_TEXT_NSFW: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 𝐕𝐈𝐃𝐄𝐎"
-    WATERMARK_TEXT_PREMIUM: str = "𝐁𝐃 𝐆𝐎𝐍𝐄 𝐖𝐈𝐋𝐃 ✦ 𝐏𝐑𝐄𝐌𝐈𝐔𝐌"
+    WATERMARK_TEXT_NSFW: str = "BD GONE WILD"
+    WATERMARK_TEXT_PREMIUM: str = "BD GONE WILD ✦ PREMIUM"
     WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
 
     # Accepted values: BOTTOM_RIGHT, BOTTOM_LEFT, TOP_RIGHT, TOP_LEFT, CENTER
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
-    WATERMARK_OPACITY: float = 0.8
-    WATERMARK_SCALE: float = 0.15
-    WATERMARK_ROTATION: int = 0
+    WATERMARK_OPACITY: float = 107
+    WATERMARK_SCALE: float = 0.040
+    WATERMARK_ROTATION: int = -27
+
+    # ── Verification Hub Topics ───────────────────────────────────────────────
+    HUB_TOPIC_PAYMENTS: int = 0
+    HUB_TOPIC_CONTENT_REVIEW: int = 0
+    HUB_TOPIC_SUPPORT: int = 0
+    HUB_TOPIC_TAKEDOWN: int = 0
+    HUB_TOPIC_USER_MOD: int = 0
+    HUB_TOPIC_BROADCASTS: int = 0
+    HUB_TOPIC_AUDIT: int = 0
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True

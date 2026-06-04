@@ -622,6 +622,10 @@ async def _process_send_details_message(
             extra={"ctx_session": session_id, "ctx_user": session.user_id, "ctx_admin": admin_id},
         )
 
+        # Stop propagation — topic_router must NOT re-deliver this message to the user
+        from pyrogram.handlers.handler import StopPropagation
+        raise StopPropagation
+
     except Exception as e:
         _admin_states.pop(admin_id, None)
         logger.error(

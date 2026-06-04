@@ -255,7 +255,8 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
     state, data = await _get_fsm(user_id)
 
     if state == STATE_IDLE:
-        return
+        from pyrogram import ContinuePropagation
+        raise ContinuePropagation
 
     if state == STATE_AWAITING_ID:
         # ── SUPPORT CONFLICT FIX ──

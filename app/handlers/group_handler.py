@@ -29,20 +29,27 @@ _MAX_RETRIES = 3
 @Client.on_message(filters.regex(r"^\./") & filters.group, group=-1)
 async def handle_prefix_auto_delete(client: Client, message: Message) -> None:
     """
-    Flow C: Any message starting with ./ in groups must be auto-deleted immediately.
-    We use group=-1 to ensure this runs before any other handlers.
+    Section 4.3 / Section 20: Any message starting with ./ in groups
+    deleted after 10 seconds. Silent — no notification.
     """
-    try:
-        await message.delete()
-        logger.debug(
-            "prefix_message_deleted",
-            extra={"ctx_chat_id": message.chat.id, "ctx_user_id": message.from_user.id if message.from_user else None}
-        )
-    except Exception as e:
-        logger.warning(
-            "prefix_delete_failed",
-            extra={"ctx_error": str(e), "ctx_chat_id": message.chat.id}
-        )
+    async def _delayed_delete():
+        await asyncio.sleep(10)
+        try:
+            await message.delete()
+            logger.debug(
+                "prefix_message_deleted",
+                extra={
+                    "ctx_chat_id": message.chat.id,
+                    "ctx_user_id": message.from_user.id if message.from_user else None,
+                },
+            )
+        except Exception as e:
+            logger.warning(
+                "prefix_delete_failed",
+                extra={"ctx_error": str(e), "ctx_chat_id": message.chat.id},
+            )
+
+    asyncio.create_task(_delayed_delete())
 
 
 # ── Internal chat guard ───────────────────────────────────────────────────────

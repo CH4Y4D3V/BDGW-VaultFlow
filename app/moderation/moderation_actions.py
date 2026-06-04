@@ -722,10 +722,10 @@ async def execute_queue(
     await get_audit().log(
         action=AuditAction.QUEUE,
         performed_by=moderator_id,
-        performed_by_name=moderator_name,
         details={
             "destination": dest,
             "submitter_user_id": submitter_user_id,
+            "moderator_name": moderator_name,
         },
     )
 

@@ -462,7 +462,7 @@ async def handle_approve_command(client: Client, message: Message) -> None:
             return
 
         session_id = message.command[1]
-        from app.payments.service import get_payment_service
+        from app.payments import get_payment_service
         service = get_payment_service()
 
         admin_name = message.from_user.first_name or "Admin"
@@ -488,7 +488,7 @@ async def handle_reject_command(client: Client, message: Message) -> None:
 
         session_id = message.command[1]
         reason = " ".join(message.command[2:])
-        from app.payments.service import get_payment_service
+        from app.payments import get_payment_service
         service = get_payment_service()
 
         admin_name = message.from_user.first_name or "Admin"

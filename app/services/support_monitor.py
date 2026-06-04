@@ -55,6 +55,22 @@ class SupportMonitor:
                         {"_id": ticket["_id"]},
                         {"$set": {"inactivity_warned": True}}
                     )
+
+                    # Per Section 15.3: notify user that no admin is available
+                    try:
+                        await self._bot.send_message(
+                            chat_id=user_id,
+                            text=(
+                                "⚠️ No admin available currently. "
+                                "Your ticket is still open — an admin will respond soon."
+                            ),
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception as notify_err:
+                        logger.warning(
+                            "failed_to_send_inactivity_user_notify",
+                            extra={"ctx_user_id": user_id, "ctx_error": str(notify_err)},
+                        )
                 except Exception as e:
                     logger.warning("failed_to_send_inactivity_warning", extra={"ctx_error": str(e)})
 

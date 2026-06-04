@@ -218,6 +218,12 @@ class AppLifecycle:
                 )
                 logger.info("lifecycle_payment_monitor_registered")
 
+            else:
+                logger.warning(
+                    "lifecycle_payment_monitor_skipped",
+                    extra={"ctx_reason": "engine_not_available"},
+                )
+
             # Resume active sessions — method now exists on PaymentService
             payment_service = get_payment_service()
             asyncio.create_task(payment_service.resume_active_sessions())
