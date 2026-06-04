@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode

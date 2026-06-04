@@ -127,6 +127,7 @@ class Settings(BaseSettings):
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
     WATERMARK_OPACITY: float = 0.8
     WATERMARK_SCALE: float = 0.15
+    WATERMARK_ROTATION: int = 0
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True

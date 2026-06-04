@@ -583,50 +583,6 @@ async def handle_mystatus(client: Client, message: Message) -> None:
         await message.reply_text("⚠️ Account dashboard is currently unavailable.")
 
 
-@Client.on_message(filters.command("help") & filters.private)
-async def handle_help(client: Client, message: Message) -> None:
-    """
-    Support & Guide entry point.
-    Flow 3: Checks for active support tickets before showing general help.
-    """
-    user_id = message.from_user.id
-
-    try:
-        from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
-        topic_manager = get_topic_manager()
-        topic_id = await topic_manager.get_user_topic_id(user_id, TOPIC_SUPPORT)
-
-        if topic_id:
-            await message.reply_text(
-                "🆘 <b>Active Support Ticket Found</b>\n\n"
-                "Our team is already looking into your request. "
-                "You can send additional messages or files directly here, "
-                "and an admin will respond shortly.",
-                parse_mode=ParseMode.HTML
-            )
-            return
-
-        from app.ui.help_cards import build_help_card_v2, build_help_keyboard
-        text = build_help_card_v2()
-        keyboard = build_help_keyboard()
-        await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
-
-    except Exception as e:
-        logger.error(
-            "handle_help_failed",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-        )
-        await message.reply_text(
-            "🆘 <b>Support</b>\n\nContact our team by clicking the button below.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🆘 Open Support", callback_data="menu:support")
-            ]]),
-            parse_mode=ParseMode.HTML,
-        )
-
-
-# ── /ping ─────────────────────────────────────────────────────────────────────
-
 @Client.on_message(filters.command("ping") & filters.private)
 async def handle_ping_test(client: Client, message: Message) -> None:
     await message.reply_text("pong")

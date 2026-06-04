@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-from app.core.database import DatabaseManager
-_payment_service: Optional[PaymentService] = None
+if TYPE_CHECKING:
+    from app.payments.service import PaymentService
+
+_payment_service: "Optional[PaymentService]" = None
 
 
 def get_payment_service() -> "PaymentService":
@@ -12,7 +14,8 @@ def get_payment_service() -> "PaymentService":
         from app.payments.repository import PaymentRepository
         from app.payments.service import PaymentService
         from app.referral.repository import ReferralRepository
-        
+        from app.core.database import DatabaseManager
+
         db = DatabaseManager.get_db()
         repo = PaymentRepository(db)
         referral_repo = ReferralRepository(db)
