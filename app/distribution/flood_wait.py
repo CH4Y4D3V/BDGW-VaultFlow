@@ -12,25 +12,20 @@ logger = get_logger(__name__)
 class FloodWaitHandler:
     """
     Centralized FloodWait state per (worker, target) pair.
-    Tracks when each target is available again to avoid hammering it.
+    Tracks when each target is available again.
 
-    FIX 13: In-memory state is now backed by Redis so flood-wait periods
-    survive process restarts. Wall-clock timestamps (time.time()) are stored
-    in Redis; monotonic timestamps are used for in-process comparisons.
+    FIX: register_flood_wait() is a sync method but needs to schedule
+    an async Redis persist. Uses asyncio.get_running_loop() with a
+    try/except RuntimeError for cases where it's called from a sync
+    context (e.g. startup). In-memory state is always updated regardless.
 
-    Redis key schema:  fw:{target_id}  →  str(wall_clock_expiry_timestamp)
-    TTL is set to the remaining wait seconds so keys auto-expire.
-
-    Degrades gracefully if Redis is unavailable — falls back to in-memory only
-    with a warning logged at the first failure.
+    Redis key schema:  fw:{target_id}  → str(wall_clock_expiry_timestamp)
+    TTL = remaining wait seconds so keys auto-expire.
     """
 
     def __init__(self):
         self._blocked_until: dict[str, float] = {}  # monotonic timestamps
 
-        # Synchronous Redis client — FloodWaitHandler methods are all synchronous
-        # and called from within async tasks, so a sync client avoids requiring
-        # an event loop reference at construction time.
         import redis.asyncio as aioredis
         self._redis = aioredis.Redis.from_url(
             settings.REDIS_URL,
@@ -42,18 +37,17 @@ class FloodWaitHandler:
     def register_flood_wait(self, target_id: str, wait_seconds: int) -> None:
         total_wait = wait_seconds + settings.FLOODWAIT_EXTRA_BUFFER
         capped_wait = min(total_wait, settings.FLOODWAIT_MAX_WAIT)
-        self._blocked_until[target_id] = time.monotonic() + capped_wait
 
-        # FIX 13: persist wall-clock expiry to Redis so restarts don't
-        # immediately retry flood-waited targets.
+        # Always update in-memory state synchronously — this is the fast path
+        self._blocked_until[target_id] = time.monotonic() + capped_wait
         blocked_until_wall = time.time() + capped_wait
-        
-        async def _save():
+
+        # Persist to Redis asynchronously — best effort, non-blocking
+        async def _save() -> None:
             try:
                 await self._redis.setex(
                     f"fw:{target_id}",
-                    int(capped_wait) + 1,  # TTL slightly longer than the wait so the key
-                                            # is still present for load_from_redis() on restart
+                    int(capped_wait) + 1,
                     str(blocked_until_wall),
                 )
             except Exception as e:
@@ -61,9 +55,18 @@ class FloodWaitHandler:
                     "FloodWait: Redis persist failed — in-memory state still valid",
                     extra={"ctx_target": target_id, "ctx_error": str(e)},
                 )
-        
-        import asyncio
-        asyncio.create_task(_save())
+
+        # Schedule the async save only if an event loop is running
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_save())
+        except RuntimeError:
+            # No running event loop (called from sync context at startup)
+            # In-memory state was already set above — safe to skip Redis persist here
+            logger.debug(
+                "FloodWait: no running loop for Redis persist — in-memory only",
+                extra={"ctx_target": target_id},
+            )
 
         logger.warning(
             "FloodWait registered",
@@ -75,19 +78,12 @@ class FloodWaitHandler:
         )
 
     def is_blocked(self, target_id: str) -> bool:
-        """
-        Check if a target is currently blocked by a FloodWait.
-        Relies on in-memory state which is pre-populated from Redis at startup.
-        """
         until = self._blocked_until.get(target_id)
-
         if until is None:
             return False
-
         if time.monotonic() >= until:
             del self._blocked_until[target_id]
             return False
-        
         return True
 
     def seconds_until_available(self, target_id: str) -> float:
@@ -107,7 +103,8 @@ class FloodWaitHandler:
 
     async def load_from_redis(self) -> None:
         """
-        FIX 13: Pre-populate in-memory state from Redis on worker startup.
+        Pre-populate in-memory state from Redis on worker startup.
+        Call this once during startup before workers begin polling.
         """
         try:
             keys = await self._redis.keys("fw:*")
@@ -151,10 +148,6 @@ def calculate_retry_delay(
     max_delay: Optional[float] = None,
     jitter: Optional[float] = None,
 ) -> float:
-    """
-    Exponential backoff with jitter.
-    delay = min(base * 2^attempt + jitter, max_delay)
-    """
     base = base_delay or settings.RETRY_BASE_DELAY
     cap = max_delay or settings.RETRY_MAX_DELAY
     jitter_range = jitter if jitter is not None else settings.RETRY_JITTER_RANGE
@@ -172,11 +165,6 @@ async def with_retry(
     target_id: str,
     flood_handler: Optional[FloodWaitHandler] = None,
 ) -> Any:
-    """
-    Wraps a coroutine factory with retry logic.
-    Handles FloodWaitError specially — waits the specified time before retrying.
-    All other exceptions trigger exponential backoff.
-    """
     last_error: Optional[Exception] = None
 
     for attempt in range(max_attempts):

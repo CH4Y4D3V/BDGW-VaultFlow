@@ -1,10 +1,17 @@
-from __future__ import annotations
-
 """
-SupportService — bidirectional message routing between users and admins.
+support_topics.py
 
-User → bot DM  →  copy to user's support topic in verification hub
-Admin reply in topic  →  copy back to user DM
+I18N FIX (v2):
+  - _SUPPORT_CONNECTED_MSG constant removed from user-facing sends.
+    Replaced with get_text("support_connected", lang) after DB lang lookup.
+  - /close topic command user notification localized.
+  - /ban topic command user notification localized.
+  - /warn topic command user notification localized.
+  - cb_support_accept_button user notification localized.
+  - msg_admin_topic_reply window notice localized.
+
+Admin-group messages (topic thread, delivery confirmations, not-accepted
+gate warnings) intentionally remain English — they are admin-operational.
 """
 
 import logging

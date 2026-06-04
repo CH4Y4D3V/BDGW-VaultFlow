@@ -1,288 +1,326 @@
-from __future__ import annotations
-
 """
-Support handler.
-
-RC-4 FIX: ~filters.command([]) replaced with ~filters.regex(r"^/").
-RC-6 FIX: admin->user routing handled by topic_router.py only.
-SUPPORT-FIX: handle_private_message_support now creates topic on demand
-             instead of returning early when topic is None. Fixes silently
-             dropped messages when forum topic creation failed in handle_support_menu.
+support_handler.py
+──────────
+Support chat handler.
 """
 
-import asyncio
-from datetime import datetime, timezone
+import logging
+from html import escape
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait, RPCError
-from pyrogram.types import CallbackQuery, Message
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.types import Message
 
-from app.config import settings
-from app.core.redis_client import get_redis
-from app.core.permissions import is_support_admin
-from app.repositories.support_repository import SupportRepository
-from app.services.support_service import get_support_service
-from app.services.topic_service import get_topic_service, TOPIC_SUPPORT
-from app.utils.logger import get_logger
+from config import BotConfig
+from database.repository import Database
+from states import SupportFSM
+from services.support_topics import build_accept_markup, forward_to_topic, notify_to_topic
+from locales import get_user_lang, get_text, t
 
-logger = get_logger(__name__)
-
-_FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
-_MAX_RETRIES = 3
-
-
-def _get_support_repo():
-    return SupportRepository()
+log = logging.getLogger(__name__)
+router = Router(name="support")
 
 
-async def _safe_reply(
-    message: Message,
-    text: str,
-    parse_mode: ParseMode = ParseMode.HTML,
+def _support_session_minutes() -> int:
+    import os
+    raw = os.getenv("SUPPORT_SESSION_MINUTES", "")
+    try:
+        return max(1, int(raw)) if raw else 5
+    except ValueError:
+        return 5
+
+
+# ── /support command — opens a support session ───────────────────────────────
+
+@router.message(Command(commands=["admin", "support"]))
+async def cmd_support(
+    message: Message, state: FSMContext, db: Database, settings: BotConfig
 ) -> None:
-    for attempt in range(_MAX_RETRIES):
-        try:
-            await message.reply_text(text, parse_mode=parse_mode)
-            return
-        except FloodWait as e:
-            await asyncio.sleep(int(e.value) + _FLOOD_BUFFER)
-        except RPCError as e:
-            logger.warning(
-                "_safe_reply: RPCError",
-                extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
-            )
-            if attempt == _MAX_RETRIES - 1:
-                return
-            await asyncio.sleep(2 ** attempt)
-        except Exception as e:
-            logger.error(
-                "_safe_reply: unexpected exception",
-                extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
-                exc_info=True,
-            )
-            if attempt == _MAX_RETRIES - 1:
-                return
-            await asyncio.sleep(2 ** attempt)
-
-
-# ── Callback: menu:support ────────────────────────────────────────────────────
-
-@Client.on_callback_query(filters.regex(r"^menu:support$"))
-async def handle_support_menu(client: Client, callback: CallbackQuery) -> None:
-    user_id = callback.from_user.id if callback.from_user else 0
-
-    redis = get_redis()
-    spam_key = f"menu:spam:{user_id}"
-    try:
-        if await redis.exists(spam_key):
-            await callback.answer("Slow down! Processing...", show_alert=False)
-            return
-        await redis.set(spam_key, "1", ex=1)
-    except Exception:
-        pass
-
-    await callback.answer()
-
-    logger.info(
-        "HANDLER: handle_support_menu entered",
-        extra={"ctx_from_user": user_id},
-    )
-
-    try:
-        # Try to pre-create the topic so the first message routes immediately.
-        # If it fails we still show the prompt — the topic will be created
-        # lazily when the user's first message arrives.
-        topic_service = get_topic_service()
-        try:
-            topic_id = await topic_service.get_or_create_user_topic(
-                client, user_id, TOPIC_SUPPORT
-            )
-            logger.info(
-                "Support topic ready",
-                extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id},
-            )
-        except Exception as e:
-            logger.warning(
-                "handle_support_menu: topic pre-creation failed (will retry on first message)",
-                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-            )
-
-        await callback.message.edit_text(
-            "🆘 <b>Support</b>\n\n"
-            "Send your message below and our team will respond shortly.\n\n"
-            "<i>Type your question or describe your issue.</i>",
-            parse_mode=ParseMode.HTML,
-        )
-
-        logger.info(
-            "Support ticket flow initiated",
-            extra={"ctx_user_id": user_id},
-        )
-
-    except Exception as e:
-        logger.error(
-            "HANDLER: handle_support_menu unhandled exception",
-            extra={"ctx_error": str(e)},
-            exc_info=True,
-        )
-        try:
-            await callback.answer("⚠️ Could not open support. Please try again.", show_alert=True)
-        except Exception:
-            pass
-
-
-# ── Private message routing ───────────────────────────────────────────────────
-
-@Client.on_message(filters.private & ~filters.regex(r"^/"))
-async def handle_private_message_support(client: Client, message: Message) -> None:
     """
-    Route non-command private text messages to support.
+    User command: /support or /admin
+    Opens a live support session. Admins are excluded.
+    If a session is already active, reminds the user instead of opening a duplicate.
 
-    SUPPORT-FIX: Previously returned early if topic_id was None (topic creation
-    had failed in handle_support_menu). Now creates the topic on demand so the
-    very first message a user sends always reaches the verification hub.
+    On new session:
+      1. DB: open_support_session (resets accepted_at — fresh gate)
+      2. FSM: set SupportFSM.active
+      3. Topic: post accept button so admin must explicitly accept before replying
+      4. Admin DMs: notify as fallback (non-topic setups)
     """
-    if not message.from_user:
-        return
-
-    # Skip media — handled by submission_handler
-    if message.photo or message.video or message.document or message.animation:
-        logger.debug(
-            "handle_private_message_support: skipping media",
-            extra={"ctx_from_user": message.from_user.id},
-        )
-        return
-
     user_id = message.from_user.id
 
-    try:
-        topic_service = get_topic_service()
-        topic_id = await topic_service.get_user_topic_id(user_id, TOPIC_SUPPORT)
-
-        if topic_id is None:
-            # SUPPORT-FIX: topic missing — create it now instead of dropping message
-            logger.info(
-                "handle_private_message_support: no topic found, creating on demand",
-                extra={"ctx_user_id": user_id},
-            )
-            try:
-                topic_id = await topic_service.get_or_create_user_topic(
-                    client, user_id, TOPIC_SUPPORT
-                )
-                logger.info(
-                    "handle_private_message_support: topic created",
-                    extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id},
-                )
-            except Exception as e:
-                logger.error(
-                    "handle_private_message_support: on-demand topic creation failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-                    exc_info=True,
-                )
-                # Still route — SupportService will forward to group main chat
-                topic_id = None
-
-        if topic_id is None:
-            # No topic at all (forum topics disabled or bot lacks permission).
-            # Route directly to verification group main chat as fallback.
-            logger.info(
-                "handle_private_message_support: routing without topic (fallback)",
-                extra={"ctx_user_id": user_id},
-            )
-
-        logger.info(
-            "HANDLER: handle_private_message_support routing to support",
-            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id},
+    # Admins do not open support sessions
+    if user_id in settings.admin_ids:
+        await message.answer(
+            "ℹ️ You are an admin. Use <code>/closesupport &lt;user_id&gt;</code> "
+            "to manage user sessions.",
+            parse_mode="HTML",
         )
+        return
 
-        support_service = get_support_service()
-        await support_service.handle_user_message(client, message)
+    # Fetch lang before any branching so it is always in scope
+    lang = (await get_user_lang(db, user_id)) or "en"
 
-    except Exception as e:
-        logger.error(
-            "HANDLER: handle_private_message_support unhandled exception",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-            exc_info=True,
-        )
+    # Check if session already active
+    already_active = await db.is_support_session_active(user_id)
+    if already_active:
+        await message.answer(get_text("support_already_active", lang), parse_mode="HTML")
+        return
 
+    # Open session in DB with expiry and set FSM
+    # open_support_session MUST reset accepted_at = NULL (see repository_additions.py)
+    minutes = _support_session_minutes()
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    ).isoformat()
+    await db.open_support_session(user_id, expires_at)
+    await state.set_state(SupportFSM.active)
 
-# ── Admin command: /close_ticket ──────────────────────────────────────────────
+    log.info("[SUPPORT] User %d opened a support session.", user_id)
 
-@Client.on_message(
-    filters.command("close_ticket")
-    & filters.chat(settings.VERIFICATION_GROUP_ID)
-)
-async def handle_close_ticket(client: Client, message: Message) -> None:
-    logger.info(
-        "HANDLER: handle_close_ticket entered",
-        extra={"ctx_from_user": message.from_user.id if message.from_user else None},
+    await message.answer(get_text("support_session_started", lang), parse_mode="HTML")
+
+    # ── Notify via topic (primary — includes accept gate button) ─────────────
+    # This is the critical part of the accept flow: the topic receives the
+    # new-session notice with the "✅ Accept Support" button. Until an admin
+    # clicks it (or types /accept), their replies are blocked by the accept gate
+    # in msg_admin_topic_reply.
+    user = message.from_user
+    user_link = f"tg://user?id={user_id}"
+    accept_notice_text = (
+        f"🔔 <b>New Support Request</b>\n\n"
+        f"👤 <a href='{user_link}'>{escape(user.full_name)}</a> "
+        f"(@{escape(user.username or 'no_username')}) "
+        f"[<code>{user_id}</code>]\n\n"
+        f"User is waiting for help.\n\n"
+        f"⚠️ <b>Accept the session before replying — "
+        f"your messages will NOT be forwarded until you do.</b>\n\n"
+        f"👇 Click below or type <code>/accept</code>:"
+    )
+    if settings.admin_group_id:
+        try:
+            await notify_to_topic(
+                bot=message.bot,
+                db=db,
+                settings=settings,
+                user_id=user_id,
+                text=accept_notice_text,
+                reply_markup=build_accept_markup(user_id),
+            )
+        except Exception as exc:
+            log.warning(
+                "[SUPPORT] Could not post accept notice to topic for user %d: %s",
+                user_id, exc,
+            )
+
+    # ── Fallback: DM notifications to individual admins ──────────────────────
+    # Kept for non-topic setups or when admin_group_id is not configured.
+    user_info = (
+        f"{escape(user.full_name)} "
+        f"(@{escape(user.username or 'no_username')}) "
+        f"[<code>{user_id}</code>]"
     )
 
-    try:
-        if not message.from_user or not is_support_admin(message.from_user.id):
-            return
+    targets: list[int] = list(settings.admin_ids)
+    if (
+        settings.admin_group_id is not None
+        and settings.admin_group_id not in targets
+    ):
+        targets.append(settings.admin_group_id)
 
-        thread_id = (
-            getattr(message, "message_thread_id", None)
-            or getattr(message, "reply_to_top_message_id", None)
-        )
-        if not thread_id:
-            await message.reply_text("❌ This command must be used inside a topic thread.")
-            return
-
-        topic_service = get_topic_service()
-        topic_doc = await topic_service.get_user_by_topic(thread_id)
-        if not topic_doc or topic_doc.get("topic_type") != TOPIC_SUPPORT:
-            await message.reply_text("❌ This is not a support topic.")
-            return
-
-        user_id: int = topic_doc["user_id"]
-
+    for chat_id in targets:
         try:
-            await client.send_message(
-                chat_id=user_id,
+            await message.bot.send_message(
+                chat_id=chat_id,
                 text=(
-                    "✅ <b>Your support ticket has been closed.</b>\n\n"
-                    "If you have further questions, start a new conversation anytime."
+                    f"🔔 <b>New Support Session</b>\n\n"
+                    f"👤 {user_info}\n\n"
+                    f"User has opened a support session and is waiting for help.\n"
+                    f"Reply to their messages to respond directly.\n\n"
+                    f"To close: <code>/closesupport {user_id}</code>"
                 ),
-                parse_mode=ParseMode.HTML,
+                parse_mode="HTML",
             )
-        except Exception as e:
-            logger.warning(
-                "handle_close_ticket: could not notify user",
-                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-            )
+        except Exception as exc:
+            log.warning("[SUPPORT] Could not notify admin chat %d: %s", chat_id, exc)
 
+
+# ── Active session: forward user messages to admins ──────────────────────────
+
+@router.message(SupportFSM.active, F.photo | (F.text & ~F.text.startswith("/")))
+async def msg_support_forward(
+    message: Message, state: FSMContext, bot: Bot, db: Database, settings: BotConfig
+) -> None:
+    user = message.from_user
+    user_id = user.id
+
+    lang = (await get_user_lang(db, user_id)) or "en"
+
+    # ── Session expiry check — NOTIFY before clearing ──────────────────────────
+    # Order matters: if the send fails, the user gets no notification.
+    # Clearing FSM first would leave the user silently stuck.
+    if not await db.is_support_session_active(user_id):
+        await message.answer(get_text("support_session_expired", lang), parse_mode="HTML")
+        await state.clear()
+        await db.close_support_session(user_id)
+        log.info("[SUPPORT] Session expired for user %d — notified, FSM cleared.", user_id)
+        return
+
+    # NOTE: No ban check here — BanCheckMiddleware silently blocks banned users
+    # before this handler ever runs. Adding a secondary check here would send
+    # a message to banned users (contradicting the silent-ban design) and would
+    # clear FSM before notifying (wrong order). Middleware is authoritative.
+
+    # ── PRIMARY: forward to forum topic ───────────────────────────────────────
+    topic_ok = await forward_to_topic(bot, db, settings, message)
+
+    if topic_ok:
+        await message.reply(get_text("support_message_received", lang), parse_mode="HTML")
+        return
+
+    # ── FALLBACK: send to admin DMs ───────────────────────────────────────────
+    log.warning(
+        "[SUPPORT] Topic route failed for user %d — falling back to DM notifications",
+        user_id,
+    )
+
+    user_info = (
+        f"{escape(user.full_name)} "
+        f"(@{escape(user.username or 'no_username')}) "
+        f"[<code>{user_id}</code>]"
+    )
+
+    targets: list[int] = list(settings.admin_ids)
+    if (
+        settings.admin_group_id is not None
+        and settings.admin_group_id not in targets
+    ):
+        targets.append(settings.admin_group_id)
+
+    forwarded_count = 0
+    for chat_id in targets:
         try:
-            await client.close_forum_topic(
-                chat_id=settings.VERIFICATION_GROUP_ID,
-                message_thread_id=thread_id,
+            if message.photo:
+                caption_text = message.caption or "(photo only)"
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=message.photo[-1].file_id,
+                    caption=(
+                        f"💬 <b>Support Message</b>\n\n"
+                        f"👤 From: {user_info}\n\n"
+                        f"Caption: {escape(caption_text)}"
+                    ),
+                    parse_mode="HTML",
+                )
+            else:
+                sent = await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"💬 <b>Support Message</b>\n\n"
+                        f"👤 From: {user_info}\n\n"
+                        f"Message:\n{escape(message.text or '')}"
+                    ),
+                    parse_mode="HTML",
+                )
+
+            await db.store_support_message(
+                user_id=user_id,
+                admin_msg_id=sent.message_id,
+                admin_chat_id=chat_id,
             )
-        except Exception as e:
-            logger.warning(
-                "handle_close_ticket: could not close forum topic",
-                extra={"ctx_thread_id": thread_id, "ctx_error": str(e)},
+            forwarded_count += 1
+        except Exception as exc:
+            log.error("[SUPPORT] Fallback DM failed to chat %d: %s", chat_id, exc)
+
+    if forwarded_count > 0:
+        await message.reply(get_text("support_message_received", lang), parse_mode="HTML")
+    else:
+        await message.reply(get_text("support_cant_reach", lang), parse_mode="HTML")
+
+
+# ── Admin: close support session ──────────────────────────────────────────────
+
+@router.message(Command("closesupport"))
+async def cmd_close_support(
+    message: Message, bot: Bot, db: Database, settings: BotConfig
+) -> None:
+    """
+    Admin command: /closesupport <user_id>
+                or /closesupport (as a reply to a forwarded support message)
+    """
+    if message.from_user.id not in settings.admin_ids:
+        return
+
+    user_id: Optional[int] = None
+
+    parts = message.text.split()
+    if len(parts) == 2 and parts[1].isdigit():
+        user_id = int(parts[1])
+
+    elif message.reply_to_message:
+        replied_msg_id = message.reply_to_message.message_id
+        chat_id = message.chat.id
+        user_id = await db.get_support_user_id(
+            admin_msg_id=replied_msg_id,
+            admin_chat_id=chat_id,
+        )
+        if user_id is None:
+            await message.answer(
+                "❌ Could not resolve user from this message.\n\n"
+                "Try: <code>/closesupport &lt;user_id&gt;</code>",
+                parse_mode="HTML",
             )
+            return
 
-        await message.reply_text(
-            f"✅ Ticket closed. User <code>{user_id}</code> has been notified.",
-            parse_mode=ParseMode.HTML,
+    else:
+        await message.answer(
+            "🔒 <b>Close Support Session</b>\n\n"
+            "<b>Options:</b>\n"
+            "• <code>/closesupport &lt;user_id&gt;</code>\n"
+            "• Reply to a forwarded support message with <code>/closesupport</code>",
+            parse_mode="HTML",
         )
+        return
 
-        logger.info(
-            "Support ticket closed",
-            extra={
-                "ctx_user_id": user_id,
-                "ctx_topic_id": thread_id,
-                "ctx_admin": message.from_user.id,
-            },
-        )
+    if not isinstance(user_id, int) or user_id <= 0:
+        await message.answer(f"❌ Invalid user ID: {user_id}")
+        return
 
-    except Exception as e:
-        logger.error(
-            "HANDLER: handle_close_ticket unhandled exception",
-            extra={"ctx_error": str(e)},
-            exc_info=True,
+    user_row = await db.get_user(user_id)
+    if user_row is None:
+        await message.answer(
+            f"⚠️ User {user_id} not found in database.\n"
+            f"They may never have started the bot."
         )
-        await _safe_reply(message, "⚠️ Failed to close ticket. Please try again.")
+        return
+
+    await db.close_support_session(user_id)
+
+    storage = bot.fsm_storage  # type: ignore[attr-defined]
+    if storage:
+        key = StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id)
+        await storage.set_state(key=key, state=None)
+        await storage.set_data(key=key, data={})
+
+    log.info(
+        "[SUPPORT] Admin %d closed session for user %d",
+        message.from_user.id, user_id,
+    )
+    await message.answer(f"✅ Support session closed for user {user_id}.")
+
+    try:
+        lang = (await get_user_lang(db, user_id)) or "en"
+
+        await bot.send_message(
+            chat_id=user_id,
+            text=get_text("support_session_closed_user", lang),
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        log.warning(
+            "[SUPPORT] Could not notify user %d of close: %s", user_id, exc
+        )

@@ -1,25 +1,23 @@
 {
-  "model": "gemini-2.5-pro",
-  "temperature": 0.1,
-  "maxOutputTokens": 65536,
-  "thinkingBudget": 32768,
-  "context": {
-    "files": [
-      "BDGW_FLOW_BY_SHADOW_MASTER.txt",
-      "app/**/*.py",
-      "main_bot.py",
-      "requirements.txt",
-      ".env.example"
-    ],
-    "exclude": [
-      "**/__pycache__/**",
-      "**/*.session",
-      ".venv/**",
-      "processed/**",
-      "sessions/**"
-    ]
+  "model": {
+    "name": "gemini-2.5-pro"
   },
-  "sandbox": false,
-  "autoAcceptEdits": false,
-  "yolo": false
+  "ui": {
+    "theme": "Default"
+  },
+  "general": {
+    "defaultApprovalMode": "auto_edit",
+    "checkpointing": {
+      "enabled": true
+    }
+  },
+  "tools": {
+    "sandbox": false
+  },
+  "telemetry": {
+    "enabled": false
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  }
 }
