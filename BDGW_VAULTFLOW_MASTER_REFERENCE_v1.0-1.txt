@@ -1,0 +1,1781 @@
+====================================================================
+BDGW VAULTFLOW — MASTER REFERENCE
+BY SHADOW — VERSION 1.0
+====================================================================
+STATUS : PRODUCTION BLUEPRINT — KEEP THIS FILE SAFE
+====================================================================
+
+This document is the single authoritative specification for the
+BDGW VaultFlow platform. It supersedes all prior drafts, flow
+specs, and architecture specs. All architectural conflicts are
+resolved. All gaps are filled. All outdated topology has been
+replaced with the finalized design. This is the source of truth
+for building, maintaining, scaling, auditing, and recreating the
+entire platform.
+
+====================================================================
+SECTION 1 — CORE PRINCIPLES
+====================================================================
+
+ 1. Database is the ONLY source of truth.
+ 2. FSM is NEVER source of truth — only a UI state guide.
+ 3. Every critical operation must be restart-safe.
+ 4. Every critical operation must be idempotent.
+ 5. Every critical operation must be audit-logged.
+ 6. Every critical operation must be recoverable.
+ 7. No critical state may depend solely on memory or FSM.
+ 8. All critical flows must be async-safe, duplicate-safe,
+    and FloodWait-safe.
+ 9. Every user has exactly ONE permanent topic in the
+    Verification Hub. That topic is the complete and permanent
+    history of that user. It is never duplicated, never
+    recreated unnecessarily, and never automatically deleted.
+10. The user_id ↔ topic_id mapping stored in MongoDB is the
+    canonical reference for all topic routing. All systems
+    must reuse the existing topic.
+
+====================================================================
+SECTION 2 — PLATFORM IDENTITY
+====================================================================
+
+Name          : BDGW VaultFlow
+Community     : BD Gone Wild
+Type          : Telegram SaaS Infrastructure
+Classification: Production-Grade Telegram Automation Platform
+
+Purpose:
+  - Premium Subscription Management
+  - Verification Hub (Central Operations Center)
+  - Anonymous Content Submission
+  - Content Moderation
+  - Vault Archival (NSFW Vault / Premium Vault)
+  - Queue Distribution Engine
+  - Referral System
+  - User Dashboard
+  - Support System (Permanent User Topic Based)
+  - Subscription Lifecycle Management
+  - Takedown Request System
+  - Audit Logging (Dedicated Admin Logs Topic)
+  - FloodWait Protection
+  - Restart Recovery
+  - Async Processing
+
+====================================================================
+SECTION 3 — SYSTEMS LIST (13 SYSTEMS)
+====================================================================
+
+ 1. Premium Subscription System
+ 2. Payment Moderation System
+ 3. Verification Hub (User Topics + Admin Logs)
+ 4. Support System (Permanent User Topic Based)
+ 5. Referral System
+ 6. User Dashboard
+ 7. Content Submission System
+ 8. Takedown System
+ 9. Vault Archive (NSFW Vault + Premium Vault)
+10. Queue Distribution Engine (NSFW Queue + Premium Queue)
+11. Watermark Pipeline
+12. Audit & Moderation System (Admin Logs Topic)
+13. Trust & Fraud System
+
+====================================================================
+SECTION 4 — USER COMMANDS
+====================================================================
+
+--- 4.1 BOT COMMAND MENU (Telegram Slash Menu) ---
+
+  Shown in Telegram's "/" command picker for all users.
+
+  /start     →  Main Menu
+  /takedown  →  Remove Content
+  /help      →  Support
+
+--- 4.2 COMMAND BEHAVIOR ---
+
+  /start
+    → Opens main menu.
+    → First-time users see onboarding first, then main menu.
+    → Returning users go directly to main menu.
+
+  /takedown
+    → Opens Takedown Request flow.
+    → Full flow defined in Section 14.
+
+  /help
+    → Opens or continues the user's permanent support topic.
+    → Full flow defined in Section 15.
+
+--- 4.3 DOT-SLASH PREFIX RULE ---
+
+  Any message or command starting with  ./  (dot-slash prefix):
+
+    • Deleted automatically after 10 seconds.
+    • No notification to user.
+    • Silent deletion only.
+    • Applies to ALL such messages in bot chat.
+
+  Examples:
+    ./done   → deleted in 10s
+    ./close  → deleted in 10s
+    ./any    → deleted in 10s
+
+====================================================================
+SECTION 5 — FIRST-TIME USER ONBOARDING
+====================================================================
+
+Trigger: User ID not found in database.
+
+Bot explains:
+  • This bot belongs to BD Gone Wild Community
+  • Controls Premium Access
+  • Handles Content Submission
+  • Handles Content Removal Requests
+  • Handles User Status
+  • Handles Support Requests
+
+User must understand:
+  • Purpose of platform
+  • Community rules
+  • Submission rules
+  • Reporting system
+
+Shown ONLY once. Never again.
+After onboarding → Main Menu.
+
+On first registration:
+  → Create user document in MongoDB (users collection)
+  → Assign referral link
+  → Store join date, Telegram name, username, user ID
+  → User topic is created lazily on first interaction
+    that requires admin visibility (payment request,
+    content submission, support message, etc.)
+
+====================================================================
+SECTION 6 — MAIN MENU LAYOUT
+====================================================================
+
+Row 1: [ 💎 Premium Access ]
+Row 2: [ 📤 Submit Content Anonymously ]
+Row 3: [ 🎁 Referral Program ]  [ 📊 My Status ]
+Row 4: [ 🆘 Need Help ]
+
+====================================================================
+SECTION 7 — PREMIUM SUBSCRIPTION SYSTEM
+====================================================================
+
+--- 7.1 PACKAGES ---
+
+Packages:
+  - 1 Month
+  - 3 Months
+  - 6 Months
+  (Pricing configurable via config/ENV)
+
+--- 7.2 SUBSCRIPTION MODEL ---
+
+Statuses: ACTIVE | EXPIRED | CANCELLED | PENDING
+
+Store (MongoDB — subscriptions collection):
+  subscription_id
+  user_id
+  package_id
+  started_at
+  expires_at
+  status
+
+--- 7.3 FULL PAYMENT FLOW ---
+
+User
+  → Clicks Premium Access
+  → Selects Package
+  → Selects Payment Method
+  → Payment Request Created (MongoDB record, PENDING)
+  → Routed to User's Permanent Topic in Verification Hub
+  → Admin Reviews Request in User Topic
+  → Admin Manually Sends:
+       • Number / QR / Wallet / Instructions
+       (Admin types and sends directly in Telegram.
+        Bot NEVER auto-sends payment details.)
+  → Bot confirms Telegram delivery SUCCESS
+  → Only AFTER delivery success:
+       Payment Session Activated (DB)
+       Session Timeout Timer Starts (20 minutes)
+  → User Submits Payment Proof:
+       • TXID (globally unique, validated)
+       • Transaction Digits
+       • Optional Screenshot
+  → Bot Forwards Proof to User's Permanent Topic
+  → Admins See in Topic:  ✅ Approve  |  ❌ Reject
+  → Admin Approves → Subscription Activation Flow
+
+CRITICAL RULES:
+  • The bot must NEVER automatically send payment numbers.
+  • The bot must NEVER automatically send wallet numbers.
+  • Payment details are ALWAYS sent manually by admin.
+  • Session starts ONLY after confirmed delivery success.
+  • All payment activity routes into the user's permanent
+    topic. No separate payment topic exists.
+
+--- 7.4 PAYMENT SESSION RULES ---
+
+  Timeout  : 20 Minutes (from delivery success, not request creation)
+  Session  : DB-backed (MongoDB), never FSM-backed
+  TXID     : Globally unique, duplicate auto-rejected
+  Storage  : payment_sessions collection
+
+--- 7.5 SUBSCRIPTION ACTIVATION (ATOMIC) ---
+
+  System must in one atomic operation:
+    1. Validate session is active
+    2. Validate not already processed (idempotency key check)
+    3. Acquire distributed lock (Redis)
+    4. Activate subscription in MongoDB
+    5. Generate unique one-time invite link (30 min expiry)
+    6. Save invite metadata (invites collection)
+    7. Save payment history (payment_history collection)
+    8. Save invite history
+    9. Clear session (payment_sessions collection)
+
+--- 7.6 INVITE LINK RULES ---
+
+  • One link per approval
+  • One-time join only
+  • 30-minute expiry
+  • Expired → User contacts support → Admin generates new link
+
+--- 7.7 SUBSCRIPTION LIFECYCLE NOTIFICATIONS ---
+
+  Notify user:
+    • 7 days before expiry
+    • 3 days before expiry
+    • On expiry day
+
+--- 7.8 EXPIRY ENFORCEMENT ---
+
+  • Expired user automatically removed from all premium groups
+  • Group removal notification: ALLOWED
+  • Bot mute/ban notifications: NOT SENT (silent)
+
+====================================================================
+SECTION 8 — TXID PROTECTION
+====================================================================
+
+  TXID must be globally unique across ALL records.
+
+  Implementation:
+    • Unique index on txid field in txid_registry collection
+    • Check performed before any payment session acceptance
+    • Race condition handled with distributed lock (Redis)
+
+  Duplicate TXID:
+    → Automatically rejected
+    → Subscription activation blocked
+    → Logged to Admin Logs topic
+    → Logged to audit_logs collection
+
+====================================================================
+SECTION 9 — VERIFICATION HUB
+====================================================================
+
+Central Operations Center (Telegram Supergroup with Topics)
+
+The Verification Hub is a single Telegram supergroup with
+Forum (Topics) mode enabled. It serves as the command center
+for all admin operations.
+
+--- 9.1 HUB TOPIC STRUCTURE ---
+
+  The hub contains exactly TWO categories of permanent topics:
+
+  ┌─────────────────────────────────────────────────────┐
+  │              VERIFICATION HUB                       │
+  │                                                     │
+  │  ├── 👤 User Topics  (one per registered user)      │
+  │  └── 📋 Admin Logs   (one permanent topic)          │
+  └─────────────────────────────────────────────────────┘
+
+  REMOVED (no longer exist):
+    ✗ Payments Topic       (replaced by User Topics)
+    ✗ Support Topic        (replaced by User Topics)
+    ✗ Content Review Topic (replaced by User Topics)
+    ✗ User Moderation Topic(replaced by User Topics)
+    ✗ Broadcast Topic      (removed)
+    ✗ Audit Topic          (replaced by Admin Logs)
+
+--- 9.2 USER TOPICS — ARCHITECTURE ---
+
+  FUNDAMENTAL RULE:
+    One User = One Permanent Topic.
+    Forever. No exceptions.
+
+  Topic naming format:
+    👤 Full Name | User ID
+
+  Examples:
+    👤 Rahat Ferdous | 7535201490
+    👤 Mayor | 2142417925
+
+  Topic behavior:
+    • Created once, on first admin-visible event for that user
+    • Never duplicated
+    • Never recreated unnecessarily
+    • Never automatically deleted
+    • Survives bot restarts
+    • Survives admin changes
+    • Is the complete permanent history of the user
+
+  MongoDB source of truth:
+    user_topics collection:
+      user_id  (indexed, unique)
+      topic_id (the Telegram forum topic ID)
+      created_at
+
+  All systems route into the user's existing topic.
+  If a topic is somehow missing (topic was manually deleted
+  by a Telegram admin), the bot must:
+    1. Detect the error (Telegram API error on send)
+    2. Create a new topic with the same name format
+    3. Update the user_topics mapping in MongoDB
+    4. Log the recovery event to Admin Logs
+    5. Continue routing normally
+
+--- 9.3 USER TOPIC PURPOSE ---
+
+  Every user topic is the COMPLETE operational history of that user.
+  ALL events for that user must be routed into that topic.
+
+  Routed content includes (not exhaustive):
+
+    Support
+      • User support requests
+      • Admin replies
+      • Session open/close events
+
+    Payments
+      • Payment request card
+      • Admin-sent payment details
+      • User-submitted proof (TXID, digits, screenshot)
+      • Approval or rejection notice
+      • Subscription activation confirmation
+
+    Subscriptions
+      • Activation record
+      • Expiry warnings
+      • Renewal records
+
+    Content Submissions
+      • Submitted media card
+      • Moderation buttons (Approve NSFW / Approve Premium / Reject)
+      • Rejection reason
+      • Approval confirmation
+
+    Content Approvals & Rejections
+      • Outcome of moderation per submission
+
+    Warnings
+      • Warning notice with reason
+
+    Mutes
+      • Mute notice with reason and duration
+
+    Bans
+      • Ban notice with reason
+
+    Takedown Requests
+      • Request card
+      • Admin decision and reason
+
+    Notes
+      • Admin-written notes about user
+      • Visible to all admins in topic
+
+    Audit Events
+      • Any system action targeting this user
+
+--- 9.4 ADMIN LOGS TOPIC ---
+
+  One permanent topic named:  📋 Admin Logs
+
+  Receives a structured entry for EVERY admin action.
+
+  Entry format:
+    ┌─────────────────────────────────────────────┐
+    │ [ACTION TYPE]                               │
+    │ Admin     : [Admin Full Name]               │
+    │ Admin ID  : [Admin User ID]                 │
+    │ Target    : [Target Full Name] (@username)  │
+    │ Target ID : [Target User ID]                │
+    │ Detail    : [Action-specific detail]        │
+    │ Time      : [ISO 8601 timestamp]            │
+    └─────────────────────────────────────────────┘
+
+  Action types that MUST produce an Admin Logs entry:
+
+    PAYMENT APPROVED
+    PAYMENT REJECTED
+    PAYMENTDONE
+    SUBSCRIPTION ACTIVATED
+    SUBSCRIPTION EXPIRED
+    SUPPORT ACCEPTED
+    SUPPORT CLOSED
+    CONTENT APPROVED NSFW
+    CONTENT APPROVED PREMIUM
+    CONTENT REJECTED
+    USER WARNED
+    USER MUTED
+    USER UNMUTED
+    USER BANNED
+    USER UNBANNED
+    USER KICKED
+    NOTE ADDED
+    TAKEDOWN APPROVED
+    TAKEDOWN REJECTED
+    INVITE GENERATED
+    TXID DUPLICATE BLOCKED
+    TOPIC RECOVERED
+
+  Admin Logs topic_id is stored in MongoDB (hub_config collection)
+  and must survive restarts.
+
+--- 9.5 HUB ADMIN COMMANDS (inside Hub topics) ---
+
+  Commands operable inside any User Topic:
+
+    /accept      → Accept open support session for this user
+    /close       → Close active support session
+    /ban         → Ban this user (with reason prompt)
+    /unban       → Remove ban
+    /warn        → Issue warning (with reason prompt)
+    /mute        → Mute user (with duration prompt)
+    /unmute      → Remove mute
+    /paymentdone → Mark payment manually done
+    /profile     → Display full user profile card
+    /history     → Display event history summary for user
+    /note        → Add a note about this user
+    /notes       → List all notes about this user
+
+  Each command must:
+    • Validate caller is OWNER or ADMIN
+    • Execute the action
+    • Post result to user's topic
+    • Write entry to Admin Logs topic
+    • Write entry to audit_logs collection
+
+====================================================================
+SECTION 10 — CONTENT SUBMISSION SYSTEM
+====================================================================
+
+--- 10.1 ENTRY REQUIREMENT ---
+
+  Before submission is enabled, user must:
+    1. Join Main Channel (verified via Telegram API)
+    2. Accept Terms
+
+--- 10.2 SUPPORTED CONTENT TYPES ---
+
+  Photos | Videos | Albums | Documents | Audio |
+  Voice  | GIF    | Files
+
+--- 10.3 SUBMISSION FLOW ---
+
+  User Submits Content (in bot chat)
+    → Bot verifies Main Channel membership
+    → Bot verifies terms accepted
+    → Duplicate hash check (reject if duplicate)
+    → Bot creates submission record (content_submissions collection)
+    → Bot forwards/copies to User's Permanent Topic in Hub
+
+  Admin sees in User Topic:
+    ┌──────────────────────────────────────────────┐
+    │ 📤 CONTENT SUBMISSION                        │
+    │ From    : [Full Name] (@username)            │
+    │ User ID : [id]                               │
+    │ Type    : [Photo / Video / Album / ...]      │
+    │ Hash    : [content_hash]                     │
+    │ Time    : [timestamp]                        │
+    └──────────────────────────────────────────────┘
+    Buttons:
+      [ 🔞 Approve NSFW ]  [ ⭐ Approve Premium ]  [ ❌ Reject ]
+
+  NOTE: Anonymous moderation no longer exists.
+  Admin always sees: Full Name, Username, User ID.
+
+  On Approval (NSFW):
+    → Content routed to NSFW Vault
+    → Queue job created in NSFW Queue
+    → User notified of approval
+    → Admin Logs entry written
+    → Audit log written
+
+  On Approval (Premium):
+    → Content routed to Premium Vault
+    → Queue job created in Premium Queue
+    → User notified of approval
+    → Admin Logs entry written
+    → Audit log written
+
+  On Rejection:
+    → Admin must provide rejection reason (mandatory, cannot skip)
+    → Rejection reason saved to content_submissions record
+    → User notified with rejection reason
+    → Admin Logs entry written
+    → Audit log written
+
+--- 10.4 ALBUM HANDLING ---
+
+  A Telegram media group (album) is treated as ONE logical item.
+
+    • All media in the album are grouped by media_group_id
+    • The album is received and buffered completely before
+      forwarding to the user topic
+    • The album is approved as a single unit
+    • The album is stored as a single vault entry
+    • The album is queued as a single queue job
+    • The album is delivered as a single unit to target groups
+    • Album hash = hash of all individual media hashes combined
+      in order
+
+  Albums must never be split.
+  Albums must never be partially approved.
+
+--- 10.5 CONTENT SAFETY ---
+
+  - Duplicate detection via content hash (SHA-256 of media file_id)
+  - Album hash fingerprinting
+  - Fingerprint storage in content_fingerprints collection
+  - Duplicate TXID-style rejection with audit log entry
+
+====================================================================
+SECTION 11 — VAULT SYSTEM
+====================================================================
+
+  Two strictly separated vault channels exist:
+
+  ┌─────────────────────────────────────────┐
+  │  🔞 NSFW Vault Channel                  │
+  │  ⭐ Premium Vault Channel               │
+  └─────────────────────────────────────────┘
+
+  CRITICAL RULE:
+    Content must NEVER cross between vaults.
+    NSFW content stays in NSFW Vault exclusively.
+    Premium content stays in Premium Vault exclusively.
+    There is no shared or generic vault.
+
+  Each vault stores:
+    • Media (forwarded to vault channel)
+    • Metadata (vault_items collection in MongoDB)
+    • Approval data (approved_by, approved_at)
+    • Hash for deduplication
+    • Submitter user_id
+
+  Each vault supports:
+    • Random Reposting from vault when queue is empty
+    • Historical Reuse
+    • Fair Rotation (no item reposted too recently)
+    • Cooldown Tracking (last_posted_at field)
+    • Spam Prevention
+
+  When fresh queue is empty:
+    → Vault content distributed
+    → Randomized selection with cooldown filter
+    → Repetition prevention enforced
+    → Fairness rotation enforced
+    → NSFW Vault feeds NSFW distribution only
+    → Premium Vault feeds Premium distribution only
+
+  MongoDB — vault_items collection:
+    vault_id
+    user_id
+    content_type       (photo / video / album / ...)
+    vault_type         (nsfw / premium)
+    telegram_message_id (in vault channel)
+    media_hash
+    approved_by
+    approved_at
+    last_posted_at
+    post_count
+
+====================================================================
+SECTION 12 — QUEUE DISTRIBUTION ENGINE
+====================================================================
+
+--- 12.1 QUEUE STATES ---
+
+  PENDING → PROCESSING → SENT
+                       → FAILED → (retry) → DEAD_LETTER
+
+--- 12.2 DUAL QUEUE ARCHITECTURE ---
+
+  Two separate queues exist:
+
+    🔞 NSFW Queue   — distributes to NSFW Group only
+    ⭐ Premium Queue — distributes to Premium Group only
+
+  Content must NEVER cross queues.
+  Each queue is processed by its own independent worker.
+
+--- 12.3 DEAD LETTER QUEUE ---
+
+  Failed items exceeding retry limits → Dead Letter Queue
+  Never retry forever.
+  Dead letters require manual admin review.
+  Dead letters stored in dead_letters collection.
+
+--- 12.4 DISTRIBUTION PIPELINE ---
+
+  Source Vault Channel
+    → Ingestion
+    → Queue Manager (NSFW or Premium, never mixed)
+    → Vault Archive
+    → Distribution Queue
+    → Fairness Layer
+    → Target Balancer
+    → Rate Limiter
+    → FloodWait Handler
+    → Delivery Worker
+    → Target Group (NSFW Group or Premium Group, respectively)
+
+--- 12.5 DAILY LIMITS (ENV-CONTROLLED) ---
+
+  PREMIUM_DAILY_LIMIT  (configurable via ENV)
+  NSFW_DAILY_LIMIT     (configurable via ENV)
+
+--- 12.6 QUEUE DB RECORD ---
+
+  MongoDB — queue_jobs collection:
+    job_id
+    vault_id
+    vault_type       (nsfw / premium)
+    status           (PENDING / PROCESSING / SENT / FAILED / DEAD_LETTER)
+    created_at
+    scheduled_at
+    processed_at
+    retry_count
+    error_message
+
+====================================================================
+SECTION 13 — WATERMARK PIPELINE
+====================================================================
+
+Photos:
+  • PNG watermark overlay
+  • Dynamic / random position
+  • Opacity: 90
+
+Videos:
+  • Two text watermarks
+  • Random positions
+  • Random timing
+  • Opacity: 110–130
+
+====================================================================
+SECTION 14 — TAKEDOWN REQUEST SYSTEM
+====================================================================
+
+--- 14.1 ENTRY ---
+
+  User sends /takedown
+  → Bot opens Takedown Request flow.
+
+--- 14.2 REQUIRED INPUTS (collected step by step) ---
+
+  Step 1: Bot asks → "What is your reason for removal?"
+           User must type and send reason. (free text, mandatory)
+
+  Step 2: Bot asks → "Send the link or reference to the content."
+           User must send content link. (mandatory)
+
+  Both fields are required. Neither can be skipped.
+  If user sends /cancel at any step → flow cancelled silently.
+
+--- 14.3 SUBMISSION ---
+
+  After both inputs collected:
+    → Bot confirms: "Your takedown request has been submitted."
+    → Request saved to DB (PENDING) in takedown_requests collection
+    → Request card posted to User's Permanent Topic in Hub
+
+  Admin sees in User Topic:
+    ┌─────────────────────────────────┐
+    │ 🗑 TAKEDOWN REQUEST             │
+    │ User   : [Name] (@username)     │
+    │ User ID: [id]                   │
+    │ Reason : [reason text]          │
+    │ Link   : [content link]         │
+    │ Time   : [timestamp]            │
+    └─────────────────────────────────┘
+    Buttons:
+      [ ✅ Approve & Delete ]   [ ❌ Reject ]
+
+--- 14.4 APPROVAL FLOW ---
+
+  Admin clicks  ✅ Approve & Delete :
+
+    Option A — Bot Auto-Delete:
+      → Bot attempts to delete the content automatically.
+      → On success: user notified "Your content removal request
+        has been approved. The content has been removed."
+      → Status updated to APPROVED in DB.
+      → Admin Logs entry written.
+      → Audit logged.
+
+    Option B — Manual Delete (if bot cannot auto-delete):
+      → Admin deletes the content manually.
+      → Admin clicks "Confirm Manual Deletion" in topic.
+      → Same user notification sent.
+      → Status updated to APPROVED in DB.
+      → Admin Logs entry written.
+      → Audit logged.
+
+--- 14.5 REJECTION FLOW ---
+
+  Admin clicks  ❌ Reject :
+
+    → Bot prompts admin in topic:
+      "Type your rejection reason and send."
+
+    → Admin must type and send reason. (mandatory, cannot be skipped)
+
+    → User receives:
+      "Your takedown request was reviewed and not approved.
+       Reason: [admin reason]
+       You may reply here to discuss this further."
+
+    → Rejection reason saved to DB.
+    → Status updated to REJECTED in DB.
+
+    → A Support session is automatically flagged as open for
+      this user. The user's permanent topic is already active —
+      no new topic is created. The rejection reason is posted
+      as a context note at the top of the support exchange
+      in the user's existing topic.
+
+    → Admin Logs entry written.
+    → Audit logged.
+
+--- 14.6 TAKEDOWN DB RECORD ---
+
+  MongoDB — takedown_requests collection:
+    takedown_id
+    user_id
+    reason
+    content_link
+    status              (PENDING / APPROVED / REJECTED)
+    submitted_at
+    reviewed_at
+    reviewed_by
+    rejection_reason
+
+====================================================================
+SECTION 15 — SUPPORT SYSTEM
+====================================================================
+
+  The support system is built on top of the permanent user topic
+  architecture. There are NO per-ticket dedicated topics. All
+  support history lives inside the user's permanent topic forever.
+
+--- 15.1 ENTRY POINTS ---
+
+  • Button: 🆘 Need Help
+  • Command: /help
+  • Any unhandled user text message sent to the bot
+  • Auto-flagged on Takedown rejection (Section 14.5)
+
+--- 15.2 SUPPORT SESSION IN USER TOPIC ---
+
+  When a support event is triggered:
+    → System checks user_topics collection for existing topic_id
+    → If topic exists: post support request into existing topic
+    → If topic missing: create topic, update mapping, post request
+
+  Support request card posted to User Topic:
+    ┌──────────────────────────────────────────────┐
+    │ 🆘 SUPPORT REQUEST                           │
+    │ From       : [Full Name] (@username)         │
+    │ User ID    : [id]                            │
+    │ Join Date  : [date]                          │
+    │ Premium    : [Yes / No / Expired]            │
+    │ Warnings   : [count]                         │
+    │ Muted      : [Yes / No]                      │
+    │ Banned     : [Yes / No]                      │
+    │ Referrals  : [count]                         │
+    │ Submissions: [total / approved / rejected]   │
+    │ Message    : [user's message text]           │
+    └──────────────────────────────────────────────┘
+    Button: [ ✅ Accept Support ]
+
+--- 15.3 ACCEPTANCE FLOW ---
+
+  Support session status starts as PENDING.
+
+  Admin sees: ✅ Accept Support button.
+
+  On Accept:
+    → Status updated to ACTIVE (support_sessions collection)
+    → accepted_by = admin user_id
+    → accepted_at = timestamp
+    → Admin Logs entry written
+
+  OWNERSHIP LOCK:
+    Only ONE admin may hold an active support session at a time.
+    If session is already ACTIVE:
+      → Other admin sees: "Session already accepted by [Admin Name]"
+      → Accept button is disabled/removed for others.
+
+  5-Minute Unattended Rule:
+    If PENDING session is not accepted within 5 minutes:
+      → User receives: "No admin available currently.
+        Your request has been noted. An admin will respond
+        when available."
+      → Session status remains PENDING (admin may still accept)
+      → This notification fires only once per session
+
+--- 15.4 TWO-WAY CONVERSATION BRIDGE ---
+
+  Admin Reply in Topic → Bot forwards to User
+  User Reply in Bot    → Bot forwards to User Topic
+
+  Full two-way live bridge.
+  Bridge is active while session status = ACTIVE.
+  Bridge is keyed on user_id → topic_id mapping.
+
+--- 15.5 CLOSURE ---
+
+  Admin issues /close in User Topic:
+    → Status updated to CLOSED
+    → closed_by = admin user_id
+    → closed_at = timestamp
+    → Closure summary posted in User Topic
+    → User-side conversation: user notified "Support session closed."
+    → User-side messages for this session: DELETED
+    → Admin Logs entry written
+    → Audit logged
+
+  Topic in Hub: PRESERVED permanently
+  Logs: PRESERVED permanently
+  Closure summary stored in support_sessions collection.
+
+  After closure: bridge is deactivated for this session.
+  A new /help starts a new session card in the same topic.
+
+--- 15.6 SUPPORT DB RECORD ---
+
+  MongoDB — support_sessions collection:
+    session_id
+    user_id
+    topic_id         (always = user's permanent topic_id)
+    status           (PENDING / ACTIVE / CLOSED)
+    opened_at
+    accepted_by
+    accepted_at
+    closed_by
+    closed_at
+    trigger          (manual / takedown_rejection / unhandled_message)
+
+====================================================================
+SECTION 16 — REFERRAL SYSTEM
+====================================================================
+
+  Every user receives a personal referral link on registration.
+
+  Referral Requirements:
+    • New user joined via link
+    • New user has joined Main Channel (verified)
+    • Join verified
+    • Duplicate prevented
+
+  Reward Structure:
+    1 Referral        = 1 Point
+    3 Approve Content = 1 Point
+    1 Point           = ৳1 Discount
+
+  Referral Dashboard shows:
+    • Total Referrals
+    • Active Referrals
+    • Blocked Referrals
+    • Referral Points
+
+  MongoDB — referrals collection:
+    referral_id
+    referrer_user_id
+    referred_user_id
+    referred_at
+    status           (active / blocked)
+    points_awarded   (boolean)
+
+====================================================================
+SECTION 17 — USER STATUS DASHBOARD
+====================================================================
+
+Displays:
+  • Name
+  • Username
+  • User ID
+  • Join Date
+  • Premium Status
+  • Active Package
+  • Expiry Date
+  • Remaining Days
+  • Referral Count
+  • Referral Points
+  • Total Submissions
+  • Approved Submissions
+  • Rejected Submissions
+  • Queued Submissions
+  • Payment History
+  • Warnings
+  • Mutes
+  • Bans
+  • Kicks
+  • Punishment Reasons
+
+====================================================================
+SECTION 18 — TRUST & FRAUD SYSTEM
+====================================================================
+
+Trust Score Components:
+  + Approved content
+  − Rejected content
+  − Warnings
+  + Account age
+
+Fraud Score Components:
+  + Duplicate TXID attempts
+  + Fake proof submissions
+  + Invite abuse
+  + Payment abuse
+
+MongoDB — users collection includes:
+  trust_score
+  fraud_score
+
+Score-based restrictions:
+  → High fraud score triggers review before payment approval
+  → Thresholds configurable via ENV
+
+====================================================================
+SECTION 19 — ADMIN ROLES
+====================================================================
+
+  Exactly TWO roles exist. No others.
+
+  OWNER
+    • Full platform control
+    • Can assign / revoke ADMIN role
+    • Can access all topics and logs
+    • Can execute all commands
+
+  ADMIN
+    • Can moderate users (warn / mute / ban / unban)
+    • Can approve / reject payments
+    • Can approve / reject content submissions
+    • Can accept / close support sessions
+    • Can process takedown requests
+    • Can view Admin Logs
+    • Cannot assign roles
+
+  REMOVED (no longer exist):
+    ✗ MODERATOR
+    ✗ PAYMENT_ADMIN
+    ✗ SUPPORT_ADMIN
+    ✗ SCHEDULER_ADMIN
+    ✗ SUDO
+    ✗ CONTENT_REVIEWER
+    ✗ SUPPORT_AGENT
+    ✗ SUPER_ADMIN
+
+  MongoDB — admins collection:
+    admin_id
+    user_id
+    role             (owner / admin)
+    assigned_by
+    assigned_at
+    is_active
+
+====================================================================
+SECTION 20 — MESSAGE CLEANUP POLICY
+====================================================================
+
+  General bot conversation     → Auto-delete after 60 minutes
+  Payment session messages     → Auto-delete after 20 minutes
+  Bangladesh phone numbers     → Auto-delete after 7 minutes
+  (017x, 018x, 019x, 014x, 013x — payment/wallet numbers)
+  Support conversations        → Deleted on session closure (user side only)
+  Messages starting with ./   → Auto-delete after 10 seconds
+
+  RULE: No cleanup notifications ever. Silent deletion only.
+
+====================================================================
+SECTION 21 — BOT MODERATION RULES
+====================================================================
+
+  Bot Ban         : Silent. No user notification.
+  Bot Mute        : Silent. No user notification.
+  Premium Removal : Notification allowed.
+
+====================================================================
+SECTION 22 — AUDIT LOGGING
+====================================================================
+
+  All events must be written to two places simultaneously:
+    1. audit_logs collection in MongoDB
+    2. Admin Logs topic in Verification Hub (Section 9.4)
+
+  Log all:
+    • Payments (created, approved, rejected)
+    • Subscriptions (activated, expired, cancelled)
+    • Support sessions (opened, accepted, closed)
+    • Moderation actions (warn, mute, ban, unban, kick)
+    • Invite generation and delivery
+    • Content submissions (received, approved, rejected)
+    • Queue actions (job created, sent, failed, dead-lettered)
+    • Trust/Fraud score changes
+    • Takedown requests (submitted, approved, rejected)
+    • Topic creation and recovery events
+    • TXID duplicate rejection events
+    • Admin role assignments
+
+  MongoDB — audit_logs collection:
+    audit_id
+    action
+    admin_user_id    (null if system-triggered)
+    target_user_id
+    detail           (JSON blob of action-specific data)
+    timestamp
+
+====================================================================
+SECTION 23 — NOTIFICATION CENTER
+====================================================================
+
+  Notifications for:
+    • Subscription expiry reminders (7d / 3d / 0d)
+    • Content approvals (with approval type)
+    • Content rejections (with mandatory reason)
+    • Referral rewards earned
+    • System alerts (admin-only)
+
+====================================================================
+SECTION 24 — INFRASTRUCTURE REQUIREMENTS
+====================================================================
+
+  Runtime Stack:
+    • Python 3.11+
+    • Pyrogram (Telegram MTProto client library)
+    • MongoDB + Motor (async MongoDB driver)
+    • Redis + aioredis (FSM storage, distributed locks, caching)
+    • asyncio-based architecture throughout
+
+  Must include:
+    • Async workers (Motor-based DB access, asyncio tasks)
+    • FloodWait handling (catch FloodWait, auto-sleep, retry)
+    • Distributed locks (Redis, for atomic operations)
+    • Retry pipelines (queue jobs with exponential backoff)
+    • Duplicate prevention (unique indexes, idempotency keys)
+    • Restart recovery (restore all active sessions from MongoDB)
+    • Audit logging (dual: MongoDB + Admin Logs topic)
+    • Queue persistence (MongoDB-backed queue_jobs collection)
+    • Vault persistence (MongoDB-backed vault_items collection)
+    • Health monitoring endpoint
+    • Failure recovery (dead letter queue)
+    • Dead letter queue (dead_letters collection)
+
+====================================================================
+SECTION 25 — RESTART SAFETY (DB STORAGE MAP)
+====================================================================
+
+  CRITICAL RULE: The following must NEVER live in FSM only.
+  Every piece of state must be written to MongoDB FIRST,
+  before any Telegram action is taken. On restart, the bot
+  reads MongoDB and restores all active state.
+
+  State that must survive restart:
+
+    user_topics
+      → user_id ↔ topic_id mappings
+      → Must be reloaded into memory cache on startup
+      → Used by every routing operation
+
+    support_sessions
+      → All PENDING and ACTIVE sessions restored
+      → Bridge re-established for ACTIVE sessions
+      → Ownership lock re-applied (accepted_by field)
+
+    payment_sessions
+      → All active (non-expired) sessions restored
+      → Timeout timers re-registered from (activated_at + 20min)
+      → Sessions past timeout are expired on restart
+
+    queue_jobs
+      → All PENDING and PROCESSING jobs restored
+      → PROCESSING jobs reset to PENDING (were interrupted)
+      → Workers re-queued and resume
+
+    subscriptions
+      → All ACTIVE subscriptions restored
+      → Expiry timers re-registered from expires_at
+      → Any subscription expired during downtime is processed
+        on restart
+
+    referrals
+      → Fully persisted. No in-memory state required.
+      → Loaded on demand.
+
+    moderation actions (punishments)
+      → All active bans, mutes stored in MongoDB
+      → Restored and enforced on restart
+
+    takedown_requests
+      → All PENDING requests restored for admin review
+      → No re-routing needed (already in user topics)
+
+    hub_config
+      → Admin Logs topic_id
+      → Main Channel ID
+      → NSFW Group ID
+      → Premium Group ID
+      → NSFW Vault Channel ID
+      → Premium Vault Channel ID
+      → Loaded on startup, cached
+
+====================================================================
+SECTION 25A — DATABASE COLLECTIONS
+====================================================================
+
+  MongoDB is the database engine. Motor is the async driver.
+
+  ALL collections and their schemas are defined below.
+
+--- 25A.1 users ---
+
+  user_id          (int, Telegram user ID, unique index)
+  full_name        (str)
+  username         (str, nullable)
+  join_date        (datetime)
+  is_premium       (bool)
+  is_banned        (bool)
+  is_muted         (bool)
+  ban_reason       (str, nullable)
+  mute_reason      (str, nullable)
+  mute_until       (datetime, nullable)
+  warnings         (int, default 0)
+  trust_score      (float, default 0)
+  fraud_score      (float, default 0)
+  referral_code    (str, unique)
+  referred_by      (int user_id, nullable)
+  terms_accepted   (bool)
+  onboarded        (bool)
+
+--- 25A.2 user_topics ---
+
+  user_id          (int, unique index — THE source of truth)
+  topic_id         (int, Telegram forum topic ID)
+  created_at       (datetime)
+
+  Unique index: user_id
+  This collection is the routing backbone. Every system
+  that must post to a user's topic queries this collection.
+
+--- 25A.3 subscriptions ---
+
+  subscription_id  (ObjectId)
+  user_id          (int, index)
+  package_id       (str: 1m / 3m / 6m)
+  started_at       (datetime)
+  expires_at       (datetime, index)
+  status           (str: ACTIVE / EXPIRED / CANCELLED / PENDING)
+
+--- 25A.4 payment_sessions ---
+
+  session_id       (ObjectId)
+  user_id          (int, unique index — one active session per user)
+  package_id       (str)
+  payment_method   (str)
+  activated_at     (datetime)
+  expires_at       (datetime)  → activated_at + 20 minutes
+  status           (str: ACTIVE / EXPIRED / COMPLETED)
+
+--- 25A.5 payment_history ---
+
+  payment_id       (ObjectId)
+  user_id          (int, index)
+  session_id       (ObjectId)
+  txid             (str, unique index)
+  digits           (str)
+  screenshot_file_id (str, nullable)
+  amount           (float)
+  package_id       (str)
+  status           (str: APPROVED / REJECTED)
+  reviewed_by      (int admin user_id)
+  reviewed_at      (datetime)
+  rejection_reason (str, nullable)
+
+--- 25A.6 txid_registry ---
+
+  txid             (str, unique index — enforces global uniqueness)
+  user_id          (int)
+  registered_at    (datetime)
+
+  RULE: Any TXID must be inserted here before being accepted.
+  Unique index at the MongoDB level prevents duplicates
+  even under concurrent write pressure.
+
+--- 25A.7 invites ---
+
+  invite_id        (ObjectId)
+  user_id          (int, index)
+  subscription_id  (ObjectId)
+  invite_link      (str)
+  created_at       (datetime)
+  expires_at       (datetime)  → created_at + 30 minutes
+  used             (bool)
+
+--- 25A.8 support_sessions ---
+
+  session_id       (ObjectId)
+  user_id          (int, index)
+  topic_id         (int)         → always user's permanent topic
+  status           (str: PENDING / ACTIVE / CLOSED)
+  trigger          (str: manual / takedown_rejection / unhandled)
+  opened_at        (datetime)
+  accepted_by      (int admin user_id, nullable)
+  accepted_at      (datetime, nullable)
+  closed_by        (int admin user_id, nullable)
+  closed_at        (datetime, nullable)
+  notified_unattended (bool, default false)
+
+--- 25A.9 content_submissions ---
+
+  submission_id    (ObjectId)
+  user_id          (int, index)
+  content_type     (str: photo / video / album / document / audio / ...)
+  media_group_id   (str, nullable — Telegram album ID)
+  file_ids         (list of str — all file_ids in submission)
+  media_hash       (str, index)
+  status           (str: PENDING / APPROVED_NSFW / APPROVED_PREMIUM
+                          / REJECTED)
+  submitted_at     (datetime)
+  reviewed_by      (int admin user_id, nullable)
+  reviewed_at      (datetime, nullable)
+  rejection_reason (str, nullable)
+  vault_id         (ObjectId, nullable — set on approval)
+
+--- 25A.10 content_fingerprints ---
+
+  fingerprint_id   (ObjectId)
+  media_hash       (str, unique index)
+  submission_id    (ObjectId)
+  registered_at    (datetime)
+
+  Unique index on media_hash prevents duplicate content.
+
+--- 25A.11 vault_items ---
+
+  vault_id         (ObjectId)
+  submission_id    (ObjectId)
+  user_id          (int, index)
+  vault_type       (str: nsfw / premium)
+  content_type     (str)
+  file_ids         (list of str)
+  telegram_message_id (int — message ID in vault channel)
+  vault_channel_id (int — NSFW vault or Premium vault channel ID)
+  media_hash       (str)
+  approved_by      (int admin user_id)
+  approved_at      (datetime)
+  last_posted_at   (datetime, nullable)
+  post_count       (int, default 0)
+
+--- 25A.12 queue_jobs ---
+
+  job_id           (ObjectId)
+  vault_id         (ObjectId)
+  vault_type       (str: nsfw / premium)
+  status           (str: PENDING / PROCESSING / SENT / FAILED
+                          / DEAD_LETTER)
+  created_at       (datetime)
+  scheduled_at     (datetime)
+  processed_at     (datetime, nullable)
+  retry_count      (int, default 0)
+  error_message    (str, nullable)
+
+  Index: status + vault_type + scheduled_at
+
+--- 25A.13 dead_letters ---
+
+  dead_id          (ObjectId)
+  job_id           (ObjectId)
+  vault_id         (ObjectId)
+  vault_type       (str)
+  final_error      (str)
+  created_at       (datetime)
+  reviewed         (bool, default false)
+
+--- 25A.14 referrals ---
+
+  referral_id      (ObjectId)
+  referrer_user_id (int, index)
+  referred_user_id (int, unique index — one referral per new user)
+  referred_at      (datetime)
+  status           (str: active / blocked)
+  points_awarded   (bool, default false)
+
+--- 25A.15 punishments ---
+
+  punishment_id    (ObjectId)
+  user_id          (int, index)
+  type             (str: warning / mute / ban / kick)
+  reason           (str)
+  issued_by        (int admin user_id)
+  issued_at        (datetime)
+  active           (bool)
+  resolved_at      (datetime, nullable)
+  resolved_by      (int admin user_id, nullable)
+
+--- 25A.16 takedown_requests ---
+
+  takedown_id      (ObjectId)
+  user_id          (int, index)
+  reason           (str)
+  content_link     (str)
+  status           (str: PENDING / APPROVED / REJECTED)
+  submitted_at     (datetime)
+  reviewed_at      (datetime, nullable)
+  reviewed_by      (int admin user_id, nullable)
+  rejection_reason (str, nullable)
+
+--- 25A.17 audit_logs ---
+
+  audit_id         (ObjectId)
+  action           (str — see Section 22 for full list)
+  admin_user_id    (int, nullable)
+  target_user_id   (int, nullable)
+  detail           (dict — action-specific data)
+  timestamp        (datetime, index)
+
+--- 25A.18 admins ---
+
+  admin_id         (ObjectId)
+  user_id          (int, unique index)
+  role             (str: owner / admin)
+  assigned_by      (int user_id)
+  assigned_at      (datetime)
+  is_active        (bool)
+
+--- 25A.19 hub_config ---
+
+  key              (str, unique index)
+  value            (str or int)
+
+  Required keys:
+    admin_logs_topic_id
+    main_channel_id
+    nsfw_group_id
+    premium_group_id
+    nsfw_vault_channel_id
+    premium_vault_channel_id
+    hub_supergroup_id
+
+--- 25A.20 INDEXES SUMMARY ---
+
+  users            : user_id (unique), referral_code (unique)
+  user_topics      : user_id (unique), topic_id
+  subscriptions    : user_id, expires_at, status
+  payment_sessions : user_id (unique), expires_at
+  payment_history  : user_id, txid (unique)
+  txid_registry    : txid (unique)
+  invites          : user_id, expires_at
+  support_sessions : user_id, status
+  content_submissions : user_id, media_hash, status
+  content_fingerprints: media_hash (unique)
+  vault_items      : user_id, vault_type, last_posted_at
+  queue_jobs       : status + vault_type + scheduled_at (compound)
+  referrals        : referrer_user_id, referred_user_id (unique)
+  punishments      : user_id, type, active
+  takedown_requests: user_id, status
+  audit_logs       : timestamp, action
+  admins           : user_id (unique)
+  hub_config       : key (unique)
+
+====================================================================
+SECTION 26 — MEMBERSHIP RECONCILIATION
+====================================================================
+
+  Scheduled background worker:
+    → Checks active subscriptions vs actual group membership
+    → Repairs inconsistencies automatically
+    → Logs all reconciliation actions to audit_logs
+    → Posts summary to Admin Logs topic on each run
+    → Runs every 6 hours (configurable via ENV)
+
+====================================================================
+SECTION 27 — BACKUP & RECOVERY
+====================================================================
+
+  Schedule:
+    • Daily backups
+    • Weekly backups
+    • Monthly backups
+
+  Must support full disaster recovery.
+
+  MongoDB backup strategy:
+    • mongodump to secure off-site storage
+    • Verify backup integrity on each run
+    • Retain: 7 daily, 4 weekly, 6 monthly
+
+====================================================================
+SECTION 28 — FUTURE FEATURES (ROADMAP)
+====================================================================
+
+  Phase 2:
+    • AI-powered content moderation
+    • AI tagging & auto-categorization
+    • Smart queue prioritization
+    • Advanced analytics dashboard
+
+====================================================================
+SECTION 29 — LAUNCH CHECKLIST
+====================================================================
+
+  [ ] MongoDB running and all collections initialized
+  [ ] All unique indexes created and verified
+  [ ] Redis running (aioredis, for locks and FSM)
+  [ ] Pyrogram client authenticated and connected
+  [ ] Verification Hub supergroup created with Topics enabled
+  [ ] Admin Logs topic created in Hub — topic_id stored in hub_config
+  [ ] All hub_config keys set (channels, groups, topic IDs)
+  [ ] Backups configured and tested
+  [ ] Dead letter queue enabled
+  [ ] Membership reconciliation worker running
+  [ ] Audit logs enabled and writing to both MongoDB and Admin Logs
+  [ ] FloodWait protection active
+  [ ] Invite tracking active
+  [ ] TXID uniqueness enforced (unique index verified)
+  [ ] Health monitoring active
+  [ ] Message cleanup workers running
+  [ ] ./prefix 10-second cleanup active
+  [ ] Onboarding flow tested (first-time only)
+  [ ] Support bridge tested (two-way, permanent topic)
+  [ ] Takedown flow tested (approve + reject + auto-flag support)
+  [ ] Watermark pipeline tested
+  [ ] All ENV variables set
+  [ ] Admin roles assigned (OWNER minimum)
+  [ ] User topic creation tested (topic format verified)
+  [ ] User topic recovery tested (simulate deleted topic)
+  [ ] Support ownership lock tested (dual-accept blocked)
+  [ ] Album submission tested (buffered as single unit)
+  [ ] NSFW/Premium vault separation verified
+  [ ] Queue cross-contamination prevention verified
+  [ ] Restart recovery tested (kill + restart, verify state)
+  [ ] Distributed lock tested under concurrent load
+  [ ] All admin hub commands tested (/ban, /mute, /warn, etc.)
+  [ ] Admin Logs entries verified for all action types
+
+====================================================================
+SECTION 30 — STEP-BY-STEP BUILD PLAN
+====================================================================
+
+PHASE 0 — PROJECT SETUP
+  Step 01. Create project folder structure
+  Step 02. Set up virtual environment (Python 3.11+)
+  Step 03. Install Pyrogram as Telegram client framework
+  Step 04. Set up MongoDB instance
+  Step 05. Install Motor (async MongoDB driver)
+  Step 06. Set up Redis + install aioredis
+  Step 07. Create .env file with all config variables
+  Step 08. Create base bot entry point (main.py, asyncio entrypoint)
+  Step 09. Create MongoDB connection module (Motor client, singleton)
+  Step 10. Initialize all collections and create all indexes
+
+PHASE 1 — DATABASE LAYER
+  Step 11. Implement all repository classes (one per collection)
+           users_repo, user_topics_repo, subscriptions_repo,
+           payment_sessions_repo, payment_history_repo,
+           txid_registry_repo, invites_repo,
+           support_sessions_repo, content_submissions_repo,
+           content_fingerprints_repo, vault_items_repo,
+           queue_jobs_repo, dead_letters_repo,
+           referrals_repo, punishments_repo,
+           takedown_requests_repo, audit_logs_repo,
+           admins_repo, hub_config_repo
+  Step 12. Write unit tests for all repository operations
+  Step 13. Verify all unique indexes enforce constraints
+
+PHASE 2 — BOT CORE
+  Step 14. User registration on /start (create user document)
+  Step 15. First-time onboarding flow (shown once, set onboarded=True)
+  Step 16. Main menu router
+  Step 17. /start, /takedown, /help commands registered
+  Step 18. ./prefix auto-delete middleware (10 seconds)
+  Step 19. Admin role guard decorator (verify OWNER / ADMIN)
+
+PHASE 3 — VERIFICATION HUB INFRASTRUCTURE
+  Step 20. Load hub_config on startup (cache in memory)
+  Step 21. User topic resolver:
+             → lookup topic_id from user_topics collection
+             → if missing: create topic, save mapping, return topic_id
+             → topic name format: 👤 Full Name | User ID
+  Step 22. Topic recovery handler:
+             → on Telegram send error: detect deleted topic
+             → create new topic, update mapping, log to Admin Logs
+  Step 23. Admin Logs writer function:
+             → accepts action type + metadata
+             → formats entry card
+             → posts to Admin Logs topic
+             → writes to audit_logs collection
+  Step 24. Hub command dispatcher:
+             → /accept, /close, /ban, /unban, /warn, /mute,
+               /unmute, /paymentdone, /profile, /history,
+               /note, /notes
+
+PHASE 4 — PREMIUM & PAYMENT SYSTEM
+  Step 25. Package selection flow
+  Step 26. Payment method selection
+  Step 27. Payment request creation (payment_sessions doc, PENDING)
+  Step 28. Route payment request card to user's permanent topic
+  Step 29. Admin "Send Payment Details" action (manual, no auto-send)
+  Step 30. Delivery confirmation → session activated in DB
+  Step 31. 20-minute session timeout worker
+  Step 32. Proof submission handler (TXID + digits + screenshot)
+  Step 33. TXID uniqueness validation (txid_registry + unique index)
+  Step 34. Admin approve / reject buttons in User Topic
+  Step 35. Atomic subscription activation (with Redis distributed lock)
+  Step 36. One-time invite generation (30 min expiry)
+  Step 37. Invite delivery to user
+  Step 38. Rejection reason storage and user notification
+
+PHASE 5 — SUBSCRIPTION LIFECYCLE
+  Step 39. Expiry notification worker (7d / 3d / 0d)
+  Step 40. Auto-removal from premium groups on expiry
+  Step 41. Membership reconciliation worker (every 6h)
+
+PHASE 6 — SUPPORT SYSTEM
+  Step 42. Support trigger detector (button / command / unhandled msg)
+  Step 43. Route support request card to user's permanent topic
+  Step 44. /accept handler with ownership lock enforcement
+  Step 45. 5-minute unattended notification worker
+  Step 46. Two-way message bridge (user bot ↔ user topic)
+  Step 47. /close handler — close session, delete user-side messages
+
+PHASE 7 — CONTENT SUBMISSION SYSTEM
+  Step 48. Channel membership verification gate
+  Step 49. Terms acceptance flow
+  Step 50. Multi-type content submission handler
+  Step 51. Album detection and buffering (media_group_id grouping)
+  Step 52. Duplicate / hash detection (content_fingerprints check)
+  Step 53. Route submission card to user's permanent topic
+  Step 54. Moderation buttons in user topic:
+             🔞 Approve NSFW | ⭐ Approve Premium | ❌ Reject
+  Step 55. Rejection reason collection (mandatory)
+  Step 56. NSFW approval → NSFW Vault storage + NSFW Queue job
+  Step 57. Premium approval → Premium Vault storage + Premium Queue job
+  Step 58. User notification on approval and rejection
+
+PHASE 8 — VAULT & QUEUE ENGINE
+  Step 59. NSFW Vault archive (vault_items, vault_type=nsfw)
+  Step 60. Premium Vault archive (vault_items, vault_type=premium)
+  Step 61. NSFW Queue worker (PENDING → PROCESSING → SENT)
+  Step 62. Premium Queue worker (PENDING → PROCESSING → SENT)
+  Step 63. Retry logic + dead letter queue (both queues)
+  Step 64. FloodWait handler (catch, sleep, retry)
+  Step 65. Daily limits enforcement (ENV-controlled per queue)
+  Step 66. Fair rotation + random vault distribution
+
+PHASE 9 — WATERMARK PIPELINE
+  Step 67. Photo watermark (PNG overlay, random position, opacity 90)
+  Step 68. Video watermark (two text layers, random positions/timing,
+            opacity 110–130)
+
+PHASE 10 — TAKEDOWN SYSTEM
+  Step 69. /takedown command → collect reason (FSM step 1)
+  Step 70. FSM step 2: collect content link
+  Step 71. Submit to DB (PENDING) + route card to user's topic
+  Step 72. Admin ✅ Approve & Delete button → auto-delete attempt
+  Step 73. Admin "Confirm Manual Deletion" button (fallback)
+  Step 74. Admin ❌ Reject button → prompt for typed reason
+  Step 75. Rejection → user notification + flag support as open
+
+PHASE 11 — REFERRAL SYSTEM
+  Step 76. Referral link generation per user on registration
+  Step 77. Join tracking via referral link (Pyrogram join handler)
+  Step 78. Membership verification for referral validity
+  Step 79. Points system (1 referral = 1pt, 3 approvals = 1pt)
+  Step 80. Referral dashboard display
+
+PHASE 12 — USER DASHBOARD
+  Step 81. Full status display (all fields from Section 17)
+  Step 82. Payment history display
+  Step 83. Punishment history display
+
+PHASE 13 — MESSAGE CLEANUP
+  Step 84. ./prefix middleware → 10-second silent delete
+  Step 85. 60-min cleanup worker for general messages
+  Step 86. 20-min cleanup for payment session messages
+  Step 87. 7-min cleanup for BD phone number detection
+  Step 88. Support message cleanup on session closure (user side)
+
+PHASE 14 — TRUST & FRAUD SYSTEM
+  Step 89. Trust score calculation and storage
+  Step 90. Fraud score calculation and storage
+  Step 91. Score-based restrictions
+
+PHASE 15 — AUDIT & NOTIFICATION CENTER
+  Step 92. Audit log writer (all events → MongoDB + Admin Logs topic)
+  Step 93. Notification center (expiry, approvals, rewards)
+
+PHASE 16 — HARDENING & LAUNCH
+  Step 94. Restart recovery — restore all active sessions from MongoDB
+  Step 95. Distributed lock implementation (Redis via aioredis)
+  Step 96. Health monitoring endpoint
+  Step 97. Backup system (daily/weekly/monthly via mongodump)
+  Step 98. Full launch checklist verification (Section 29)
+  Step 99. Load test + FloodWait simulation
+
+====================================================================
+CHANGE LOG
+====================================================================
+
+  v1.0 — Initial consolidated release (BDGW_FLOW_BY_SHADOW_MASTER)
+
+  Changes applied from session review (original v1.0 base):
+
+  SECTION 4 — Rebuilt.
+    /main replaced with /takedown.
+    Full command behavior descriptions added.
+    Section 4.3 added: ./prefix auto-delete rule (10 seconds).
+
+  SECTION 14 — Fully replaced.
+    Old: 4-line placeholder.
+    New: Complete takedown flow with step-by-step input collection,
+         admin card format, approve (auto + manual), reject with
+         mandatory typed reason, auto support session on rejection,
+         full DB record schema.
+
+  SECTION 15 — Entry point updated.
+    Added: "Auto-opened on Takedown rejection" as entry point.
+
+  SECTION 16 — Reward rule updated.
+    Added: 3 Approve Content = 1 Point.
+
+  SECTION 20 — One line added.
+    Added: Messages starting with ./ → Auto-delete after 10 seconds.
+
+  SECTION 25 — One line added.
+    Added: Takedown request states to restart safety list.
+
+  SECTION 29 — Two checklist items added.
+    Added: ./prefix cleanup active.
+    Added: Takedown flow tested.
+
+  SECTION 30 — Build plan updated.
+    Step 14–15: /takedown command + ./prefix middleware added.
+    Phase 10:   Fully rewritten (6 steps replacing 3).
+    Phase 11:   Referral points rule updated.
+    Phase 13:   ./prefix step added.
+    Steps renumbered: 80 → 86 total.
+
+  ---
+
+  v1.0 FINAL — Architecture Migration (BDGW_VAULTFLOW_MASTER_REFERENCE_v1.0)
+
+  CORE PRINCIPLES — Updated.
+    Added Principle 9: One user = one permanent topic.
+    Added Principle 10: user_id ↔ topic_id is canonical mapping.
+
+  SECTION 3 — Systems list updated to reflect new architecture.
+
+  SECTION 7 (Payment System) — Updated.
+    Removed: payment topic routing.
+    Added: All payment activity routes to user's permanent topic.
+    Updated: DB references from PostgreSQL/tables to MongoDB/collections.
+
+  SECTION 9 (Verification Hub) — MAJOR REWRITE.
+    Removed: 7 separate topic architecture
+             (Payments, Support, Content Review, User Moderation,
+              Broadcasts, Audit Logs).
+    Replaced with: User Topics (one per user) + Admin Logs topic.
+    Added: Section 9.1 Hub Topic Structure.
+    Added: Section 9.2 User Topic Architecture (naming, rules, recovery).
+    Added: Section 9.3 User Topic Purpose (complete routing list).
+    Added: Section 9.4 Admin Logs Topic (format, full action type list).
+    Added: Section 9.5 Hub Admin Commands.
+
+  SECTION 10 (Content Submission) — Updated.
+    Removed: Anonymous moderation (admin always sees user identity).
+    Removed: "Approve Standard" button.
+    Added: Routing to user's permanent topic.
+    Added: Section 10.4 Album Handling (buffering, single-unit rules).
+    Updated: Moderation options to 🔞 Approve NSFW / ⭐ Approve Premium
+             / ❌ Reject (mandatory reason).
+
+  SECTION 11 (Vault System) — REWRITTEN.
+    Removed: Generic single vault.
+    Replaced with: NSFW Vault Channel + Premium Vault Channel (strict
+    separation, no cross-contamination).
+    Added: vault_items MongoDB collection schema.
+
+  SECTION 12 (Queue) — Updated.
+    Added: Dual queue architecture (NSFW Queue + Premium Queue).
+    Added: Strict no-cross-contamination rule.
+    Added: queue_jobs MongoDB collection schema.
+
+  SECTION 15 (Support) — MAJOR REWRITE.
+    Removed: Per-ticket dedicated topic creation.
+    Replaced with: Permanent user topic-based support.
+    Added: Support ownership lock (single admin per session).
+    Added: Session state machine (PENDING / ACTIVE / CLOSED).
+    Added: support_sessions MongoDB collection schema.
+
+  SECTION 19 (Admin Roles) — REWRITTEN.
+    Removed: SUPER_ADMIN, MODERATOR, PAYMENT_ADMIN, SUPPORT_ADMIN,
+             SCHEDULER_ADMIN, SUDO, CONTENT_REVIEWER, SUPPORT_AGENT.
+    Replaced with: OWNER and ADMIN only.
+    Added: admins MongoDB collection schema.
+
+  SECTION 24 (Infrastructure) — Updated.
+    Updated: aiogram 3.x → Pyrogram.
+    Updated: PostgreSQL + SQLAlchemy + Alembic → MongoDB + Motor.
+    Updated: Redis reference updated to aioredis explicitly.
+
+  SECTION 25 (Restart Safety) — Strengthened.
+    Added: user_topics as critical restart state.
+    Added: hub_config as critical restart state.
+    Added: Detailed recovery behavior for each state type.
+
+  SECTION 25A — NEW SECTION.
+    Added: Complete MongoDB collections documentation.
+    Added: All schemas with field types and descriptions.
+    Added: Full index summary.
+
+  SECTION 29 (Launch Checklist) — Updated.
+    Added: MongoDB and index verification checks.
+    Added: User topic creation and recovery tests.
+    Added: Support ownership lock test.
+    Added: Album submission test.
+    Added: NSFW/Premium separation verification.
+    Added: Queue cross-contamination verification.
+    Removed: References to old 7-topic hub structure.
+
+  SECTION 30 (Build Plan) — REWRITTEN.
+    Updated: Stack references (Pyrogram, MongoDB, Motor, aioredis).
+    Phase 0: Updated to MongoDB/Motor/Pyrogram setup.
+    Phase 1: Repository-based DB layer (one repo per collection, 19 repos).
+    Phase 2: Added admin role guard decorator.
+    Phase 3: Renamed/restructured as Verification Hub Infrastructure.
+             Added: User topic resolver, topic recovery handler,
+             Admin Logs writer, hub command dispatcher.
+    Phase 3 (old Payment): Renumbered to Phase 4.
+    Phase 5 (old Support): Renumbered to Phase 6.
+             Rewritten for permanent topic support model.
+    Phase 7: Added album buffering step.
+             Updated moderation buttons to NSFW/Premium/Reject.
+    Phase 8: Split into NSFW and Premium vault/queue steps.
+    Phase 10: Updated takedown auto-support to topic-flagging model.
+    Steps renumbered: 86 → 99 total.
+
+====================================================================
+END OF DOCUMENT
+====================================================================
+BDGW VAULTFLOW — MASTER REFERENCE — VERSION 1.0
+BY SHADOW
+====================================================================
