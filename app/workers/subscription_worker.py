@@ -176,7 +176,7 @@ class SubscriptionWorker:
                 try:
                     # Idempotency: re-fetch to confirm still needs transition
                     fresh = await self._service.get_subscription(sub.user_id)
-                    if fresh is None or fresh.status.value != "ACTIVE":
+                    if fresh is None or fresh.status.value != "active":
                         continue
 
                     await self._service.set_grace(sub)
