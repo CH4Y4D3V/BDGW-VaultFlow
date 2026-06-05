@@ -68,6 +68,7 @@ class Settings(BaseSettings):
 
     # ── Channels ──────────────────────────────────────────────────────────────
     VERIFICATION_GROUP_ID: int
+    HUB_SUPERGROUP_ID: int = 0  # Fallback for hub_config
     VAULT_CHANNEL_ID: int
     NSFW_VAULT_CHANNEL_ID: int = 0
     PREMIUM_VAULT_CHANNEL_ID: int = 0
@@ -174,6 +175,7 @@ class Settings(BaseSettings):
 
     # ── Verification Hub Topics ───────────────────────────────────────────────
     HUB_TOPIC_ADMIN_LOGS: int = 0
+    HUB_TOPIC_AUDIT: int = 0
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True

@@ -112,34 +112,15 @@ class TopicManager:
     async def ensure_shared_topics(self, bot: Client) -> None:
         """
         Bootstrap the Verification Hub's shared infrastructure topics.
-
-        Must be called ONCE during bot startup, before any other system
-        attempts to post to the Admin Logs topic.
-
-        Behaviour:
-          1. Reads hub_supergroup_id from hub_config (MongoDB).
-             Logs a fatal warning and returns early if not set — operators
-             must configure this before launch.
-          2. Checks hub_config for an existing admin_logs_topic_id.
-             If found, patches settings.HUB_TOPIC_ADMIN_LOGS in-process
-             (so AdminLogger sees it immediately) and returns — nothing to do.
-          3. If the topic_id is missing from hub_config, creates the
-             "📋 Admin Logs" forum topic in the hub supergroup via the
-             Telegram API (with FloodWait handling).
-          4. Writes the new topic_id to hub_config using upsert so the write
-             is idempotent on concurrent startups.
-          5. Patches settings.HUB_TOPIC_ADMIN_LOGS in-process.
-          6. Logs the creation event to audit_logs (MongoDB).
-             NOTE: We cannot post to the Admin Logs topic at this point because
-             the topic was just created — we write to audit_logs only.
-
-        Args:
-            bot: Authenticated Pyrogram client with forum admin rights.
+        ...
         """
         hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
         if not hub_id:
+            hub_id = getattr(settings, "HUB_SUPERGROUP_ID", 0) or getattr(settings, "VERIFICATION_GROUP_ID", 0)
+
+        if not hub_id:
             logger.critical(
-                "hub_supergroup_id not set in hub_config — "
+                "hub_supergroup_id not set in hub_config or settings — "
                 "cannot ensure shared topics. Set this key before launch.",
             )
             return
@@ -264,8 +245,11 @@ class TopicManager:
 
             hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
             if not hub_id:
+                hub_id = getattr(settings, "HUB_SUPERGROUP_ID", 0) or getattr(settings, "VERIFICATION_GROUP_ID", 0)
+
+            if not hub_id:
                 logger.error(
-                    "hub_supergroup_id not configured — cannot create user topic",
+                    "hub_supergroup_id not configured in DB or settings — cannot create user topic",
                     extra={"ctx_user_id": user_id},
                 )
                 return None
@@ -395,8 +379,11 @@ class TopicManager:
         async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
             hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
             if not hub_id:
+                hub_id = getattr(settings, "HUB_SUPERGROUP_ID", 0) or getattr(settings, "VERIFICATION_GROUP_ID", 0)
+
+            if not hub_id:
                 logger.error(
-                    "hub_supergroup_id not configured — cannot recover user topic",
+                    "hub_supergroup_id not configured in DB or settings — cannot recover user topic",
                     extra={"ctx_user_id": user_id},
                 )
                 return None
@@ -594,9 +581,7 @@ async def _post_admin_log_entry(
     Post a structured entry to the Admin Logs forum topic (Section 9.4).
 
     Reads admin_logs_topic_id and hub_supergroup_id from hub_config at
-    call time. If either is not yet set (e.g. we are mid-startup),
-    the post is silently skipped — the audit_logs MongoDB write is the
-    authoritative record.
+    call time. Falls back to settings if not configured in DB.
 
     Handles FloodWait with a single retry.
 
@@ -610,6 +595,12 @@ async def _post_admin_log_entry(
     """
     admin_logs_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOPIC_ID)
     hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
+
+    # ── Fallbacks ─────────────────────────────────────────────────────────────
+    if not admin_logs_topic_id:
+        admin_logs_topic_id = getattr(settings, "HUB_TOPIC_ADMIN_LOGS", 0)
+    if not hub_id:
+        hub_id = getattr(settings, "HUB_SUPERGROUP_ID", 0) or getattr(settings, "VERIFICATION_GROUP_ID", 0)
 
     if not admin_logs_topic_id or not hub_id:
         logger.debug(

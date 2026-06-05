@@ -120,12 +120,12 @@ class MembershipReconciliationWorker:
 
         hub_config = await self._db["hub_config"].find_one({})
         if not hub_config:
-            logger.error("reconciliation_no_hub_config")
-            return
+            logger.warning("reconciliation_hub_config_missing_using_settings_fallback")
+            hub_config = {}
 
         group_map: dict[str, Optional[int]] = {
-            "nsfw":    hub_config.get("nsfw_group_id"),
-            "premium": hub_config.get("premium_group_id"),
+            "nsfw":    hub_config.get("nsfw_group_id") or settings.NSFW_GROUP_ID,
+            "premium": hub_config.get("premium_group_id") or settings.PREMIUM_GROUP_ID,
         }
 
         # Phase 1 — active subscribers missing from group

@@ -23,6 +23,7 @@ from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ParseMode
 from pyrogram.types import CallbackQuery, ChatMemberUpdated, Message
 
+from app.config import settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)

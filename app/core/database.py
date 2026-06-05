@@ -426,17 +426,22 @@ class DatabaseManager:
                     f"Indexes verified for collection: {collection_name}"
                 )
             except Exception as e:
-                error_str = str(e)
-                if (
-                    "already exists with different options" in error_str
-                    or "IndexOptionsConflict" in error_str
-                ):
+                error_str = str(e).lower()
+                # Broaden the conflict detection to handle various MongoDB error messages
+                is_conflict = any(msg in error_str for msg in [
+                    "already exists with different options",
+                    "indexoptionsconflict",
+                    "already exists with the same name",
+                    "duplicate index",
+                ])
+
+                if is_conflict:
                     logger.warning(
                         f"Index conflict detected in '{collection_name}'. "
-                        f"Attempting full collection recovery...",
+                        f"Attempting full collection recovery (drop and recreate)...",
                         extra={
                             "ctx_collection": collection_name,
-                            "ctx_error": error_str,
+                            "ctx_error": str(e),
                         },
                     )
                     try:
@@ -461,7 +466,7 @@ class DatabaseManager:
                     f"Index creation failed for collection: '{collection_name}'",
                     extra={
                         "ctx_collection": collection_name,
-                        "ctx_error": error_str,
+                        "ctx_error": str(e),
                     },
                 )
                 # Non-fatal: log and continue so other collections proceed.
@@ -471,7 +476,7 @@ class DatabaseManager:
         # ══════════════════════════════════════════════════════════════════
         await _safe_create("users", [
             IndexModel(
-                [("user_id", ASCENDING)],
+                [("_id", ASCENDING)],
                 name="users_user_id_unique",
                 unique=True,
             ),
@@ -506,7 +511,7 @@ class DatabaseManager:
         # ══════════════════════════════════════════════════════════════════
         await _safe_create("user_topics", [
             IndexModel(
-                [("user_id", ASCENDING)],
+                [("_id", ASCENDING)],
                 name="user_topics_user_id_unique",
                 unique=True,
             ),
