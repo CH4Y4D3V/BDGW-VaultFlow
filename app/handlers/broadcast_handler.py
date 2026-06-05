@@ -70,11 +70,12 @@ from pyrogram.types import (
     Message,
 )
 
-from app.core.hub_config import hub_config
-from app.db.database import get_database
-from app.repositories.admins_repo import AdminsRepository
+from app.core.hub_config import get_hub_config
+from app.core.database import DatabaseManager
+from app.core.redis_lock import acquire_lock
+from app.repositories.admin_repository import AdminRepository
 from app.services.audit_service import AuditService
-from app.services.lock_service import LockService
+from pyrogram import filters as _f
 
 logger = logging.getLogger(__name__)
 
@@ -167,25 +168,13 @@ async def _safe_call(coro_factory, max_retries: int = MAX_FLOOD_RETRIES):
 
 
 async def _is_admin(user_id: int) -> bool:
-    """
-    Return True if user_id is an active OWNER or ADMIN in the admins collection.
-
-    Silently returns False on any DB error (fails closed for security).
-
-    Args:
-        user_id: Telegram user ID to check.
-
-    Returns:
-        True if the user has an active admin role; False otherwise.
-    """
     try:
-        repo = AdminsRepository()
-        admin_doc = await repo.get_active_admin(user_id)
+        repo = AdminRepository()
+        admin_doc = await repo.get_active_by_user_id(user_id)
         return admin_doc is not None
     except Exception as exc:
         logger.error("Admin role check failed for user %d: %s", user_id, exc)
         return False
-
 
 # ---------------------------------------------------------------------------
 # MongoDB session helpers
@@ -208,7 +197,7 @@ async def _create_session(admin_user_id: int) -> str:
     Raises:
         RuntimeError: If MongoDB insertion fails.
     """
-    db = get_database()
+    db = DatabaseManager.get_db()
     doc = {
         "admin_user_id": admin_user_id,
         "state": "COLLECTING",
@@ -245,7 +234,7 @@ async def _get_session(session_id: str) -> Optional[dict]:
         The session document dict, or None if not found or on DB error.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         return await db[BROADCAST_COLLECTION].find_one(
             {"_id": ObjectId(session_id)}
         )
@@ -267,7 +256,7 @@ async def _get_admin_active_session(admin_user_id: int) -> Optional[dict]:
         Session document dict, or None if no active session exists.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         return await db[BROADCAST_COLLECTION].find_one(
             {
                 "admin_user_id": admin_user_id,
@@ -295,7 +284,7 @@ async def _update_session(session_id: str, update_fields: dict) -> None:
         update_fields: Dict of field→value pairs to $set.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         await db[BROADCAST_COLLECTION].update_one(
             {"_id": ObjectId(session_id)},
             {"$set": update_fields},
@@ -319,7 +308,7 @@ async def _append_message_entry(session_id: str, entry: dict) -> None:
         entry: Dict describing the collected message.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         await db[BROADCAST_COLLECTION].update_one(
             {"_id": ObjectId(session_id)},
             {"$push": {"messages": entry}},
@@ -341,7 +330,7 @@ async def _cancel_stale_sessions(admin_user_id: int) -> None:
         admin_user_id: Telegram user ID whose stale sessions to cancel.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         result = await db[BROADCAST_COLLECTION].update_many(
             {
                 "admin_user_id": admin_user_id,
@@ -371,7 +360,7 @@ async def _check_global_broadcast_active() -> bool:
         True if a BROADCASTING session exists in MongoDB; False otherwise.
     """
     try:
-        db = get_database()
+        db = DatabaseManager.get_db()
         doc = await db[BROADCAST_COLLECTION].find_one({"state": "BROADCASTING"})
         return doc is not None
     except Exception as exc:
@@ -413,11 +402,11 @@ async def _emit_broadcast_completed_log(
     # 1. Write to audit_logs collection
     try:
         audit = AuditService()
-        await audit.emit(
+        await audit.log(
             action="BROADCAST_SENT",
-            admin_user_id=admin_user_id,
+            performed_by=admin_user_id,
             target_user_id=None,
-            detail={
+            details={
                 "session_id": session_id,
                 "target_total": total,
                 "sent_count": sent,
@@ -432,7 +421,7 @@ async def _emit_broadcast_completed_log(
 
     # 2. Post to Admin Logs topic
     try:
-        hub_sg_id = hub_config.get("hub_supergroup_id")
+        hub_sg_id = get_hub_config().get("hub_supergroup_id")
         logs_topic_id = hub_config.get("admin_logs_topic_id")
 
         if not hub_sg_id or not logs_topic_id:
@@ -627,9 +616,7 @@ async def _execute_broadcast(
 
     # ── Step 2: Acquire global broadcast lock ─────────────────────────────────
     try:
-        async with LockService.acquire(
-            BROADCAST_LOCK_KEY, ttl=BROADCAST_LOCK_TTL_SECONDS
-        ):
+        async with acquire_lock(BROADCAST_LOCK_KEY, timeout=BROADCAST_LOCK_TTL_SECONDS):
             await _run_broadcast_loop(
                 client, admin_user_id, admin_name, session_id, session
             )
@@ -1276,12 +1263,20 @@ def register_handlers(app: Client) -> None:
     Args:
         app: Configured Pyrogram Client instance.
     """
+ 
+    async def _hub_check(_, __, message) -> bool:
+        from app.core.hub_config import get_hub_config
+        hub_id = get_hub_config().hub_supergroup_id
+        return bool(message.chat and message.chat.id == hub_id)
+
+    hub_filter = _f.create(_hub_check)
+
     app.add_handler(
         MessageHandler(
             _handle_broadcast_command,
-            filters.command("broadcast") & filters.private,
+            _f.command("broadcast") & hub_filter,
         )
-    )
+    ))
     app.add_handler(
         MessageHandler(
             _handle_broadcast_content,

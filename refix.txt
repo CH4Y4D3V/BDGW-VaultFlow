@@ -1,0 +1,493 @@
+------------------------------------------------------------
+BDGW VAULTFLOW — RE-AUDIT REPORT
+Date      : 2026-06-06
+Loop      : 2
+Prev Loop : 1
+------------------------------------------------------------
+
+---
+
+## SECTION A — FIXES VERIFIED
+
+```
+REF    : A-01
+FILE   : app/handlers/support_handler.py
+STATUS : FIXED ✓
+NOTE   : Pure Pyrogram implementation with no aiogram imports anywhere in the file.
+
+REF    : A-02
+FILE   : app/handlers/topic_router.py
+STATUS : FIXED ✓
+NOTE   : DatabaseManager imported at module level with inline fix comment.
+
+REF    : A-03
+FILE   : app/handlers/takedown_handler.py
+STATUS : FIXED ✓
+NOTE   : TOPIC_SUPPORT added to the import line from app.services.topic_manager.
+
+REF    : A-04
+FILE   : app/services/payment_intent_checker.py
+STATUS : FIXED ✓
+NOTE   : _safe_notify() now contains exactly one send_message call with ParseMode.HTML.
+
+REF    : A-05
+FILE   : app/models/subscription.py
+STATUS : FIXED ✓
+NOTE   : from_dict() now handles legacy docs gracefully via plan_raw fallback chain and safe status coercion.
+
+REF    : A-06
+FILE   : app/repositories/queue_repository.py
+STATUS : FIXED ✓
+NOTE   : extend_delivery_lock returns result.modified_count > 0 with explicit fix comment.
+
+REF    : A-07
+FILE   : app/core/database.py
+STATUS : FIXED ✓
+NOTE   : txid_registry section added to _ensure_indexes() with three indexes and prominent CRITICAL comment.
+
+REF    : A-08
+FILE   : app/distribution/dispatcher.py
+STATUS : FIXED ✓
+NOTE   : mark_processing() is now called for all job_docs before the target loop. State machine LOCKED → PROCESSING → DELIVERING is enforced.
+
+REF    : A-09
+FILE   : app/watermark/worker_pool.py
+STATUS : FIXED ✓
+NOTE   : _swap_with_fallback() catches OperationFailure code 20 and delegates to _swap_references_no_txn() for standalone MongoDB.
+
+REF    : A-10
+FILE   : app/payments/service.py
+STATUS : FIXED ✓
+NOTE   : from app.core.database import DatabaseManager present at module level with fix comment.
+
+REF    : B-01
+FILE   : app/services/topic_manager.py
+STATUS : FIXED ✓
+NOTE   : ensure_shared_topics() creates Admin Logs topic if absent, upserts topic_id to hub_config, and patches settings.HUB_TOPIC_ADMIN_LOGS before any dependent service runs.
+
+REF    : B-02
+FILE   : app/workers/subscription_worker.py
+STATUS : FIXED ✓
+NOTE   : _remove_from_all_premium_chats() calls _get_all_premium_chat_ids() which reads the full list from hub_config, not a hardcoded pair.
+
+REF    : B-03
+FILE   : app/core/lifecycle.py
+STATUS : FIXED ✓
+NOTE   : MembershipReconciliationWorker fully implemented: re-invites active subscribers missing from group and kicks expired members still present, with audit log + summary post to Admin Logs topic.
+
+REF    : B-04
+FILE   : app/handlers/submission_handler.py
+STATUS : FIXED ✓
+NOTE   : _compute_album_hash() computes SHA-256 of "|"-joined individual hashes. Combined hash is used as media_hash for albums; per-item hashes stored separately.
+
+REF    : B-05
+FILE   : app/services/support_monitor.py
+STATUS : FIXED ✓
+NOTE   : Now queries support_sessions collection using opened_at field and notified_unattended flag, matching spec 25A.8. Old user_topics.inactivity_warned path removed.
+
+REF    : B-06
+FILE   : app/moderation/moderation_actions.py
+STATUS : FIXED ✓
+NOTE   : execute_approve() now calls enqueue_for_distribution() with vault_fill_execute_after cooldown after the immediate post, placing approved content into the replay pool.
+
+REF    : B-07
+FILE   : app/handlers/vault_handler.py
+STATUS : FIXED ✓
+NOTE   : Watermark pipeline runs before enqueue_for_distribution(); WATERMARK_ENABLED guarded; fallback to original media on pipeline failure.
+
+REF    : B-08
+FILE   : app/handlers/support_handler.py / app/handlers/takedown_handler.py
+STATUS : FIXED ✓
+NOTE   : takedown_handler raises ContinuePropagation (not StopPropagation) when STATE_IDLE; payment_handler raises ContinuePropagation when no active session. Group-1 support bridge can receive messages from both paths.
+
+REF    : B-10
+FILE   : app/handlers/user_handler.py
+STATUS : FIXED ✓
+NOTE   : _handle_referral_at_start() saves pending referral to DB first, then checks MAIN_CHANNEL_ID membership before calling register_referral(). Non-member deferral documented.
+
+REF    : C-02
+FILE   : app/core/permissions.py
+STATUS : FIXED ✓
+NOTE   : Role enum contains exactly OWNER and ADMIN. All legacy roles removed. has_role(), is_owner(), is_admin_or_owner() are the only resolution functions.
+
+REF    : C-03
+FILE   : app/services/invite_service.py
+STATUS : FIXED ✓
+NOTE   : _revoke_invite_link() now raises on final failure; DB mark is rolled back via reactivate_invite_by_link() and an explicit RuntimeError is raised to abort the flow.
+
+REF    : C-04
+FILE   : app/scheduler/scheduler.py
+STATUS : FIXED ✓
+NOTE   : _DAILY_CAPS resolves NSFW_DAILY_LIMIT → DAILY_CAP_NSFW → 75 and PREMIUM_DAILY_LIMIT → DAILY_CAP_PREMIUM → 140 in priority order.
+
+REF    : C-07
+FILE   : app/moderation/moderation_actions.py
+STATUS : FIXED ✓
+NOTE   : post_to_destination() uses copy_message / copy_media_group which preserves the original caption when no caption parameter is passed.
+
+REF    : C-08
+FILE   : app/handlers/payment_handler.py
+STATUS : FIXED ✓
+NOTE   : _process_send_details_message() clears FSM and returns early with an admin retry message on delivery failure; session stays at WAITING_PAYMENT_DETAILS — no stuck state.
+
+REF    : D-01
+FILE   : app/services/support_service.py
+STATUS : FIXED ✓
+NOTE   : from app.utils.logger import get_logger used throughout; no stdlib logging.getLogger.
+
+REF    : D-03
+FILE   : app/config/settings.py
+STATUS : FIXED ✓
+NOTE   : WATERMARK_OPACITY: float = 0.42 (normalised 0-1). _validate_watermark_opacity validator rejects old-style 0-255 integers with an actionable error message.
+
+REF    : D-05
+FILE   : app/services/payment_intent_checker.py
+STATUS : FIXED ✓
+NOTE   : Ban threshold check uses find_one_and_update with atomic filter {is_banned: {$ne: True}}. Concurrent passes no longer double-ban.
+
+REF    : E-02
+FILE   : app/services/vault_pool_service.py
+STATUS : FIXED ✓
+NOTE   : Full implementation present: cooldown filter, fair rotation, random selection within fairness window, PENDING job insert before vault update (restart-safe), audit log.
+
+REF    : E-03
+FILE   : app/handlers/premium_links_handler.py
+STATUS : FIXED ✓
+NOTE   : Full implementation present covering all 6 cases (valid invite, expired, used, no record, no sub, DB error). Audit log written on every view.
+
+REF    : E-04
+FILE   : app/scripts/create_indexes.py
+STATUS : FIXED ✓
+NOTE   : Full standalone script with dry-run, verbose, and --collection flags. Covers all 25A collections. Idempotent.
+```
+
+---
+
+## SECTION B — FIXES INCOMPLETE OR BROKEN
+
+```
+REF      : B-09
+FILE     : app/handlers/admin_handler.py
+LINE     : handle_close_command() (~line 294)
+STATUS   : STILL BROKEN
+ORIGINAL : /close must call CleanupService.delete_user_support_history() to delete
+           user-side support messages on session closure (Section 20 Rule 5).
+CURRENT  : handle_close_command() updates DB status, sends user DM, writes audit logs
+           and Admin Logs — but never calls get_cleanup_service().delete_user_support_history(user_id).
+           User-side support messages accumulate permanently after /close.
+REMAINING: Add after the session update block:
+             from app.services.cleanup_service import get_cleanup_service
+             await get_cleanup_service().delete_user_support_history(target_id)
+SIZE     : SMALL
+FIX TYPE : MINOR
+
+REF      : C-05
+FILE     : app/workers/subscription_worker.py
+LINE     : _sweep_reminders() (~line 195)
+STATUS   : STILL BROKEN
+ORIGINAL : Spec 7.7 requires 3-day reminder ×2, 24 hours apart.
+CURRENT  : A single reminder_3d_sent flag prevents any second send. The 3-day window
+           is `expires_at BETWEEN now+2d12h AND now+3d12h`. After the first send
+           reminder_3d_sent=True is written and no second notification is ever sent.
+           The spec-required second notification at ~2 days out (24h after first) is absent.
+REMAINING: Add a separate reminder_2d_sent flag and a second query window of
+           `expires_at BETWEEN now+1d12h AND now+2d12h`.
+SIZE     : SMALL
+FIX TYPE : MINOR
+
+REF      : C-06
+FILE     : app/moderation/verification_hub.py
+LINE     : forward_to_verification() (~line 143)
+STATUS   : STILL BROKEN
+ORIGINAL : Spec 10.3: approval buttons must read "Approve → [Group Name]" using
+           configured group names, not hardcoded strings.
+CURRENT  : Buttons remain "🔞 Approve NSFW" / "⭐ Approve Premium" regardless of
+           NSFW_DISPLAY_NAME / PREMIUM_DISPLAY_NAME settings.
+REMAINING: Replace button labels with:
+             f"✅ Approve {settings.NSFW_DISPLAY_NAME}"
+             f"✅ Approve {settings.PREMIUM_DISPLAY_NAME}"
+SIZE     : SMALL
+FIX TYPE : MINOR
+```
+
+---
+
+## SECTION C — REGRESSIONS
+
+```
+FILE     : app/handlers/callback_handler.py  /  app/handlers/payment_handler.py
+          / app/handlers/welcome_handler.py
+LINE     : Module-level import statements
+ISSUE    : All three files contain `from app.core.permissions import is_moderator` at
+           module level. After the C-02 fix removed legacy roles from permissions.py,
+           is_moderator no longer exists there. Pyrogram's plugin loader imports every
+           file in app/handlers/ on startup — these three will raise ImportError
+           immediately, preventing ALL their handlers from registering. The bot starts
+           deaf to moderation callbacks, payment admin actions, and welcome messages.
+CAUSED BY: C-02 fix (correct removal of Role.MODERATOR) without auditing all callers.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Add to app/core/permissions.py:
+             async def is_moderator(user_id: int) -> bool:
+                 return await is_admin_or_owner(user_id)
+           Then audit all remaining is_moderator() call sites to ensure they await
+           the coroutine (currently called synchronously in several places).
+
+FILE     : app/handlers/update_logger.py
+LINE     : handle_ban_guard() (~line 92)
+ISSUE    : Two problems introduced by the C-02 fix:
+           1. Role.SUDO is referenced but no longer exists in Role enum →
+              AttributeError on first message after startup.
+           2. has_role() is async but called without await → returns a truthy
+              coroutine object, meaning the SUDO bypass always fires and
+              the ban guard is permanently disabled for ALL users.
+           The ban guard runs at group=-2 and is the primary spam/ban enforcement
+           layer; its silent failure is a security regression.
+CAUSED BY: C-02 fix without checking all consumers of the old role enum.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace the SUDO check with:
+             if user_id == settings.OWNER_ID or await has_role(user_id, Role.ADMIN):
+                 return
+
+FILE     : app/workers/subscription_worker.py
+LINE     : _sweep() (~line 100 and 120)
+ISSUE    : Both grace and expiry transitions call
+           `self._service.get_by_id(sub.subscription_id)` for the idempotency
+           re-fetch. SubscriptionService has no get_by_id() method — only
+           get_subscription(user_id). This raises AttributeError on the first
+           expiry sweep, halting the entire sweep loop silently via the broad
+           except clause, so NO subscriptions ever expire.
+CAUSED BY: B-02/B-03 fix added idempotency re-fetch without checking available
+           service methods.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace `self._service.get_by_id(sub.subscription_id)` with
+           `await self._service.get_subscription(sub.user_id)`
+
+FILE     : app/workers/subscription_worker.py
+LINE     : _reconcile_membership() and _sweep_reminders()
+ISSUE    : Multiple MongoDB queries use lowercase status strings ("active", "expired",
+           "cancelled") but SubscriptionStatus values are uppercase ("ACTIVE",
+           "EXPIRED", "CANCELLED"). Every affected query silently returns zero
+           documents — subscriptions are never expired, never reconciled, and
+           never have reminders sent.
+           Specific lines: `"status": {"$in": ["expired", "cancelled"]}`,
+           `"status": "active"`, `"plan": {"$nin": ["free", "owner", "sudo"]}`.
+CAUSED BY: D-07 was marked as still existing in Loop 1 but the subscriptions worker
+           was rewritten with the same bug embedded in the new queries.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Use .value on all status comparisons:
+             SubscriptionStatus.ACTIVE.value, SubscriptionStatus.EXPIRED.value, etc.
+
+FILE     : app/handlers/broadcast_handler.py
+LINE     : 1-40 (imports)
+ISSUE    : The newly created broadcast_handler uses three non-existent module paths:
+           - `from app.db.database import get_database`   (module is app.core.database)
+           - `from app.repositories.admins_repo import AdminsRepository`  (file missing)
+           - `from app.services.lock_service import LockService`  (file missing)
+           These are module-level imports. On load, Pyrogram raises ImportError for
+           broadcast_handler.py, so all broadcast commands are unregistered.
+CAUSED BY: E-01 fix created the file using import paths from a different project.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace with:
+             from app.core.database import DatabaseManager; get_database = DatabaseManager.get_db
+             from app.repositories.admin_repository import AdminRepository  (use existing file)
+             Use existing DistributedLockService from app.distribution.lock_service
+
+FILE     : app/distribution/rate_limiter.py
+LINE     : check_daily_cap() (~line 72)
+ISSUE    : `str(settings.PREMIUM_CHANNEL_ID)` — PREMIUM_CHANNEL_ID is not defined in
+           Settings. Settings only defines PREMIUM_GROUP_ID. AttributeError is raised
+           on every check_daily_cap() call for premium targets, blocking all premium
+           content distribution.
+CAUSED BY: Rate limiter was extended to check PREMIUM_CHANNEL_ID without adding it
+           to settings.py.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace with `str(getattr(settings, "PREMIUM_CHANNEL_ID", settings.PREMIUM_GROUP_ID))`
+
+FILE     : app/handlers/submission_handler.py
+LINE     : Daily cap check block (~line 290)
+ISSUE    : `settings.PREMIUM_DAILY_SUBMISSION_LIMIT` and `settings.FREE_DAILY_SUBMISSION_LIMIT`
+           are referenced but not defined in Settings. AttributeError on every media
+           submission attempt, blocking all content submission.
+CAUSED BY: Submission handler rewrite introduced per-plan submission caps without
+           adding the corresponding fields to the Settings schema.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Either add PREMIUM_DAILY_SUBMISSION_LIMIT: int = 20 and
+           FREE_DAILY_SUBMISSION_LIMIT: int = 5 to settings.py, or replace with
+           hardcoded defaults via getattr(settings, ..., default).
+```
+
+---
+
+## SECTION D — NEW ISSUES
+
+```
+FILE     : app/core/lifecycle.py  /  app/handlers/support_handler.py
+LINE     : get_redis_client import
+ISSUE    : Both files contain `from app.core.redis import get_redis_client`. The module
+           is app.core.redis_client (not app.core.redis) and it exports RedisClient
+           class, not a get_redis_client function. In lifecycle.py the import is inside
+           a try/except so startup continues but Redis is silently None, disabling
+           all distributed locks. In support_handler it triggers inside a handler,
+           silently degrading support session accept to lockless (concurrent accept race
+           survives).
+SEVERITY : HIGH
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace with:
+             from app.core.redis_client import RedisClient
+             redis_client = await RedisClient.get_client()
+
+FILE     : app/handlers/submission_handler.py
+LINE     : Module-level import
+ISSUE    : `from app.repositories.user_topics_repo import user_topics_repo` — no file
+           app/repositories/user_topics_repo.py is present in the repository.
+           This is a module-level import in submission_handler.py, causing ImportError
+           on startup and preventing ALL private media submissions from working.
+SEVERITY : CRITICAL
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Remove this import and replace the get_or_create call with:
+             from app.services.topic_manager import get_topic_manager
+             topic_id = await get_topic_manager().get_or_create_user_topic(client, user_id=user_id, ...)
+
+FILE     : app/handlers/user_handler.py
+LINE     : handle_menu_callbacks(), "submit" branch (~line 430)
+ISSUE    : Attempts `from app.handlers.submission_handler import handle_submission_entry`.
+           No function named handle_submission_entry exists in submission_handler.py —
+           only handle_submit_menu and handle_media_submission. Raises ImportError (caught
+           in the try/except) and falls through to the placeholder text, breaking the
+           Submit Content button silently.
+SEVERITY : HIGH
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Replace with: `from app.handlers.submission_handler import handle_submit_menu`
+           and call `await handle_submit_menu(client, callback_query)`.
+
+FILE     : app/handlers/submission_handler.py
+LINE     : forward_to_verification call
+ISSUE    : `forward_to_verification()` in verification_hub.py only builds the info card
+           with `user_label = f"User {submitter_user_id}"` (ID only). Spec 10.3 explicitly
+           states "Admin always sees: Full Name, Username, User ID." For the private
+           submission path submission_handler.py compensates with its own admin_card, but
+           for the group submission path (group_handler.py → forward_to_verification),
+           only the user ID is visible in the forwarded card.
+SEVERITY : MEDIUM
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Pass full_name and username to forward_to_verification() and include them in
+           info_text, or call post_user_info_card() from within forward_to_verification()
+           before forwarding content.
+
+FILE     : app/payments/repository.py
+LINE     : get_sessions_by_statuses() (~line missing)
+ISSUE    : PaymentService.resume_active_sessions() calls
+           `await self.repository.get_sessions_by_statuses(active_statuses)` but
+           PaymentRepository has no get_sessions_by_statuses() method — it has
+           get_sessions_by_status() (singular). AttributeError on every bot restart
+           during payment session recovery, leaving active payment sessions without
+           timers after restart.
+SEVERITY : HIGH
+SIZE     : SMALL
+FIX TYPE : MINOR
+           Rename method in repository to get_sessions_by_statuses() (plural) to match
+           callers, or fix the call sites.
+```
+
+---
+
+## SECTION E — STILL MISSING IMPLEMENTATIONS
+
+```
+FILE     : app/handlers/admin_handler.py
+SECTION  : Section 15.5 / Section 20 Rule 5
+MISSING  : /close command does not invoke CleanupService.delete_user_support_history().
+           User-side support chat messages are never cleaned up. (see B-09 above)
+SEVERITY : HIGH
+FIX TYPE : MINOR
+
+FILE     : app/workers/subscription_worker.py
+SECTION  : Section 7.7
+MISSING  : 3-day reminder second send (24h after first). Only one reminder at ~3 days
+           is sent; the second at ~2 days is absent. (see C-05 above)
+SEVERITY : MEDIUM
+FIX TYPE : MINOR
+
+FILE     : app/moderation/verification_hub.py
+SECTION  : Section 10.3
+MISSING  : Approval button labels use hardcoded "NSFW" / "Premium" instead of
+           configured group display names. (see C-06 above)
+SEVERITY : MEDIUM
+FIX TYPE : MINOR
+```
+
+---
+
+## SECTION F — RE-AUDIT SUMMARY
+
+```
+Previously reported issues       : 39  (10 Critical, 10 High, 8 Medium, 7 Low, 4 Files)
+Confirmed fixed                  : 30
+Still broken                     : 5   (B-09, C-05, C-06, D-02, D-06)
+Regressions introduced           : 8
+New issues found                 : 5
+Total open issues                : 18
+------------------------------------
+Files Requiring CRITICAL Fix     :
+  app/handlers/callback_handler.py      (is_moderator missing → ImportError)
+  app/handlers/payment_handler.py       (is_moderator missing → ImportError)
+  app/handlers/welcome_handler.py       (is_moderator missing → ImportError)
+  app/handlers/update_logger.py         (Role.SUDO + missing await → ban guard dead)
+  app/workers/subscription_worker.py    (get_by_id + status case → sweep never runs)
+  app/handlers/broadcast_handler.py     (wrong import paths → ImportError)
+  app/distribution/rate_limiter.py      (PREMIUM_CHANNEL_ID missing → premium dead)
+  app/handlers/submission_handler.py    (missing settings attrs + user_topics_repo)
+
+Files Requiring HIGH Fix         :
+  app/core/lifecycle.py                 (wrong redis import path)
+  app/handlers/support_handler.py       (wrong redis import path)
+  app/handlers/user_handler.py          (handle_submission_entry doesn't exist)
+  app/payments/repository.py            (get_sessions_by_statuses method name mismatch)
+
+Files Requiring MINOR Fix        :
+  app/core/permissions.py               (add is_moderator() alias)
+  app/handlers/admin_handler.py         (B-09: missing cleanup on /close)
+  app/workers/subscription_worker.py    (C-05: second 3-day reminder)
+  app/moderation/verification_hub.py    (C-06: dynamic button labels)
+------------------------------------
+Suggested Execution Order for Pass 3:
+  Pass 3a — Bot startup blockers (FIRST):
+    Add is_moderator() to permissions.py + fix all callers
+    Fix Role.SUDO + await in update_logger.py
+    Fix broadcast_handler.py imports
+    Fix submission_handler.py: remove user_topics_repo import + fix settings attrs
+
+  Pass 3b — Runtime crashes in active paths:
+    Fix subscription_worker.py: get_by_id → get_subscription, status string casing
+    Fix rate_limiter.py: PREMIUM_CHANNEL_ID attribute
+    Fix redis import path in lifecycle.py and support_handler.py
+
+  Pass 3c — Functional completeness:
+    Fix payment repo method name mismatch
+    B-09: add cleanup call to admin_handler /close
+    C-05: second 3-day reminder flag
+    C-06: dynamic button labels
+    Fix user_handler submit branch to use handle_submit_menu
+------------------------------------
+SYSTEM READY : NO
+NEXT PRIORITY : Add is_moderator() to permissions.py — three handlers will not load
+                at all until this lands, making moderation and payments completely broken.
+```

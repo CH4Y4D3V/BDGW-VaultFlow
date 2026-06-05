@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from app.utils.logger import get_logger
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -56,7 +57,7 @@ from app.core.redis_lock import acquire_lock
 from app.models.subscription import Plan
 from app.services.subscription_service import SubscriptionService
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,31 +66,18 @@ logger = logging.getLogger(__name__)
 
 
 async def _safe_send(coro, *, label: str = "send") -> bool:
-    """Await a Pyrogram send coroutine, handling FloodWait with a single retry.
-
-    Any other exception (user blocked, deactivated, etc.) is caught, logged,
-    and treated as a non-fatal delivery failure — the command result is still
-    written to the hub regardless.
-
-    Args:
-        coro:  A Pyrogram awaitable (e.g. ``client.send_message(...)``).
-        label: Short description used in log messages.
-
-    Returns:
-        ``True`` if the message was sent, ``False`` otherwise.
+    """Await a Pyrogram send coroutine, handling FloodWait.
+    NOTE: Pyrogram coroutines are single-use; the retry path is intentionally
+    removed to avoid RuntimeError: coroutine already executed.
+    On FloodWait the call sleeps the required interval and returns False.
     """
     try:
         await coro
         return True
     except FloodWait as exc:
-        logger.warning("FloodWait %ds on %s — sleeping and retrying once", exc.value, label)
+        logger.warning("FloodWait %ds on %s — sleeping (single-use coroutine, no retry)", exc.value, label)
         await asyncio.sleep(exc.value)
-        try:
-            await coro
-            return True
-        except Exception as retry_exc:
-            logger.error("Retry failed for %s: %s", label, retry_exc)
-            return False
+        return False
     except (UserIsBlocked, InputUserDeactivated) as exc:
         logger.info("Cannot deliver to user (%s): %s", label, exc)
         return False
@@ -351,7 +339,7 @@ async def handle_accept_command(client: Client, message: Message) -> None:
 
     # Update the most recent PENDING support session.
     now = datetime.now(timezone.utc)
-    result = await db["support_sessions"].update_one(
+    result = await db["support_sessions"].find_one_and_update(
         {"user_id": target_id, "status": "PENDING"},
         {
             "$set": {
@@ -363,7 +351,7 @@ async def handle_accept_command(client: Client, message: Message) -> None:
         sort=[("opened_at", -1)],
     )
 
-    if result.matched_count == 0:
+    if result is None:
         await message.reply_text("❌ No PENDING support session found for this user.")
         return
 
@@ -433,7 +421,7 @@ async def handle_close_command(client: Client, message: Message) -> None:
     admin_name = message.from_user.full_name or "Admin"
     now = datetime.now(timezone.utc)
 
-    result = await db["support_sessions"].update_one(
+    result = await db["support_sessions"].find_one_and_update(
         {"user_id": target_id, "status": {"$in": ["ACTIVE", "PENDING"]}},
         {
             "$set": {
@@ -445,7 +433,7 @@ async def handle_close_command(client: Client, message: Message) -> None:
         sort=[("opened_at", -1)],
     )
 
-    if result.matched_count == 0:
+    if result is None:
         await message.reply_text("❌ No open support session found for this user.")
         return
 
@@ -1430,7 +1418,14 @@ async def handle_stats_command(client: Client, message: Message) -> None:
         user_count = await db["users"].count_documents({})
         active_sub_count = await db["subscriptions"].count_documents({"status": "ACTIVE"})
         banned_count = await db["users"].count_documents({"is_banned": True})
-        pending_payments = await db["payment_sessions"].count_documents({"status": "ACTIVE"})
+        pending_payments = await db["payment_sessions"].count_documents({
+            "status": {"$in": [
+                "waiting_payment_details",
+                "waiting_txid",
+                "waiting_screenshot",
+                "under_review",
+            ]}
+        })
 
         text = (
             "📊 <b>System Statistics</b>\n\n"
