@@ -22,11 +22,12 @@ CONTEXTS (use these constants everywhere):
 import asyncio
 import logging
 from typing import Optional
+from datetime import datetime, timezone
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from pyrogram import Client
+from pyrogram.errors import BadRequest
 
-from database.repository import Database
+from app.core.database import DatabaseManager
 
 log = logging.getLogger(__name__)
 
@@ -49,45 +50,43 @@ _ALREADY_DELETED_PHRASES = frozenset({
 
 
 async def track_message(
-    db: Database,
     user_id: int,
     message_id: int,
     context: str = CONTEXT_GENERAL,
 ) -> None:
     """
     Record a user-facing bot message for potential cleanup.
-
-    Call immediately after bot.send_message / message.answer returns.
-    Never raises — tracking failure is non-fatal.
     """
-    await db.track_user_message(user_id, message_id, context)
+    try:
+        db = DatabaseManager.get_db()
+        await db["message_tracker"].insert_one({
+            "user_id": user_id,
+            "message_id": message_id,
+            "context": context,
+            "is_deleted": False,
+            "created_at": datetime.now(timezone.utc)
+        })
+    except Exception as e:
+        log.warning(f"Failed to track message {message_id} for user {user_id}: {e}")
 
 
 async def delete_user_messages(
-    bot: Bot,
-    db: Database,
+    client: Client,
     user_id: int,
     context: Optional[str] = None,
 ) -> int:
     """
     Delete all tracked undeleted messages for a user from Telegram.
-
-    Args:
-        context: If provided, only delete messages with this context.
-                 None → delete ALL tracked messages for the user.
-
-    Returns:
-        Count of messages successfully deleted (or already gone).
-
-    Never raises. All Telegram errors are handled gracefully.
-    Admin group messages are NEVER in this table, so they cannot be affected.
     """
-    messages = await db.get_undeleted_user_messages(user_id, context)
+    db = DatabaseManager.get_db()
+    query = {"user_id": user_id, "is_deleted": False}
+    if context:
+        query["context"] = context
+        
+    messages_cursor = db["message_tracker"].find(query)
+    messages = await messages_cursor.to_list(length=None)
+    
     if not messages:
-        log.debug(
-            "[MSG TRACKER] No tracked messages for user %d (context=%s)",
-            user_id, context or "all",
-        )
         return 0
 
     deleted_count = 0
@@ -96,13 +95,12 @@ async def delete_user_messages(
     for msg in messages:
         msg_id: int = msg["message_id"]
         try:
-            await bot.delete_message(chat_id=user_id, message_id=msg_id)
+            await client.delete_messages(chat_id=user_id, message_ids=msg_id)
             deleted_ids.append(msg_id)
             deleted_count += 1
-        except TelegramBadRequest as exc:
+        except BadRequest as exc:
             lowered = str(exc).lower()
             if any(phrase in lowered for phrase in _ALREADY_DELETED_PHRASES):
-                # Message already gone from Telegram — clean up DB record anyway
                 deleted_ids.append(msg_id)
                 deleted_count += 1
             else:
@@ -117,34 +115,32 @@ async def delete_user_messages(
             )
 
     if deleted_ids:
-        await db.mark_user_messages_deleted(user_id, deleted_ids)
+        await db["message_tracker"].update_many(
+            {"user_id": user_id, "message_id": {"$in": deleted_ids}},
+            {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc)}}
+        )
 
     log.info(
         "[MSG TRACKER] user=%d context=%s: deleted %d/%d messages",
         user_id, context or "all", deleted_count, len(messages),
+        extra={"user_id": user_id, "context": context or "all"}
     )
     return deleted_count
 
 
 def schedule_deletion(
-    bot: Bot,
-    db: Database,
+    client: Client,
     user_id: int,
     delay_seconds: int,
     context: Optional[str] = None,
 ) -> None:
     """
     Fire-and-forget: schedule deletion of user messages after a delay.
-    Creates an asyncio background task. Never blocks the caller.
-
-    Args:
-        delay_seconds: How many seconds to wait before deleting.
-        context: Which context to delete. None → delete all.
     """
     async def _delayed() -> None:
         await asyncio.sleep(delay_seconds)
         try:
-            await delete_user_messages(bot, db, user_id, context)
+            await delete_user_messages(client, user_id, context)
         except Exception as exc:
             log.warning(
                 "[MSG TRACKER] Scheduled deletion failed for user %d (ctx=%s): %s",
@@ -152,7 +148,3 @@ def schedule_deletion(
             )
 
     asyncio.create_task(_delayed())
-    log.debug(
-        "[MSG TRACKER] Scheduled deletion for user %d in %ds (context=%s)",
-        user_id, delay_seconds, context or "all",
-    )

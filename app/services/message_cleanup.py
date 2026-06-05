@@ -2,29 +2,6 @@
 message_cleanup.py
 ──────────────────
 Background scheduler: auto-deletes old tracked user-facing messages.
-
-FIX (Bug #2): Previous code did _RETENTION_HOURS_FOR_QUERY = max(1, _RETENTION_SECONDS // 3600).
-With a 30-minute retention (1800s): 1800 // 3600 = 0 → max(1, 0) = 1.
-db.get_stale_messages(older_than_hours=1) never matched messages newer than 1 hour,
-so the scheduler was effectively a no-op for any retention under 60 minutes.
-
-ROOT CAUSE: The scheduler computed a UTC cutoff in Python but then discarded it
-in favour of an integer hours value floored to 1. The fix: compute the cutoff
-datetime directly in Python (using the exact _RETENTION_SECONDS value) and pass
-it to db.get_stale_messages(older_than=cutoff). This removes the integer-division
-rounding entirely and makes the query precise to the second.
-
-REQUIRED DB CHANGE: Update get_stale_messages() in database/repository.py to
-accept `older_than: datetime` instead of `older_than_hours: int`.
-
-  Before:
-    async def get_stale_messages(self, older_than_hours: int) -> list[dict]:
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
-        ...WHERE created_at < :cutoff...
-
-  After:
-    async def get_stale_messages(self, older_than: datetime) -> list[dict]:
-        ...WHERE created_at < :cutoff...   # pass older_than directly as :cutoff
 """
 
 import asyncio
@@ -33,10 +10,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
+from pyrogram import Client
+from pyrogram.errors import BadRequest
 
-from database.repository import Database
+from app.core.database import DatabaseManager
 
 log = logging.getLogger("message_cleanup")
 
@@ -60,11 +37,18 @@ _ALREADY_DELETED = frozenset({
 })
 
 
-async def _run_cleanup(bot: Bot, db: Database) -> None:
-    # FIX: compute the cutoff datetime precisely in Python.
-    # No integer-division rounding, no forced 1-hour floor.
+async def _run_cleanup(client: Client) -> None:
+    db = DatabaseManager.get_db()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=_RETENTION_SECONDS)
-    stale = await db.get_stale_messages(older_than=cutoff)
+    
+    stale_cursor = db["message_tracker"].find({
+        "is_deleted": False,
+        "created_at": {"$lt": cutoff}
+    })
+    stale = await stale_cursor.to_list(length=None)
+
+    if not stale:
+        return
 
     log.info("[CLEANUP] Found %d stale message(s) to delete.", len(stale))
 
@@ -80,13 +64,12 @@ async def _run_cleanup(bot: Bot, db: Database) -> None:
 
         for msg_id in msg_ids:
             try:
-                await bot.delete_message(chat_id=user_id, message_id=msg_id)
+                await client.delete_messages(chat_id=user_id, message_ids=msg_id)
                 confirmed_deleted.append(msg_id)
                 total_deleted += 1
-            except TelegramBadRequest as exc:
+            except BadRequest as exc:
                 lowered = str(exc).lower()
                 if any(p in lowered for p in _ALREADY_DELETED):
-                    # Already gone — still remove from tracking table.
                     confirmed_deleted.append(msg_id)
                     total_deleted += 1
                 else:
@@ -105,7 +88,10 @@ async def _run_cleanup(bot: Bot, db: Database) -> None:
             await asyncio.sleep(0.05)
 
         if confirmed_deleted:
-            await db.mark_user_messages_deleted(user_id, confirmed_deleted)
+            await db["message_tracker"].update_many(
+                {"user_id": user_id, "message_id": {"$in": confirmed_deleted}},
+                {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc)}}
+            )
 
     log.info(
         "[CLEANUP] Done. Deleted=%d | Skipped=%d",
@@ -113,7 +99,7 @@ async def _run_cleanup(bot: Bot, db: Database) -> None:
     )
 
 
-async def message_cleanup_scheduler(bot: Bot, db: Database) -> None:
+async def message_cleanup_scheduler(client: Client) -> None:
     cutoff_repr = f"{_RETENTION_SECONDS}s"
     if _RETENTION_SECONDS >= 3600 and _RETENTION_SECONDS % 3600 == 0:
         cutoff_repr = f"{_RETENTION_SECONDS // 3600}h"
@@ -128,7 +114,7 @@ async def message_cleanup_scheduler(bot: Bot, db: Database) -> None:
     while True:
         try:
             await asyncio.sleep(_CHECK_INTERVAL)
-            await _run_cleanup(bot, db)
+            await _run_cleanup(client)
         except asyncio.CancelledError:
             log.info("[CLEANUP] Scheduler cancelled — shutting down.")
             break

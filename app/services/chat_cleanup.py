@@ -1,13 +1,12 @@
-# services/chat_cleanup.py
-
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
-from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
-from database.repository import Database
-from config import BotConfig
+from pyrogram import Client
+from pyrogram.errors import BadRequest
+
+from app.core.database import DatabaseManager
 
 log = logging.getLogger("chat_cleanup")
 
@@ -20,30 +19,44 @@ def _cleanup_interval_hours() -> int:
         return 12
 
 
-async def _wipe_user_dm(bot: Bot, db: Database, user_id: int) -> tuple[int, int]:
-    msg_ids = await db.get_tracked_message_ids(user_id)
-    if not msg_ids:
+async def _wipe_user_dm(client: Client, user_id: int) -> tuple[int, int]:
+    db = DatabaseManager.get_db()
+    
+    # Using direct Motor query
+    messages_cursor = db["message_tracker"].find({"user_id": user_id, "is_deleted": False})
+    messages = await messages_cursor.to_list(length=None)
+    
+    if not messages:
         return 0, 0
 
     deleted, failed = 0, 0
-    for msg_id in msg_ids:
-        try:
-            await bot.delete_message(chat_id=user_id, message_id=msg_id)
-            deleted += 1
-        except TelegramBadRequest:
-            failed += 1
-        except Exception as exc:
-            log.warning(
-                "[CLEANUP] Could not delete msg %d for user %d: %s",
-                msg_id, user_id, exc,
-            )
-            failed += 1
+    msg_ids = [m["message_id"] for m in messages]
+    
+    try:
+        await client.delete_messages(chat_id=user_id, message_ids=msg_ids)
+        deleted = len(msg_ids)
+    except Exception as exc:
+        log.warning(
+            "[CLEANUP] Bulk delete failed for user %d: %s. Trying individual...",
+            user_id, exc,
+        )
+        for msg_id in msg_ids:
+            try:
+                await client.delete_messages(chat_id=user_id, message_ids=msg_id)
+                deleted += 1
+            except BadRequest:
+                failed += 1
+            except Exception:
+                failed += 1
 
-    await db.clear_tracked_messages(user_id)
+    await db["message_tracker"].update_many(
+        {"user_id": user_id, "message_id": {"$in": msg_ids}},
+        {"$set": {"is_deleted": True, "deleted_at": datetime.now(timezone.utc)}}
+    )
     return deleted, failed
 
 
-async def chat_cleanup_loop(bot: Bot, db: Database, settings: BotConfig) -> None:
+async def chat_cleanup_loop(client: Client) -> None:
     interval_hours = _cleanup_interval_hours()
     interval_seconds = interval_hours * 3600
 
@@ -52,13 +65,15 @@ async def chat_cleanup_loop(bot: Bot, db: Database, settings: BotConfig) -> None
     while True:
         try:
             await asyncio.sleep(interval_seconds)
-
-            user_ids = await db.get_all_user_ids()
+            
+            db = DatabaseManager.get_db()
+            user_ids = await db["users"].distinct("_id")
+            
             total_deleted = 0
             total_users = 0
 
             for user_id in user_ids:
-                deleted, failed = await _wipe_user_dm(bot, db, user_id)
+                deleted, failed = await _wipe_user_dm(client, user_id)
                 if deleted or failed:
                     total_users += 1
                     total_deleted += deleted

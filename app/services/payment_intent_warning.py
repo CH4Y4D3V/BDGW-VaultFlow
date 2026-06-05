@@ -4,48 +4,46 @@ payment_intent_warning.py
 Shared helper: sends the anti-spam payment warning to user when payment intent
 is first armed.
 
-I18N FIX: removed hardcoded Bangla _PAYMENT_INTENT_WARNING string.
-Now uses get_text("intent_warning_initial", lang) where lang is fetched from DB.
-Falls back to "en" if DB is unavailable. English users no longer see Bangla.
+I18N FIX: All user-facing strings hardcoded to English per Spec v1.0.
 """
 
-from aiogram import Bot
-from locales import get_text, get_user_lang
-
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+from datetime import datetime, timezone
 
 async def send_intent_warning(
-    bot: Bot,
+    client: Client,
     user_id: int,
-    db=None,
 ) -> None:
     """
-    Send the payment intent warning message to the user in their stored language.
-
-    Call immediately after set_payment_intent() returns True (newly set).
-    The `db` parameter is required for language resolution and message tracking.
-    If db is None, defaults to English and skips tracking.
+    Send the payment intent warning message to the user.
     """
-    # Resolve language from DB — fallback to "en" if DB unavailable
-    lang = "en"
-    if db is not None:
-        try:
-            lang = (await get_user_lang(db, user_id)) or "en"
-        except Exception:
-            pass
-
-    warning_text = get_text("intent_warning_initial", lang)
+    warning_text = (
+        "⚠️ <b>Action Required: Payment Details Sent</b>\n\n"
+        "You have received payment details. You must complete your payment and submit "
+        "the TXID and screenshot within <b>20 minutes</b>.\n\n"
+        "Failure to do so will result in an <b>automatic permanent ban</b> to prevent spam."
+    )
 
     try:
-        msg = await bot.send_message(
+        msg = await client.send_message(
             chat_id=user_id,
             text=warning_text,
-            parse_mode="HTML",
+            parse_mode=ParseMode.HTML,
         )
+        
         # Track for cleanup when intent is cleared
-        if db is not None and msg is not None:
+        if msg:
+            from app.core.database import DatabaseManager
+            db = DatabaseManager.get_db()
             try:
-                await db.track_user_message(user_id, msg.message_id, "payment_intent")
+                await db["message_tracker"].insert_one({
+                    "user_id": user_id,
+                    "message_id": msg.id,
+                    "context": "payment_intent",
+                    "created_at": datetime.now(timezone.utc)
+                })
             except Exception:
                 pass
     except Exception:
-        pass  # Non-critical — the scheduler warnings still fire on their own
+        pass
