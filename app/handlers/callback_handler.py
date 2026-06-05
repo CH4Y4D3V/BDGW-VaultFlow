@@ -124,7 +124,7 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
             return
 
         moderator_id = callback.from_user.id
-        if not is_moderator(moderator_id):
+        if not await is_moderator(moderator_id):
             await callback.answer("⛔ Unauthorized.", show_alert=True)
             return
 
@@ -226,7 +226,7 @@ async def handle_mod_reject_reason_reply(
     Catches moderator's typed rejection reason and executes the reject flow.
     Section 14.5: Rejection reason is mandatory — cannot be skipped.
     """
-    if not message.from_user or not is_moderator(message.from_user.id):
+    if not message.from_user or not await is_moderator(message.from_user.id):
         return
 
     replied_to = message.reply_to_message

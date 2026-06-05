@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     DAILY_CAP_NSFW: int = 75
     DAILY_CAP_PREMIUM: int = 140
 
+    # ── Daily submission caps ─────────────────────────────────────────────────
+    PREMIUM_DAILY_SUBMISSION_LIMIT: int = 20
+    FREE_DAILY_SUBMISSION_LIMIT: int = 5
+
     # ── Runtime ───────────────────────────────────────────────────────────────
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"

@@ -142,7 +142,7 @@ async def handle_new_member_welcome(client: Client, update: ChatMemberUpdated) -
 
 @Client.on_message(filters.command("setwelcome") & (filters.group | filters.private))
 async def handle_set_welcome(client: Client, message: Message) -> None:
-    if not message.from_user or not is_moderator(message.from_user.id):
+    if not message.from_user or not await is_moderator(message.from_user.id):
         return
 
     parts = message.text.split(None, 1)
@@ -181,7 +181,7 @@ async def handle_set_welcome(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("delwelcome") & (filters.group | filters.private))
 async def handle_del_welcome(client: Client, message: Message) -> None:
-    if not message.from_user or not is_moderator(message.from_user.id):
+    if not message.from_user or not await is_moderator(message.from_user.id):
         return
 
     db = DatabaseManager.get_db()

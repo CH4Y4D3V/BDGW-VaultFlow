@@ -185,6 +185,14 @@ async def is_admin_or_owner(user_id: int) -> bool:
     return await has_role(user_id, Role.ADMIN)
 
 
+async def is_moderator(user_id: int) -> bool:
+    """
+    Legacy alias for is_admin_or_owner.
+    Required for backward compatibility in several handlers.
+    """
+    return await is_admin_or_owner(user_id)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Denial helper (FloodWait-safe)
 # ──────────────────────────────────────────────────────────────────────────────

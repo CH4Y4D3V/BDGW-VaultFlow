@@ -40,7 +40,7 @@ from app.core.database import DatabaseManager
 from app.core.hub_config import get_hub_config
 from app.core.redis_client import get_redis
 from app.moderation.verification_hub import forward_to_verification
-from app.repositories.user_topics_repo import user_topics_repo
+from app.services.topic_manager import get_topic_manager
 from app.services.audit_service import get_audit
 from app.services.submission_service import register_pending
 from app.services.subscription_service import SubscriptionService
@@ -947,13 +947,17 @@ async def _finalize_submission(
             )
 
         # ── Step 5: Resolve user's permanent topic ───────────────────────────────
-        # Canonical routing path per Section 9.2: user_topics_repo.get_or_create().
+        # Canonical routing path per Section 9.2: get_topic_manager().get_or_create_user_topic().
         # If topic creation fails, we proceed without a thread_id — the card will
         # land in the hub general feed rather than the user's dedicated topic.
         topic_id: Optional[int] = None
         try:
-            topic_id = await user_topics_repo.get_or_create(
-                client=client, user_id=user_id
+            topic_mgr = get_topic_manager()
+            topic_id = await topic_mgr.get_or_create_user_topic(
+                bot=client,
+                user_id=user_id,
+                full_name=first_msg.from_user.full_name if first_msg.from_user else None,
+                username=first_msg.from_user.username if first_msg.from_user else None,
             )
         except Exception as e:
             logger.warning(
@@ -1023,75 +1027,8 @@ async def _finalize_submission(
             )
             return
 
-        # ── Step 7: Post spec-compliant admin card with moderation buttons ────────
-        # Section 10.3 card format: From, User ID, Type, Hash, Time.
-        # Section 10.3 buttons: 🔞 Approve NSFW | ⭐ Approve Premium | ❌ Reject
-        sub_id_str = str(submission_id)
-
-        admin_card = (
-            "📤 <b>CONTENT SUBMISSION</b>\n\n"
-            f"<b>From</b>    : {user_full_name} ({user_username})\n"
-            f"<b>User ID</b> : <code>{user_id}</code>\n"
-            f"<b>Type</b>    : {content_type}\n"
-            f"<b>Hash</b>    : <code>{media_hash[:32]}…</code>\n"
-            f"<b>Time</b>    : {now.strftime('%Y-%m-%d %H:%M:%S UTC')}"
-        )
-        moderation_buttons = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔞 Approve NSFW",
-                    callback_data=f"submit:approve:nsfw:{sub_id_str}",
-                ),
-                InlineKeyboardButton(
-                    "⭐ Approve Premium",
-                    callback_data=f"submit:approve:premium:{sub_id_str}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ Reject",
-                    callback_data=f"submit:reject:{sub_id_str}",
-                ),
-            ],
-        ])
-
-        card_msg: Optional[Message] = None
-        if hub_id:
-            card_msg = await _send_hub_message(
-                client=client,
-                chat_id=hub_id,
-                text=admin_card,
-                thread_id=topic_id,
-                reply_markup=moderation_buttons,
-            )
-            if not card_msg:
-                logger.warning(
-                    "_finalize_submission: admin card send returned None",
-                    extra={
-                        "ctx_user_id": user_id,
-                        "ctx_submission_id": sub_id_str,
-                    },
-                )
-        else:
-            logger.warning(
-                "_finalize_submission: hub_supergroup_id missing in hub_config",
-                extra={"ctx_user_id": user_id},
-            )
-
-        # ── Step 8: Store hub card message_id in submission record (non-fatal) ───
-        if card_msg:
-            try:
-                await db["content_submissions"].update_one(
-                    {"_id": submission_id},
-                    {"$set": {"hub_card_message_id": card_msg.id}},
-                )
-            except Exception as e:
-                logger.warning(
-                    "_finalize_submission: hub_card_message_id update failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-                )
-
-        # ── Step 9: Register in pending registry (non-fatal) ─────────────────────
+        # ── Step 7: Register in pending registry (non-fatal) ─────────────────────
+        # This is CRITICAL: it links the moderation buttons to the buffered messages.
         try:
             await register_pending(user_id, messages)
         except Exception as e:
@@ -1100,7 +1037,7 @@ async def _finalize_submission(
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
 
-        # ── Step 10: Dual audit log — MongoDB + Admin Logs topic ─────────────────
+        # ── Step 8: Dual audit log — MongoDB + Admin Logs topic ─────────────────
         await _write_audit_and_admin_log(
             client=client,
             action="CONTENT_SUBMITTED",
@@ -1113,7 +1050,7 @@ async def _finalize_submission(
             },
         )
 
-        # ── Step 11: Notify user ──────────────────────────────────────────────────
+        # ── Step 9: Notify user ──────────────────────────────────────────────────
         await _safe_reply(
             first_msg,
             "✅ <b>Content Submitted!</b>\n\n"

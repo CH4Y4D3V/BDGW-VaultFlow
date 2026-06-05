@@ -469,7 +469,7 @@ async def handle_takedown_approve_callback(client: Client, callback: CallbackQue
     """
     from app.core.permissions import is_moderator
 
-    if not is_moderator(callback.from_user.id):
+    if not await is_moderator(callback.from_user.id):
         await callback.answer("⛔ Unauthorized.", show_alert=True)
         return
 
@@ -579,7 +579,7 @@ async def handle_takedown_reject_callback(client: Client, callback: CallbackQuer
     """
     from app.core.permissions import is_moderator
 
-    if not is_moderator(callback.from_user.id):
+    if not await is_moderator(callback.from_user.id):
         await callback.answer("⛔ Unauthorized.", show_alert=True)
         return
 

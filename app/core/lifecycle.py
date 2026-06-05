@@ -422,8 +422,8 @@ class AppLifecycle:
         # ── Step 3: Redis health check ─────────────────────────────────────
         redis_client = None
         try:
-            from app.core.redis import get_redis_client
-            redis_client = await get_redis_client()
+            from app.core.redis_client import RedisClient
+            redis_client = await RedisClient.get_client()
             pong = await redis_client.ping()
             if not pong:
                 raise ConnectionError("Redis ping returned falsy")
@@ -526,6 +526,12 @@ class AppLifecycle:
             ref_repo = ReferralRepository(DatabaseManager.get_db())
 
             try:
+                from app.repositories.admin_repository import AdminRepository
+                await AdminRepository().create_indexes()
+            except Exception as e:
+                logger.warning("lifecycle_admin_index_failed", extra={"ctx_error": str(e)})
+
+            try:
                 await ref_repo.create_indexes()
             except Exception as idx_err:
                 logger.error(
@@ -562,6 +568,14 @@ class AppLifecycle:
             from app.payments import get_payment_service
 
             payment_repo = PaymentRepository(DatabaseManager.get_db())
+            try:
+                await payment_repo.create_indexes()
+            except Exception as idx_err:
+                logger.error(
+                    "lifecycle_payment_index_failed",
+                    extra={"ctx_error": str(idx_err)},
+                )
+
             self._payment_timeout_monitor = PaymentTimeoutMonitor(payment_repo)
             bot_ref = self._bot
 

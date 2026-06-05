@@ -557,8 +557,8 @@ async def handle_support_accept(client: Client, callback: CallbackQuery) -> None
     lock_acquired = False
 
     try:
-        from app.core.redis import get_redis_client
-        redis_client = await get_redis_client()
+        from app.core.redis_client import RedisClient
+        redis_client = await RedisClient.get_client()
         lock_acquired = await redis_client.set(lock_key, "1", ex=30, nx=True)
     except Exception as exc:
         log.warning(

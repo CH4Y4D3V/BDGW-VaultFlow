@@ -802,7 +802,7 @@ async def handle_admin_send_details_click(client: Client, callback: CallbackQuer
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
-    if not is_moderator(admin_id):
+    if not await is_moderator(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
@@ -1028,7 +1028,7 @@ async def handle_admin_approve(client: Client, callback: CallbackQuery) -> None:
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
-    if not is_moderator(admin_id):
+    if not await is_moderator(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
@@ -1071,7 +1071,7 @@ async def handle_admin_reject(client: Client, callback: CallbackQuery) -> None:
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
-    if not is_moderator(admin_id):
+    if not await is_moderator(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
@@ -1098,7 +1098,7 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
     session_id = parts[4]
     admin_id = callback.from_user.id
 
-    if not is_moderator(admin_id):
+    if not await is_moderator(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
@@ -1128,7 +1128,7 @@ async def handle_rejection_custom_start(client: Client, callback: CallbackQuery)
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
-    if not is_moderator(admin_id):
+    if not await is_moderator(admin_id):
         await callback.answer("Unauthorized.", show_alert=True)
         return
 

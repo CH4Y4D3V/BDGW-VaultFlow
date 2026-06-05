@@ -437,6 +437,10 @@ async def handle_close_command(client: Client, message: Message) -> None:
         await message.reply_text("❌ No open support session found for this user.")
         return
 
+    # Trigger user-side message cleanup (Section 20 Rule 5)
+    from app.services.cleanup_service import get_cleanup_service
+    await get_cleanup_service().delete_user_support_history(target_id)
+
     await message.reply_text("✅ <b>Support Session Closed</b>", parse_mode=ParseMode.HTML)
 
     target_name, target_username = await _fetch_user_display(target_id)

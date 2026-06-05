@@ -266,11 +266,11 @@ async def forward_to_verification(
         [
             [
                 InlineKeyboardButton(
-                    "🔞 Approve NSFW",
+                    f"🔞 Approve {settings.NSFW_DISPLAY_NAME}",
                     callback_data=f"mod_app_nsfw:{submitter_user_id}:{first_msg_id}",
                 ),
                 InlineKeyboardButton(
-                    "⭐ Approve Premium",
+                    f"⭐ Approve {settings.PREMIUM_DISPLAY_NAME}",
                     callback_data=f"mod_app_prem:{submitter_user_id}:{first_msg_id}",
                 ),
             ],

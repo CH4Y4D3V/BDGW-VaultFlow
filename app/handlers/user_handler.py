@@ -937,19 +937,9 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             # The full multi-step FSM is handled by the submission handler
             # module.  Here we forward to the submission entry callback.
             try:
-                from app.handlers.submission_handler import handle_submission_entry
-                await handle_submission_entry(client, callback_query)
+                from app.handlers.submission_handler import handle_submit_menu
+                await handle_submit_menu(client, callback_query)
                 return
-            except ImportError:
-                # Submission handler not yet implemented; show placeholder.
-                text = (
-                    "📤 <b>Submit Content Anonymously</b>\n\n"
-                    "Content submission is coming soon.\n"
-                    "Please check back later."
-                )
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
-                ]])
             except Exception as e:
                 logger.exception(
                     "submission_entry_failed",

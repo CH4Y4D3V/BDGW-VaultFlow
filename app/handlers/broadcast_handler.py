@@ -70,12 +70,10 @@ from pyrogram.types import (
     Message,
 )
 
-from app.core.hub_config import get_hub_config
 from app.core.database import DatabaseManager
-from app.core.redis_lock import acquire_lock
+from app.distribution.lock_service import DistributedLockService
 from app.repositories.admin_repository import AdminRepository
 from app.services.audit_service import AuditService
-from pyrogram import filters as _f
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +399,8 @@ async def _emit_broadcast_completed_log(
     """
     # 1. Write to audit_logs collection
     try:
-        audit = AuditService()
+        from app.services.audit_service import get_audit
+        audit = get_audit()
         await audit.log(
             action="BROADCAST_SENT",
             performed_by=admin_user_id,
@@ -421,8 +420,10 @@ async def _emit_broadcast_completed_log(
 
     # 2. Post to Admin Logs topic
     try:
-        hub_sg_id = get_hub_config().get("hub_supergroup_id")
-        logs_topic_id = hub_config.get("admin_logs_topic_id")
+        from app.services.topic_manager import get_topic_manager
+        topic_mgr = get_topic_manager()
+        hub_sg_id = await topic_mgr._get_hub_config_int("hub_supergroup_id")
+        logs_topic_id = await topic_mgr._get_hub_config_int("admin_logs_topic_id")
 
         if not hub_sg_id or not logs_topic_id:
             logger.warning(
@@ -616,7 +617,8 @@ async def _execute_broadcast(
 
     # ── Step 2: Acquire global broadcast lock ─────────────────────────────────
     try:
-        async with acquire_lock(BROADCAST_LOCK_KEY, timeout=BROADCAST_LOCK_TTL_SECONDS):
+        lock_service = DistributedLockService()
+        async with lock_service.acquire(BROADCAST_LOCK_KEY, timeout=BROADCAST_LOCK_TTL_SECONDS):
             await _run_broadcast_loop(
                 client, admin_user_id, admin_name, session_id, session
             )
@@ -659,9 +661,9 @@ async def _run_broadcast_loop(
         session_id: Broadcast session ObjectId string.
         session: Session document dict from MongoDB.
     """
-    from app.repositories.users_repo import UsersRepository
+    from app.repositories.user_repository import UserRepository
 
-    users_repo = UsersRepository()
+    users_repo = UserRepository()
 
     # Fetch all non-banned user IDs
     try:
@@ -1265,18 +1267,19 @@ def register_handlers(app: Client) -> None:
     """
  
     async def _hub_check(_, __, message) -> bool:
-        from app.core.hub_config import get_hub_config
-        hub_id = get_hub_config().hub_supergroup_id
+        from app.services.topic_manager import get_topic_manager
+        topic_mgr = get_topic_manager()
+        hub_id = await topic_mgr._get_hub_config_int("hub_supergroup_id")
         return bool(message.chat and message.chat.id == hub_id)
 
-    hub_filter = _f.create(_hub_check)
+    hub_filter = filters.create(_hub_check)
 
     app.add_handler(
         MessageHandler(
             _handle_broadcast_command,
-            _f.command("broadcast") & hub_filter,
+            filters.command("broadcast") & hub_filter,
         )
-    ))
+    )
     app.add_handler(
         MessageHandler(
             _handle_broadcast_content,

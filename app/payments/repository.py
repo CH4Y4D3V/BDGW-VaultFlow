@@ -113,7 +113,7 @@ class PaymentRepository:
         doc = await self._topics_collection.find_one({"_id": topic_id})
         return doc["payment_id"] if doc else None
 
-    async def get_sessions_by_status(self, statuses: list) -> list:
+    async def get_sessions_by_statuses(self, statuses: list) -> list:
         """Fetch all payment sessions matching any of the given statuses."""
         status_values = [s.value if hasattr(s, "value") else str(s) for s in statuses]
         docs = await self._collection.find(

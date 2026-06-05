@@ -68,7 +68,7 @@ class RateLimiterService:
         cap = 0
         if str(target_id) == str(settings.NSFW_GROUP_ID):
             cap = settings.DAILY_CAP_NSFW
-        elif str(target_id) in [str(settings.PREMIUM_GROUP_ID), str(settings.PREMIUM_CHANNEL_ID)]:
+        elif str(target_id) in [str(settings.PREMIUM_GROUP_ID), str(getattr(settings, "PREMIUM_CHANNEL_ID", settings.PREMIUM_GROUP_ID))]:
             cap = settings.DAILY_CAP_PREMIUM
         
         if cap <= 0:

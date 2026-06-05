@@ -45,9 +45,9 @@ async def handle_ban_guard(client: Client, update: Message | CallbackQuery) -> N
     if not user_id:
         return
 
-    # Owner and sudo are never banned
+    # Owner and Admin are never banned
     from app.core.permissions import Role, has_role
-    if has_role(user_id, Role.SUDO):
+    if user_id == settings.OWNER_ID or await has_role(user_id, Role.ADMIN):
         return
 
     try:

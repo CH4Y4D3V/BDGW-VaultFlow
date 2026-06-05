@@ -175,8 +175,8 @@ class SubscriptionWorker:
             async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
                 try:
                     # Idempotency: re-fetch to confirm still needs transition
-                    fresh = await self._service.get_by_id(sub.subscription_id)
-                    if fresh is None or fresh.status != "active":
+                    fresh = await self._service.get_subscription(sub.user_id)
+                    if fresh is None or fresh.status.value != "ACTIVE":
                         continue
 
                     await self._service.set_grace(sub)
@@ -208,8 +208,8 @@ class SubscriptionWorker:
             async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
                 try:
                     # Idempotency: re-fetch to confirm still needs transition
-                    fresh = await self._service.get_by_id(sub.subscription_id)
-                    if fresh is None or fresh.status != "grace":
+                    fresh = await self._service.get_subscription(sub.user_id)
+                    if fresh is None or fresh.status.value != "GRACE":
                         continue
 
                     await self._service.expire(sub)
@@ -314,9 +314,9 @@ class SubscriptionWorker:
 
         # ── 7-day reminder ──────────────────────────────────────────────────
         subs_7d = await col.find({
-            "status": "active",
+            "status": "ACTIVE",
             "expires_at": {"$gte": now, "$lte": now + timedelta(days=7)},
-            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
             "reminder_7d_sent": {"$ne": True},
         }).to_list(length=None)
 
@@ -330,7 +330,7 @@ class SubscriptionWorker:
                 # Re-check inside lock to prevent races
                 still_pending = await col.find_one({
                     "user_id": user_id,
-                    "status": "active",
+                    "status": "ACTIVE",
                     "reminder_7d_sent": {"$ne": True},
                 })
                 if not still_pending:
@@ -363,12 +363,12 @@ class SubscriptionWorker:
 
         # ── 3-day reminder ──────────────────────────────────────────────────
         subs_3d = await col.find({
-            "status": "active",
+            "status": "ACTIVE",
             "expires_at": {
                 "$gte": now + timedelta(days=2, hours=12),
                 "$lte": now + timedelta(days=3, hours=12),
             },
-            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
             "reminder_3d_sent": {"$ne": True},
         }).to_list(length=None)
 
@@ -381,7 +381,7 @@ class SubscriptionWorker:
             async with _redis_lock(lock_key, ttl=60):
                 still_pending = await col.find_one({
                     "user_id": user_id,
-                    "status": "active",
+                    "status": "ACTIVE",
                     "reminder_3d_sent": {"$ne": True},
                 })
                 if not still_pending:
@@ -398,7 +398,7 @@ class SubscriptionWorker:
                         "Contact an admin to resubscribe.",
                     )
                     await col.update_one(
-                        {"user_id": user_id, "status": "active"},
+                        {"user_id": user_id, "status": "ACTIVE"},
                         {"$set": {"reminder_3d_sent": True}},
                     )
                     logger.info(
@@ -474,7 +474,7 @@ class SubscriptionWorker:
 
         # Check expired users still in chats
         expired_subs = await sub_col.find(
-            {"status": {"$in": ["expired", "cancelled"]}}
+            {"status": {"$in": ["EXPIRED", "CANCELLED"]}}
         ).to_list(length=None)
 
         for sub_doc in expired_subs:
