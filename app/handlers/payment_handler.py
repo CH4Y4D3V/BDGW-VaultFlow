@@ -26,10 +26,9 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
-from pyrogram import Client, ContinuePropagation, filters
+from pyrogram import Client, ContinuePropagation, StopPropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
-from pyrogram.handlers.handler import StopPropagation
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
