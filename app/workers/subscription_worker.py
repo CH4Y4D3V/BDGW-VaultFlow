@@ -223,6 +223,17 @@ class SubscriptionWorker:
             "reminder_3d_sent": {"$ne": True},
         }).to_list(length=None)
 
+        # ── 3-day reminder #2 (window: -0.5d → +0.5d) ────────────────────────
+        # RC-11 fix: second window for the 3-day reminder to catch late-entries.
+        subs_3d_v2 = await col.find({
+            "status": "active",
+            "expires_at": {"$gte": now - timedelta(hours=12), "$lte": now + timedelta(hours=12)},
+            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "reminder_3d_sent": {"$ne": True},
+        }).to_list(length=None)
+        
+        subs_3d.extend(subs_3d_v2)
+
         for sub_doc in subs_3d:
             user_id = sub_doc["user_id"]
             expires_at = sub_doc.get("expires_at")

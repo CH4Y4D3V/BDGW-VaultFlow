@@ -1,21 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
-
-
-class PaymentStatus(str, Enum):
-    WAITING_PAYMENT_DETAILS = "WAITING_PAYMENT_DETAILS"
-    AWAITING_PAYMENT = "AWAITING_PAYMENT"
-    WAITING_TXID = "WAITING_TXID"
-    UNDER_REVIEW = "UNDER_REVIEW"
-    APPROVED = "APPROVED"
-    REJECTED = "REJECTED"
-    EXPIRED = "EXPIRED"
-    CANCELLED = "CANCELLED"
-    PROCESSING = "PROCESSING"
+from app.payments.models import PaymentStatus
 
 
 class PaymentSession(BaseModel):

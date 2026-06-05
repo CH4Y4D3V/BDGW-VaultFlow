@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
+from bson import ObjectId
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
@@ -354,7 +355,7 @@ async def handle_takedown_approve_callback(client: Client, callback: CallbackQue
 
     try:
         db = DatabaseManager.get_db()
-        record = await db["takedown_requests"].find_one({"_id": record_id})
+        record = await db["takedown_requests"].find_one({"_id": ObjectId(record_id)})
         if not record:
             await callback.answer("Record not found.", show_alert=True)
             return
@@ -469,7 +470,7 @@ async def handle_takedown_reject_reason(client: Client, message: Message) -> Non
         db = DatabaseManager.get_db()
         now = datetime.now(timezone.utc)
         record = await db["takedown_requests"].find_one_and_update(
-            {"_id": record_id, "status": "pending"},
+            {"_id": ObjectId(record_id), "status": "pending"},
             {
                 "$set": {
                     "status": "rejected",

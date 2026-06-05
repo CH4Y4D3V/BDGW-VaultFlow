@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import random
 import shutil
 import uuid
 from pathlib import Path
@@ -82,13 +83,13 @@ class FFmpegProcessor:
                 logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
                 
                 # ── ROTATION ──
-                if settings.WATERMARK_ROTATION != 0:
-                    logo = logo.rotate(settings.WATERMARK_ROTATION, expand=True)
+                rotation = config.get("rotation", settings.WATERMARK_ROTATION)
+                if rotation != 0:
+                    logo = logo.rotate(rotation, expand=True)
                     # Recalculate size after rotation if it expanded
                     logo_w, logo_h = logo.size
 
                 # ── RANDOM POSITION ──
-                import random
                 margin = 20
                 positions = {
                     "TOP_LEFT": (margin, margin),
@@ -97,7 +98,7 @@ class FFmpegProcessor:
                     "BOTTOM_RIGHT": (base.width - logo_w - margin, base.height - logo_h - margin),
                     "CENTER": ((base.width - logo_w) // 2, (base.height - logo_h) // 2)
                 }
-                                pos = positions[config.get("position", random.choice(list(positions.keys())))]
+                pos = positions[config.get("position", random.choice(list(positions.keys())))]
                 
                 # ── OPACITY 0.9 ──
                 opacity = 0.9
@@ -144,7 +145,7 @@ class FFmpegProcessor:
         offset_y2 = random.randint(20, 100)
         
         # Corner selection for pos1
-                corner1 = config.get("position", random.choice(["TL", "TR", "BL", "BR", "C"]))
+        corner1 = config.get("position", random.choice(["TL", "TR", "BL", "BR", "C"]))
         if corner1 == "TL": pos1 = f"x={offset_x1}:y={offset_y1}"
         elif corner1 == "TR": pos1 = f"x=w-text_w-{offset_x1}:y={offset_y1}"
         elif corner1 == "BL": pos1 = f"x={offset_x1}:y=h-text_h-{offset_y1}"

@@ -589,10 +589,20 @@ async def execute_approve(
         from app.repositories.activity_repository import ActivityRepository
         from app.models.activity import ActivityAction
         activity_repo = ActivityRepository()
+        
+        # FIX: Resolve content_id correctly for audit
+        ref_msg = messages[0] if messages else None
+        if ref_msg:
+            media = getattr(ref_msg, str(ref_msg.media.value), None) if ref_msg.media else None
+            file_unique_id = getattr(media, "file_unique_id", None) if media else None
+            audit_content_id = _generate_content_id(ref_msg.chat.id, ref_msg.id, file_unique_id)
+        else:
+            audit_content_id = "unknown"
+
         await activity_repo.log_activity(
             user_id=submitter_user_id,
             action=ActivityAction.UPLOAD,
-            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+            metadata={"content_id": audit_content_id}
         )
     except Exception:
         pass
@@ -708,10 +718,20 @@ async def execute_queue(
         from app.repositories.activity_repository import ActivityRepository
         from app.models.activity import ActivityAction
         activity_repo = ActivityRepository()
+        
+        # FIX: Resolve content_id correctly for audit
+        ref_msg = messages[0] if messages else None
+        if ref_msg:
+            media = getattr(ref_msg, str(ref_msg.media.value), None) if ref_msg.media else None
+            file_unique_id = getattr(media, "file_unique_id", None) if media else None
+            audit_content_id = _generate_content_id(ref_msg.chat.id, ref_msg.id, file_unique_id)
+        else:
+            audit_content_id = "unknown"
+
         await activity_repo.log_activity(
             user_id=submitter_user_id,
             action=ActivityAction.UPLOAD,
-            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+            metadata={"content_id": audit_content_id}
         )
     except Exception:
         pass
@@ -819,10 +839,20 @@ async def execute_reject(
         from app.repositories.activity_repository import ActivityRepository
         from app.models.activity import ActivityAction
         activity_repo = ActivityRepository()
+        
+        # FIX: Resolve content_id correctly for audit
+        ref_msg = messages[0] if messages else None
+        if ref_msg:
+            media = getattr(ref_msg, str(ref_msg.media.value), None) if ref_msg.media else None
+            file_unique_id = getattr(media, "file_unique_id", None) if media else None
+            audit_content_id = _generate_content_id(ref_msg.chat.id, ref_msg.id, file_unique_id)
+        else:
+            audit_content_id = "unknown"
+
         await activity_repo.log_activity(
             user_id=submitter_user_id,
             action=ActivityAction.UPLOAD,
-            metadata={"content_id": content_id if 'content_id' in locals() else "unknown"}
+            metadata={"content_id": audit_content_id}
         )
     except Exception:
         pass

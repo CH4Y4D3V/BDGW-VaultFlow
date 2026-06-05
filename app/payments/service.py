@@ -125,6 +125,20 @@ class PaymentService:
     async def get_session(self, payment_id: str) -> Optional[PaymentSession]:
         return await self.repository.get_session(payment_id)
 
+    async def check_txid_unique(self, txid: str) -> bool:
+        """
+        FIX 9: Verify TxID is not already in use.
+        """
+        try:
+            from app.repositories.txid_repository import TXIDRepository
+            from app.core.database import DatabaseManager
+            repo = TXIDRepository(DatabaseManager.get_db())
+            existing = await repo.get_by_txid(txid)
+            return existing is None
+        except Exception as e:
+            logger.error("txid_uniqueness_check_failed", extra={"ctx_error": str(e)})
+            return True # Fail open to allow payment but log error
+
     async def get_active_session(self, user_id: int) -> Optional[PaymentSession]:
         return await self.repository.get_active_session(user_id)
 
