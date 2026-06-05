@@ -319,17 +319,45 @@ class TopicManager:
 
         raise RuntimeError(f"Failed to create forum topic: {title}")
 
+    async def get_or_create_shared_topic(self, client: Client, key: str, title: str) -> int:
+        """Get or create a shared forum topic (e.g. Admin Logs)."""
+        db = DatabaseManager.get_db()
+        config_col = db["bot_config"]
+        
+        doc = await config_col.find_one({"_id": f"topic:{key}"})
+        if doc:
+            return int(doc["topic_id"])
+
+        async with self._lock:
+            # Double check
+            doc = await config_col.find_one({"_id": f"topic:{key}"})
+            if doc:
+                return int(doc["topic_id"])
+
+            topic_id = await self._create_telegram_topic(client, title)
+            
+            await config_col.update_one(
+                {"_id": f"topic:{key}"},
+                {"$set": {"topic_id": topic_id, "title": title, "updated_at": datetime.now(timezone.utc)}},
+                upsert=True
+            )
+            
+            # Update settings object for immediate use in this process
+            if key == "admin_logs":
+                settings.HUB_TOPIC_ADMIN_LOGS = topic_id
+                
+            return topic_id
+
+    async def ensure_shared_topics(self, client: Client) -> None:
+        """Called on startup to ensure system topics exist."""
+        await self.get_or_create_shared_topic(client, "admin_logs", "📜 Admin Logs")
+
     # Compatibility shims for legacy calls
     async def get_or_create_payments_topic(self, client, payment_id, user_id):
         return await self.get_or_create_user_topic(client, user_id)
 
-    async def get_or_create_shared_topic(self, client, key, title):
-        # Shared topics (Audit, Log, etc.) still need separate IDs if requested,
-        # but the prompt says DO NOT create separate topics for Payments, Support, etc.
-        # We'll just return a single Hub topic or specific ID from settings if it's not user-centric.
-        # Actually, let's just use the Hub general chat (id 1 or 0) or specific settings.
-        return 0 
-
+    async def get_or_create_shared_topic_legacy(self, client, key, title):
+        return await self.get_or_create_shared_topic(client, key, title)
 _topic_manager: Optional[TopicManager] = None
 
 def get_topic_manager() -> TopicManager:

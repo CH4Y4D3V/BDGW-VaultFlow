@@ -268,6 +268,40 @@ class PaymentService:
             await self.repository.clear_timeout(payment_id)
 
             await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
+
+            # ── ROUTE TO USER TOPIC ──
+            try:
+                from app.services.topic_manager import get_topic_manager
+                topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
+                
+                await client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=(
+                        f"✅ <b>PAYMENT APPROVED</b>\n\n"
+                        f"<b>Amount:</b> {session.locked_amount} {session.currency}\n"
+                        f"<b>Plan:</b> {plan['label']}\n"
+                        f"<b>Admin:</b> {admin_id}"
+                    ),
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+            # ── LOG TO ADMIN LOGS ──
+            try:
+                from app.services.admin_logger import get_admin_logger
+                await get_admin_logger().log(
+                    client=client,
+                    action="PAYMENT APPROVED",
+                    admin_id=admin_id,
+                    admin_name=f"Admin {admin_id}",
+                    target_user_id=session.user_id,
+                    details=f"Plan: {plan['label']}\nAmount: {session.locked_amount} {session.currency}"
+                )
+            except Exception:
+                pass
+
             return True
 
         except Exception as e:
@@ -315,6 +349,20 @@ class PaymentService:
             await db["user_topics"].update_one(
                 {"user_id": session.user_id},
                 {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc)}}
+            )
+        except Exception:
+            pass
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="PAYMENT REJECTED",
+                admin_id=admin_id,
+                admin_name=f"Admin {admin_id}",
+                target_user_id=session.user_id,
+                details=f"Reason: {reason}"
             )
         except Exception:
             pass

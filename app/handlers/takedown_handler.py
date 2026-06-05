@@ -369,7 +369,23 @@ async def handle_takedown_approve_callback(client: Client, callback: CallbackQue
             reviewed_by=callback.from_user.id,
         )
 
+        admin_id = callback.from_user.id
         admin_name = callback.from_user.first_name or "Admin"
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="TAKEDOWN APPROVED",
+                admin_id=admin_id,
+                admin_name=admin_name,
+                target_user_id=user_id,
+                details=f"Content ID: {content_id}"
+            )
+        except Exception:
+            pass
+
         suffix = f"\n\n✅ <b>Approved & deleted by {admin_name}</b>"
         try:
             msg = callback.message
@@ -568,4 +584,4 @@ async def handle_takedown_reject_reason(client: Client, message: Message) -> Non
             extra={"ctx_record_id": record_id, "ctx_error": str(e)},
             exc_info=True,
         )
-        await message.reply_text("⚠️ Error processing rejection.")("⚠️ Error processing rejection.")
+        await message.reply_text("⚠️ Error processing rejection.")

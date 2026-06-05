@@ -37,8 +37,33 @@ class SupportService:
                 client, user_id
             )
             
-            # Send context header if it's the start of a support interaction
-            # (Optional, but helps admins know it's a support message)
+            # ── ROUTE HEADER TO USER TOPIC ──
+            try:
+                user_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
+                msg_text = message.text or message.caption or "-"
+                if len(msg_text) > 100:
+                    msg_text = msg_text[:97] + "..."
+
+                await client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=(
+                        f"📩 <b>SUPPORT MESSAGE</b>\n\n"
+                        f"<b>User:</b> {user_name}\n"
+                        f"<b>Message:</b> {msg_text}"
+                    ),
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML
+                )
+
+                # Audit log
+                from app.services.audit_service import get_audit
+                await get_audit().log(
+                    action="SUPPORT_MESSAGE",
+                    performed_by=user_id,
+                    target_user_id=user_id
+                )
+            except Exception:
+                pass
             
             # Forward the message to the topic
             await client.copy_message(

@@ -370,6 +370,35 @@ async def _finalize_submission(
         )
 
         if success:
+            # ── ROUTE HEADER TO USER TOPIC ──
+            try:
+                media_count = len(messages)
+                caption = first_msg.caption or first_msg.text or "-"
+                if len(caption) > 100:
+                    caption = caption[:97] + "..."
+                
+                await client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=(
+                        f"📥 <b>CONTENT SUBMITTED</b>\n\n"
+                        f"<b>Media Count:</b> {media_count}\n"
+                        f"<b>Caption:</b> {caption}"
+                    ),
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                # Audit log
+                from app.services.audit_service import get_audit
+                await get_audit().log(
+                    action="CONTENT_SUBMITTED",
+                    performed_by=user_id,
+                    target_user_id=user_id,
+                    details={"media_count": media_count}
+                )
+            except Exception:
+                pass
+
             # FIX GAP 5: pending registry keyed by ORIGINAL first message ID
             await register_pending(user_id, messages)
             await _safe_reply(

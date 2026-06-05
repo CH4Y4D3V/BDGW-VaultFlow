@@ -831,6 +831,20 @@ async def execute_reject(
     except Exception as e:
         logger.warning("Failed to route rejection to user topic", extra={"ctx_error": str(e)})
 
+    # ── LOG TO ADMIN LOGS ──
+    try:
+        from app.services.admin_logger import get_admin_logger
+        await get_admin_logger().log(
+            client=client,
+            action="CONTENT REJECTED",
+            admin_id=moderator_id,
+            admin_name=moderator_name,
+            target_user_id=submitter_user_id,
+            details=f"Reason: {reason}"
+        )
+    except Exception:
+        pass
+
     await safe_edit_message(
         client,
         mod_card_chat_id,

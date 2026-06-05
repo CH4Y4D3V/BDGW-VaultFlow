@@ -132,13 +132,7 @@ class Settings(BaseSettings):
     WATERMARK_ROTATION: int = 0
 
     # ── Verification Hub Topics ───────────────────────────────────────────────
-    HUB_TOPIC_PAYMENTS: int = 0
-    HUB_TOPIC_CONTENT_REVIEW: int = 0
-    HUB_TOPIC_SUPPORT: int = 0
-    HUB_TOPIC_TAKEDOWN: int = 0
-    HUB_TOPIC_USER_MOD: int = 0
-    HUB_TOPIC_BROADCASTS: int = 0
-    HUB_TOPIC_AUDIT: int = 0
+    HUB_TOPIC_ADMIN_LOGS: int = 0
 
     # ── Vault ─────────────────────────────────────────────────────────────────
     VAULT_IMMUTABLE: bool = True

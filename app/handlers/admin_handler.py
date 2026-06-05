@@ -260,6 +260,36 @@ async def handle_ban_command(client: Client, message: Message) -> None:
         user_repo = UserRepository()
         await user_repo.ban_user(target_id, reason)
 
+        admin_id = message.from_user.id
+        admin_name = message.from_user.first_name or "Admin"
+
+        # ── LOG TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, target_id)
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=f"🚫 <b>USER BANNED</b>\n\n<b>Admin:</b> {admin_name}\n<b>Reason:</b> {reason}",
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="USER BANNED",
+                admin_id=admin_id,
+                admin_name=admin_name,
+                target_user_id=target_id,
+                details=f"Reason: {reason}"
+            )
+        except Exception:
+            pass
+
         await message.reply_text(
             f"🚫 User <code>{target_id}</code> has been permanently banned.\n"
             f"Reason: {reason}",
@@ -316,6 +346,36 @@ async def handle_mute_command(client: Client, message: Message) -> None:
                 }
             },
         )
+
+        admin_id = message.from_user.id
+        admin_name = message.from_user.first_name or "Admin"
+
+        # ── LOG TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, target_id)
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=f"🔇 <b>USER MUTED</b>\n\n<b>Admin:</b> {admin_name}",
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="USER MUTED",
+                admin_id=admin_id,
+                admin_name=admin_name,
+                target_user_id=target_id
+            )
+        except Exception:
+            pass
+
         await message.reply_text(f"🔇 User <code>{target_id}</code> has been muted (silent).", parse_mode=ParseMode.HTML)
     except Exception as e:
         await message.reply_text(f"❌ Error: {e}")
@@ -338,6 +398,35 @@ async def handle_unmute_command(client: Client, message: Message) -> None:
             {"_id": target_id},
             {"$set": {"is_muted": False, "unmuted_at": datetime.now(timezone.utc)}}
         )
+
+        admin_id = message.from_user.id
+        admin_name = message.from_user.first_name or "Admin"
+
+        # ── LOG TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, target_id)
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=f"🔊 <b>USER UNMUTED</b>\n\n<b>Admin:</b> {admin_name}",
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="USER UNMUTED",
+                admin_id=admin_id,
+                admin_name=admin_name,
+                target_user_id=target_id
+            )
+        except Exception:
+            pass
 
         await message.reply_text(f"🔊 User <code>{target_id}</code> unmuted.", parse_mode=ParseMode.HTML)
     except Exception as e:
@@ -381,6 +470,36 @@ async def handle_warn_command(client: Client, message: Message) -> None:
             },
             upsert=True,
         )
+
+        admin_id = message.from_user.id
+        admin_name = message.from_user.first_name or "Admin"
+
+        # ── LOG TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, target_id)
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=f"⚠️ <b>USER WARNED</b>\n\n<b>Admin:</b> {admin_name}\n<b>Reason:</b> {reason}",
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+        # ── LOG TO ADMIN LOGS ──
+        try:
+            from app.services.admin_logger import get_admin_logger
+            await get_admin_logger().log(
+                client=client,
+                action="USER WARNED",
+                admin_id=admin_id,
+                admin_name=admin_name,
+                target_user_id=target_id,
+                details=f"Reason: {reason}"
+            )
+        except Exception:
+            pass
 
         await message.reply_text(f"✅ Warning logged for <code>{target_id}</code>.", parse_mode=ParseMode.HTML)
         try:

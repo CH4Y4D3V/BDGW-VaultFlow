@@ -109,10 +109,14 @@ class AppLifecycle:
                 from app.services.topic_manager import get_topic_manager
                 topic_manager = get_topic_manager()
                 await topic_manager.restore_cache()
-                logger.info("lifecycle_topic_cache_restored")
+                
+                # Ensure "Admin Logs" and other shared topics exist
+                await topic_manager.ensure_shared_topics(self._bot)
+                
+                logger.info("lifecycle_topic_cache_restored_and_shared_topics_ensured")
             except Exception as e:
                 logger.warning(
-                    "lifecycle_topic_cache_restore_failed",
+                    "lifecycle_topic_initialization_failed",
                     extra={"ctx_error": str(e)}
                 )
 

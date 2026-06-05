@@ -503,6 +503,34 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             parse_mode=ParseMode.HTML,
         )
 
+        # ── ROUTE HEADER TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, user_id)
+            
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=(
+                    f"💳 <b>PAYMENT SUBMITTED</b>\n\n"
+                    f"<b>Amount:</b> {session.locked_amount} {session.currency}\n"
+                    f"<b>Method:</b> {session.payment_method or 'N/A'}\n"
+                    f"<b>Transaction:</b> <code>{session.txid or 'N/A'}</code>"
+                ),
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Audit log
+            from app.services.audit_service import get_audit
+            await get_audit().log(
+                action="PAYMENT_SUBMITTED",
+                performed_by=user_id,
+                target_user_id=user_id,
+                details={"amount": session.locked_amount, "method": session.payment_method}
+            )
+        except Exception:
+            pass
+
         await _post_proof_card(
             client=client,
             session_id=session.id,
