@@ -1,11 +1,35 @@
 from __future__ import annotations
 
+"""
+payment_handler.py
+──────────────────
+Handles the full payment lifecycle for BDGW VaultFlow:
+
+  User flow:   premium menu → plan select → method select → wait for admin
+               details → submit TXID → submit screenshot → under review
+  Admin flow:  send details (FSM) → approve / reject (with reason choices)
+
+Spec ref: §7.3 — Admin manually sends payment number; bot confirms delivery
+          THEN starts the 20-minute timer.
+
+Key invariants enforced here:
+  • FSM admin states are backed by MongoDB (payment_admin_states collection)
+    so they survive bot restarts.
+  • Status transitions are written to MongoDB BEFORE any Telegram message is
+    sent (restart-safe ordering).
+  • Every Telegram call has explicit FloodWait handling via _tg_send().
+  • StopPropagation is never swallowed by a generic except clause.
+  • Cancellation refunds points, mirrors the expiry path.
+"""
+
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional
 
 from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
+from pyrogram.handlers.handler import StopPropagation
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -22,23 +46,99 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Admin FSM state tracking (in-memory, restart-recovered separately) ────────
-# Key: admin_id → {"session_id": str, "step": str, "card_message_id": int}
-_admin_states: dict[int, dict] = {}
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_MAX_FLOOD_WAIT = 30  # cap FloodWait sleeps at 30 s inside handlers
+
+# Statuses that allow user-initiated cancellation
+_CANCELLABLE_STATUSES = {
+    PaymentStatus.WAITING_PAYMENT_DETAILS,
+    PaymentStatus.WAITING_TXID,
+    PaymentStatus.WAITING_SCREENSHOT,
+}
+
+
+# ── Telegram send wrapper ─────────────────────────────────────────────────────
+
+async def _tg_send(coro) -> Optional[object]:
+    """
+    Execute a Telegram API coroutine with one FloodWait retry.
+
+    Returns the result on success, None on any failure. All exceptions
+    are logged. StopPropagation and ContinuePropagation are re-raised
+    so Pyrogram's handler chain is never silently broken.
+    """
+    try:
+        return await coro
+    except (StopPropagation, ContinuePropagation):
+        raise
+    except FloodWait as exc:
+        wait = min(exc.value, _MAX_FLOOD_WAIT)
+        logger.warning("FloodWait %ds — retrying", wait)
+        await asyncio.sleep(wait)
+        try:
+            return await coro
+        except Exception as retry_exc:
+            logger.warning("Retry after FloodWait failed: %s", retry_exc)
+            return None
+    except Exception as exc:
+        logger.warning("Telegram call failed: %s", exc)
+        return None
+
+
+# ── Admin FSM — MongoDB-backed ────────────────────────────────────────────────
+
+async def _fsm_set(admin_id: int, state: dict) -> None:
+    """
+    Persist admin FSM state to MongoDB.
+
+    Upserts into ``payment_admin_states`` keyed by admin_id.
+    Called before any Telegram interaction so the state survives restarts.
+    """
+    service = get_payment_service()
+    col = service.repository._db["payment_admin_states"]
+    await col.update_one(
+        {"_id": admin_id},
+        {"$set": {"state": state, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+
+
+async def _fsm_get(admin_id: int) -> Optional[dict]:
+    """Retrieve admin FSM state from MongoDB. Returns None if not found."""
+    service = get_payment_service()
+    col = service.repository._db["payment_admin_states"]
+    doc = await col.find_one({"_id": admin_id})
+    return doc["state"] if doc else None
+
+
+async def _fsm_clear(admin_id: int) -> None:
+    """Remove admin FSM state from MongoDB."""
+    service = get_payment_service()
+    col = service.repository._db["payment_admin_states"]
+    await col.delete_one({"_id": admin_id})
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 async def _get_payments_topic(client: Client, user_id: int) -> Optional[int]:
+    """
+    Resolve (or create) the user's permanent topic in the Verification Hub.
+
+    Returns the thread_id, or None if topic resolution fails. Failures are
+    logged but do not raise — callers should degrade gracefully.
+    """
     try:
         from app.services.topic_manager import get_topic_manager
         topic_manager = get_topic_manager()
         topic_id = await topic_manager.get_or_create_user_topic(client, user_id)
         if topic_id:
             return topic_id
-    except Exception as e:
-        logger.error("Failed to get user topic for payment", extra={"ctx_error": str(e)})
-
+    except Exception as exc:
+        logger.error(
+            "Failed to get user topic for payment",
+            extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
+        )
     return None
 
 
@@ -50,7 +150,13 @@ async def _post_payment_request_card(
     amount: float,
     method: str,
 ) -> None:
-    """Post initial request card in user topic — admin must click to send details."""
+    """
+    Post the initial payment request card in the user's Verification Hub topic.
+
+    The card contains a "Send Payment Details" button that enters the admin
+    into the send_details FSM step. Persists topic_id on the session for
+    subsequent card operations.
+    """
     topic_id = await _get_payments_topic(client, user_id)
     plan = PLANS.get(plan_id, {})
 
@@ -70,25 +176,28 @@ async def _post_payment_request_card(
         )
     ]])
 
-    try:
-        await client.send_message(
+    result = await _tg_send(
+        client.send_message(
             chat_id=settings.VERIFICATION_GROUP_ID,
             text=text,
             reply_markup=buttons,
             parse_mode=ParseMode.HTML,
             message_thread_id=topic_id,
         )
-        # Persist topic_id on session for later proof card
-        service = get_payment_service()
-        session = await service.get_session(session_id)
-        if session and topic_id:
-            session.topic_id = topic_id
-            await service.repository.save_session(session)
-    except Exception as e:
-        logger.error(
-            "Failed to post payment request card",
-            extra={"ctx_session": session_id, "ctx_error": str(e)},
-        )
+    )
+
+    if result and topic_id:
+        try:
+            service = get_payment_service()
+            session = await service.get_session(session_id)
+            if session:
+                session.topic_id = topic_id
+                await service.repository.save_session(session)
+        except Exception as exc:
+            logger.error(
+                "Failed to persist topic_id on session",
+                extra={"ctx_session": session_id, "ctx_error": str(exc)},
+            )
 
 
 async def _post_proof_card(
@@ -99,15 +208,24 @@ async def _post_proof_card(
     file_id: Optional[str],
     topic_id: Optional[int],
 ) -> None:
-    """Post payment proof card in admin hub with Approve/Reject buttons."""
+    """
+    Post the payment proof card in the admin hub with Approve/Reject buttons.
+
+    Falls back to resolving topic_id from the topic manager if not provided.
+    Uses send_photo when a screenshot file_id is available, otherwise sends
+    a plain text card.
+    """
     service = get_payment_service()
     session = await service.get_session(session_id)
     if not session:
+        logger.warning(
+            "Cannot post proof card — session not found",
+            extra={"ctx_session": session_id},
+        )
         return
 
-    # Ensure topic_id fallback if not provided/persisted
     if not topic_id:
-        topic_id = await _get_payments_topic(client)
+        topic_id = await _get_payments_topic(client, user_id)
 
     plan = PLANS.get(session.plan_id, {})
     caption = (
@@ -124,9 +242,9 @@ async def _post_proof_card(
         InlineKeyboardButton("❌ Reject", callback_data=f"pay:admin:reject:{session_id}"),
     ]])
 
-    try:
-        if file_id:
-            await client.send_photo(
+    if file_id:
+        await _tg_send(
+            client.send_photo(
                 chat_id=settings.VERIFICATION_GROUP_ID,
                 photo=file_id,
                 caption=caption,
@@ -134,18 +252,16 @@ async def _post_proof_card(
                 parse_mode=ParseMode.HTML,
                 message_thread_id=topic_id,
             )
-        else:
-            await client.send_message(
+        )
+    else:
+        await _tg_send(
+            client.send_message(
                 chat_id=settings.VERIFICATION_GROUP_ID,
                 text=caption,
                 reply_markup=buttons,
                 parse_mode=ParseMode.HTML,
                 message_thread_id=topic_id,
             )
-    except Exception as e:
-        logger.error(
-            "Failed to post proof card",
-            extra={"ctx_session": session_id, "ctx_error": str(e)},
         )
 
 
@@ -156,6 +272,13 @@ async def _execute_rejection(
     admin_id: int,
     card_message: Optional[Message] = None,
 ) -> bool:
+    """
+    Execute a payment rejection: update session status, edit the admin card,
+    and notify the user.
+
+    Returns True if the rejection was applied; False if the session was already
+    processed (idempotency guard in service layer).
+    """
     service = get_payment_service()
     success = await service.reject_payment(client, session_id, reason, admin_id)
     if not success:
@@ -167,27 +290,28 @@ async def _execute_rejection(
 
     session = await service.get_session(session_id)
 
-    # Edit admin card
+    # Edit the admin proof card to reflect rejection
     if card_message:
-        try:
-            suffix = f"\n\n❌ Rejected: {reason}"
-            if card_message.photo or card_message.caption:
-                await card_message.edit_caption(
+        suffix = f"\n\n❌ Rejected: {reason}"
+        if card_message.photo or card_message.caption:
+            await _tg_send(
+                card_message.edit_caption(
                     (card_message.caption or "") + suffix,
                     reply_markup=None,
                 )
-            else:
-                await card_message.edit_text(
+            )
+        else:
+            await _tg_send(
+                card_message.edit_text(
                     (card_message.text or "") + suffix,
                     reply_markup=None,
                 )
-        except Exception as e:
-            logger.warning("Could not edit rejection card", extra={"ctx_error": str(e)})
+            )
 
-    # Notify user
+    # Notify the user
     if session:
-        try:
-            await client.send_message(
+        await _tg_send(
+            client.send_message(
                 session.user_id,
                 f"❌ <b>Your payment was rejected.</b>\n\n"
                 f"<b>Reason:</b> {reason}\n\n"
@@ -198,23 +322,50 @@ async def _execute_rejection(
                     InlineKeyboardButton("🆘 Support", callback_data="menu:support"),
                 ]]),
             )
-        except Exception as e:
-            logger.warning(
-                "Could not notify user of rejection",
-                extra={"ctx_user_id": session.user_id, "ctx_error": str(e)},
-            )
+        )
 
     logger.info(
-        "Payment rejected",
-        extra={"ctx_session": session_id, "ctx_reason": reason, "ctx_admin": admin_id},
+        "payment_rejected",
+        extra={
+            "ctx_session": session_id,
+            "ctx_reason": reason,
+            "ctx_admin": admin_id,
+        },
     )
     return True
+
+
+async def _refund_points_if_any(service, user_id: int, points_used: int, context: str) -> None:
+    """
+    Refund referral points to a user if any were applied to their session.
+
+    Shared by cancellation and expiry paths to ensure consistency.
+    Failures are logged but do not propagate — points refund is best-effort.
+    """
+    if points_used <= 0:
+        return
+    try:
+        from app.referral.repository import ReferralRepository
+        from app.referral.service import ReferralService
+        ref_repo = ReferralRepository(service.repository._db)
+        ref_service = ReferralService(ref_repo, None)
+        await ref_service.refund_points(user_id, points_used)
+        logger.info(
+            "points_refunded",
+            extra={"ctx_user_id": user_id, "ctx_points": points_used, "ctx_context": context},
+        )
+    except Exception as exc:
+        logger.error(
+            "failed_to_refund_points",
+            extra={"ctx_user_id": user_id, "ctx_context": context, "ctx_error": str(exc)},
+        )
 
 
 # ── User-facing handlers ──────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^menu:premium$"))
 async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
+    """Display the premium plan selection menu to the user."""
     await callback.answer()
     user_id = callback.from_user.id
     service = get_payment_service()
@@ -247,6 +398,7 @@ async def handle_premium_menu(client: Client, callback: CallbackQuery) -> None:
 
 @Client.on_callback_query(filters.regex(r"^pay:select:(.+)$"))
 async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None:
+    """Show payment method options for the selected plan."""
     plan_id = callback.data.split(":", 2)[2]
     user_id = callback.from_user.id
     await callback.answer()
@@ -286,6 +438,13 @@ async def handle_plan_selection(client: Client, callback: CallbackQuery) -> None
 
 @Client.on_callback_query(filters.regex(r"^pay:method:(\w+):(.+)$"))
 async def handle_payment_method(client: Client, callback: CallbackQuery) -> None:
+    """
+    Create a payment session for the selected plan and method.
+
+    Performs a second duplicate-session guard in case the user managed to
+    click twice before the first session was written. On success, posts a
+    request card to the admin hub.
+    """
     parts = callback.data.split(":", 3)
     method = parts[2]
     plan_id = parts[3]
@@ -294,7 +453,6 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 
     service = get_payment_service()
 
-    # Double-check no active session exists
     existing = await service.get_active_session(user_id)
     if existing:
         await callback.answer("You already have an active payment session.", show_alert=True)
@@ -302,10 +460,10 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 
     try:
         session = await service.create_session(user_id, plan_id, method)
-    except Exception as e:
+    except Exception as exc:
         logger.exception(
             "Failed to create payment session",
-            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
         )
         await callback.answer("Could not initiate payment. Please try again.", show_alert=True)
         return
@@ -324,7 +482,6 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
         parse_mode=ParseMode.HTML,
     )
 
-    # Notify admins — they must manually send payment details
     await _post_payment_request_card(
         client=client,
         session_id=session.id,
@@ -337,6 +494,7 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 
 @Client.on_callback_query(filters.regex(r"^pay:status$"))
 async def handle_payment_status(client: Client, callback: CallbackQuery) -> None:
+    """Display the user's current active payment session status."""
     user_id = callback.from_user.id
     await callback.answer()
     service = get_payment_service()
@@ -378,37 +536,76 @@ async def handle_payment_status(client: Client, callback: CallbackQuery) -> None
 
 @Client.on_callback_query(filters.regex(r"^pay:cancel:(.+)$"))
 async def handle_payment_cancel(client: Client, callback: CallbackQuery) -> None:
+    """
+    Cancel an active payment session initiated by the user.
+
+    Only sessions in WAITING_PAYMENT_DETAILS, WAITING_TXID, or
+    WAITING_SCREENSHOT can be cancelled — sessions under review or beyond
+    are not user-cancellable. Refunds any points applied to the session.
+    """
     session_id = callback.data.split(":", 2)[2]
     user_id = callback.from_user.id
     await callback.answer()
 
     service = get_payment_service()
     session = await service.get_session(session_id)
+
     if not session or session.user_id != user_id:
         await callback.answer("Session not found.", show_alert=True)
         return
 
+    if session.status not in _CANCELLABLE_STATUSES:
+        await callback.answer(
+            "Cannot cancel at this stage.", show_alert=True
+        )
+        return
+
     cancelled = await service.update_status(session_id, PaymentStatus.CANCELLED)
     if cancelled:
+        # Clear timeout and Redis cache
         await service.repository.clear_timeout(session_id)
+        try:
+            from app.core.redis_client import RedisClient
+            redis = await RedisClient.get_client()
+            await redis.delete(f"pay_session:{user_id}")
+        except Exception as exc:
+            logger.warning(
+                "Failed to clear Redis session on cancel",
+                extra={"ctx_session": session_id, "ctx_error": str(exc)},
+            )
+
+        # Refund points if any were applied
+        await _refund_points_if_any(service, user_id, session.points_used or 0, "cancel")
+
+        await service.repository.log_event(session_id, "payment_cancelled_by_user", {})
+
         await callback.message.edit_text(
             "Payment session cancelled.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("← Back", callback_data="menu:premium"),
             ]]),
         )
-        logger.info("Payment cancelled by user", extra={"ctx_session": session_id, "ctx_user": user_id})
-    else:
-        await callback.answer(
-            "Cannot cancel at this stage.", show_alert=True
+        logger.info(
+            "payment_cancelled_by_user",
+            extra={"ctx_session": session_id, "ctx_user": user_id},
         )
+    else:
+        await callback.answer("Cannot cancel at this stage.", show_alert=True)
 
 
 # ── User private message handler for TXID + screenshot ───────────────────────
 
 @Client.on_message(filters.private & ~filters.regex(r"^/"))
 async def handle_payment_inputs(client: Client, message: Message) -> None:
-    """Captures TXID and screenshot in sequence from the active payment session."""
+    """
+    Capture TXID and payment screenshot from the user in sequence.
+
+    Only activates when the user has an active session in WAITING_TXID or
+    WAITING_SCREENSHOT status. Expired sessions are cleaned up fully via
+    the service layer (points refund, Redis clear, event log).
+
+    TXID uniqueness is validated before accepting to prevent fraud.
+    """
     if not message.from_user:
         return
     user_id = message.from_user.id
@@ -418,58 +615,75 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     if not session:
         raise ContinuePropagation
 
-    # Reject statuses that don't need user input
     if session.status not in (
         PaymentStatus.WAITING_TXID,
         PaymentStatus.WAITING_SCREENSHOT,
     ):
         raise ContinuePropagation
 
-    # Check expiry
+    # Expiry check — delegate to service to ensure full cleanup
     if session.expires_at and datetime.now(timezone.utc) > session.expires_at:
-        await service.update_status(session.id, PaymentStatus.EXPIRED)
-        await message.reply_text(
-            "⌛ Your payment session has expired.\n"
-            "Please start a new request.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💎 New Request", callback_data="menu:premium"),
-            ]]),
+        try:
+            from app.services.payment_timeouts import PaymentTimeoutMonitor
+            monitor = PaymentTimeoutMonitor(service.repository)
+            await monitor.expire_session(client, session.id)
+        except Exception as exc:
+            # Fallback: at minimum mark expired in DB
+            logger.error(
+                "expire_session delegate failed, falling back to status update",
+                extra={"ctx_session": session.id, "ctx_error": str(exc)},
+            )
+            await service.update_status(session.id, PaymentStatus.EXPIRED)
+
+        await _tg_send(
+            message.reply_text(
+                "⌛ Your payment session has expired.\n"
+                "Please start a new request.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💎 New Request", callback_data="menu:premium"),
+                ]]),
+            )
         )
         return
 
     # ── TXID submission ───────────────────────────────────────────────────────
     if session.status == PaymentStatus.WAITING_TXID:
         if not message.text or message.text.strip().startswith("/"):
-            await message.reply_text(
-                "Please send your Transaction ID (TXID) as a text message.\n"
-                "This is the reference number from your payment app."
+            await _tg_send(
+                message.reply_text(
+                    "Please send your Transaction ID (TXID) as a text message.\n"
+                    "This is the reference number from your payment app."
+                )
             )
             return
 
         txid = message.text.strip()
 
-        # Validate TXID uniqueness — critical fraud prevention
         is_unique = await service.check_txid_unique(txid)
         if not is_unique:
-            await message.reply_text(
-                "❌ This Transaction ID has already been submitted.\n\n"
-                "If you believe this is an error, please contact support.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🆘 Support", callback_data="menu:support"),
-                ]]),
+            await _tg_send(
+                message.reply_text(
+                    "❌ This Transaction ID has already been submitted.\n\n"
+                    "If you believe this is an error, please contact support.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🆘 Support", callback_data="menu:support"),
+                    ]]),
+                )
             )
             logger.warning(
-                "Duplicate TXID submission rejected",
+                "duplicate_txid_rejected",
                 extra={"ctx_user_id": user_id, "ctx_txid_prefix": txid[:8]},
             )
             return
 
         await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=txid)
-        await message.reply_text(
-            "✅ TXID received.\n\n"
-            "Now please send a screenshot of your payment confirmation.\n"
-            "Or type <code>skip</code> to continue without one.",
-            parse_mode=ParseMode.HTML,
+        await _tg_send(
+            message.reply_text(
+                "✅ TXID received.\n\n"
+                "Now please send a screenshot of your payment confirmation.\n"
+                "Or type <code>skip</code> to continue without one.",
+                parse_mode=ParseMode.HTML,
+            )
         )
         return
 
@@ -485,51 +699,70 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
         elif message.text and message.text.lower().strip() == "skip":
             skipped = True
         else:
-            await message.reply_text(
-                "Please send a screenshot of your payment, or type <code>skip</code> to proceed.",
-                parse_mode=ParseMode.HTML,
+            await _tg_send(
+                message.reply_text(
+                    "Please send a screenshot of your payment, or type <code>skip</code> to proceed.",
+                    parse_mode=ParseMode.HTML,
+                )
             )
             return
 
+        # Write status to DB BEFORE sending any Telegram messages (restart-safe)
         await service.update_status(
             session.id,
             PaymentStatus.UNDER_REVIEW,
             screenshot_file_id=file_id,
         )
 
-        await message.reply_text(
-            "✅ Proof submitted. Our admins will review it shortly.\n\n"
-            f"<b>Session:</b> <code>{session.id}</code>",
-            parse_mode=ParseMode.HTML,
+        await _tg_send(
+            message.reply_text(
+                "✅ Proof submitted. Our admins will review it shortly.\n\n"
+                f"<b>Session:</b> <code>{session.id}</code>",
+                parse_mode=ParseMode.HTML,
+            )
         )
 
-        # ── ROUTE HEADER TO USER TOPIC ──
+        # Route submission header to user topic
         try:
             from app.services.topic_manager import get_topic_manager
             topic_id = await get_topic_manager().get_or_create_user_topic(client, user_id)
-            
-            await client.send_message(
-                chat_id=settings.VERIFICATION_GROUP_ID,
-                text=(
-                    f"💳 <b>PAYMENT SUBMITTED</b>\n\n"
-                    f"<b>Amount:</b> {session.locked_amount} {session.currency}\n"
-                    f"<b>Method:</b> {session.payment_method or 'N/A'}\n"
-                    f"<b>Transaction:</b> <code>{session.txid or 'N/A'}</code>"
-                ),
-                message_thread_id=topic_id,
-                parse_mode=ParseMode.HTML
+            await _tg_send(
+                client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=(
+                        f"💳 <b>PAYMENT SUBMITTED</b>\n\n"
+                        f"<b>Amount:</b> {session.locked_amount} {session.currency}\n"
+                        f"<b>Method:</b> {session.payment_method or 'N/A'}\n"
+                        f"<b>Transaction:</b> <code>{session.txid or 'N/A'}</code>"
+                    ),
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML,
+                )
             )
-            
-            # Audit log
+        except Exception as exc:
+            logger.error(
+                "Failed to route payment submission header to topic",
+                extra={"ctx_session": session.id, "ctx_user_id": user_id, "ctx_error": str(exc)},
+            )
+
+        # Audit log
+        try:
             from app.services.audit_service import get_audit
             await get_audit().log(
                 action="PAYMENT_SUBMITTED",
                 performed_by=user_id,
                 target_user_id=user_id,
-                details={"amount": session.locked_amount, "method": session.payment_method}
+                details={
+                    "amount": session.locked_amount,
+                    "method": session.payment_method,
+                    "session_id": session.id,
+                },
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "Failed to write audit log for payment submission",
+                extra={"ctx_session": session.id, "ctx_error": str(exc)},
+            )
 
         await _post_proof_card(
             client=client,
@@ -540,7 +773,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
             topic_id=session.topic_id,
         )
         logger.info(
-            "Payment proof submitted",
+            "payment_proof_submitted",
             extra={
                 "ctx_session": session.id,
                 "ctx_user_id": user_id,
@@ -554,6 +787,18 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:send_details:(.+)$"))
 async def handle_admin_send_details_click(client: Client, callback: CallbackQuery) -> None:
+    """
+    Enter the admin into the send_details FSM step for a payment session.
+
+    Guards:
+      - Admin must be a moderator.
+      - Session must be in WAITING_PAYMENT_DETAILS status.
+      - If the admin already has an active FSM state for a different session,
+        they are warned before overwriting.
+
+    The FSM state is persisted to MongoDB before replying to Telegram so it
+    survives a bot restart mid-flow.
+    """
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
@@ -572,35 +817,54 @@ async def handle_admin_send_details_click(client: Client, callback: CallbackQuer
         )
         return
 
-    # Enter admin FSM state
-    _admin_states[admin_id] = {
+    # Guard: warn if overwriting an existing FSM state for a different session
+    existing_state = await _fsm_get(admin_id)
+    if existing_state and existing_state.get("session_id") != session_id:
+        await callback.answer(
+            f"⚠️ You had an active state for session "
+            f"{existing_state['session_id'][:8]}… — it has been replaced.",
+            show_alert=True,
+        )
+
+    # Persist FSM state to MongoDB BEFORE replying
+    state = {
         "session_id": session_id,
         "step": "send_details",
         "topic_id": getattr(callback.message, "message_thread_id", None),
         "card_message_id": callback.message.id,
     }
+    await _fsm_set(admin_id, state)
 
     await callback.answer()
-    await callback.message.reply(
-        f"📩 <b>Send payment details for session <code>{session_id}</code></b>\n\n"
-        "Your next message in this topic will be forwarded directly to the user.\n"
-        "You can send text, photo, QR code, or any file.",
-        parse_mode=ParseMode.HTML,
+    await _tg_send(
+        callback.message.reply(
+            f"📩 <b>Send payment details for session <code>{session_id}</code></b>\n\n"
+            "Your next message in this topic will be forwarded directly to the user.\n"
+            "You can send text, photo, QR code, or any file.",
+            parse_mode=ParseMode.HTML,
+        )
     )
 
 
-# ── Admin hub message handler (FSM states) ────────────────────────────────────
-# This fires for all human messages in VERIFICATION_GROUP_ID.
-# If the sender has an active admin FSM state, it handles the message.
+# ── Admin hub message handler (FSM states) ───────────────────────────────────
+
+# Fires for all human messages in VERIFICATION_GROUP_ID.
+# If the sender has an active MongoDB-backed FSM state, it handles the message.
 # Otherwise raises ContinuePropagation so topic_router.py can process it.
 
 @Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID) & ~filters.bot)
 async def handle_admin_hub_state_messages(client: Client, message: Message) -> None:
+    """
+    Route admin messages in the Verification Hub through the FSM state machine.
+
+    Reads FSM state from MongoDB on every invocation — restart-safe.
+    Propagates to the next handler if no state is found.
+    """
     if not message.from_user:
         raise ContinuePropagation
 
     admin_id = message.from_user.id
-    state = _admin_states.get(admin_id)
+    state = await _fsm_get(admin_id)
 
     if not state:
         raise ContinuePropagation
@@ -622,56 +886,87 @@ async def _process_send_details_message(
     session_id: str,
     admin_id: int,
 ) -> None:
+    """
+    Process the admin's payment details message: copy it to the user, then
+    advance session status to WAITING_TXID and start the 20-minute timer.
+
+    Ordering (restart-safe):
+      1. copy_message to user
+      2. update_status → WAITING_TXID  (written to DB)
+      3. start_timeout                 (written to DB)
+      4. _fsm_clear                    (DB)
+      5. Reply to admin
+
+    StopPropagation is raised after success so topic_router does not
+    re-deliver this message to the user. It is explicitly excluded from the
+    error handler so it is never swallowed.
+
+    On copy failure: FSM state is cleared and the admin is informed to retry.
+    The session remains in WAITING_PAYMENT_DETAILS — no stuck state.
+    """
     service = get_payment_service()
     session = await service.get_session(session_id)
 
     if not session or session.status != PaymentStatus.WAITING_PAYMENT_DETAILS:
-        _admin_states.pop(admin_id, None)
+        await _fsm_clear(admin_id)
         raise ContinuePropagation
 
-    # Relay admin's message to the user
-    try:
-        await client.copy_message(
+    # Step 1: deliver to user
+    delivered = await _tg_send(
+        client.copy_message(
             chat_id=session.user_id,
             from_chat_id=message.chat.id,
             message_id=message.id,
         )
+    )
 
-        # CRITICAL: start timeout ONLY after confirmed delivery
-        await service.update_status(
-            session_id,
-            PaymentStatus.WAITING_TXID,
-            payment_method=session.payment_method,
+    if not delivered:
+        # Delivery failed — clear FSM, leave session status unchanged so admin
+        # can retry via the card button.
+        await _fsm_clear(admin_id)
+        await _tg_send(
+            message.reply(
+                f"⚠️ Failed to deliver to user <code>{session.user_id}</code>.\n\n"
+                "Please try again. The session has NOT been advanced.",
+                parse_mode=ParseMode.HTML,
+            )
         )
-        started = await service.start_timeout(session_id)
+        logger.error(
+            "payment_details_delivery_failed",
+            extra={"ctx_session": session_id, "ctx_user": session.user_id, "ctx_admin": admin_id},
+        )
+        return
 
-        _admin_states.pop(admin_id, None)
+    # Steps 2–4: advance state (all DB writes before any more Telegram calls)
+    await service.update_status(
+        session_id,
+        PaymentStatus.WAITING_TXID,
+        payment_method=session.payment_method,
+    )
+    started = await service.start_timeout(session_id)
+    await _fsm_clear(admin_id)
 
-        timeout_note = "20-minute timer started." if started else "⚠️ Timer could not start — check session."
-        await message.reply(
+    # Step 5: confirm to admin
+    timeout_note = "20-minute timer started." if started else "⚠️ Timer could not start — check session."
+    await _tg_send(
+        message.reply(
             f"✅ Payment details delivered to user <code>{session.user_id}</code>.\n{timeout_note}",
             parse_mode=ParseMode.HTML,
         )
-        logger.info(
-            "Payment details relayed — timeout started",
-            extra={"ctx_session": session_id, "ctx_user": session.user_id, "ctx_admin": admin_id},
-        )
+    )
 
-        # Stop propagation — topic_router must NOT re-deliver this message to the user
-        from pyrogram.handlers.handler import StopPropagation
-        raise StopPropagation
+    logger.info(
+        "payment_details_relayed_timeout_started",
+        extra={
+            "ctx_session": session_id,
+            "ctx_user": session.user_id,
+            "ctx_admin": admin_id,
+            "ctx_timer_started": started,
+        },
+    )
 
-    except Exception as e:
-        _admin_states.pop(admin_id, None)
-        logger.error(
-            "Failed to relay payment details",
-            extra={"ctx_session": session_id, "ctx_error": str(e)},
-        )
-        await message.reply(
-            f"⚠️ Failed to deliver to user <code>{session.user_id}</code>.\n"
-            f"Error: {e}\n\nPlease try again.",
-            parse_mode=ParseMode.HTML,
-        )
+    # Stop propagation — topic_router must NOT re-deliver this to the user
+    raise StopPropagation
 
 
 async def _process_custom_rejection_message(
@@ -681,14 +976,20 @@ async def _process_custom_rejection_message(
     admin_id: int,
     state: dict,
 ) -> None:
+    """
+    Process the admin's custom rejection reason and execute the rejection.
+
+    Requires the message to be plain text. Retrieves the original proof card
+    message to edit it with the rejection reason.
+    """
     if not message.text:
-        await message.reply("Please type your rejection reason as text.")
+        await _tg_send(message.reply("Please type your rejection reason as text."))
         return
 
     reason = message.text.strip()
-    _admin_states.pop(admin_id, None)
+    await _fsm_clear(admin_id)
 
-    # Retrieve the original proof card message to edit it
+    # Retrieve the original proof card to edit it
     card_message = None
     card_msg_id = state.get("card_message_id")
     if card_msg_id:
@@ -698,22 +999,32 @@ async def _process_custom_rejection_message(
                 message_ids=card_msg_id,
             )
             card_message = result if not isinstance(result, list) else (result[0] if result else None)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "Could not fetch original proof card for custom rejection",
+                extra={"ctx_session": session_id, "ctx_error": str(exc)},
+            )
 
-    success = await _execute_rejection(
-        client, session_id, reason, admin_id, card_message
-    )
+    success = await _execute_rejection(client, session_id, reason, admin_id, card_message)
     if success:
-        await message.reply(f"✅ Rejection recorded: {reason}")
+        await _tg_send(message.reply(f"✅ Rejection recorded: {reason}"))
     else:
-        await message.reply("⚠️ Could not process rejection — session may already be handled.")
+        await _tg_send(
+            message.reply("⚠️ Could not process rejection — session may already be handled.")
+        )
 
 
 # ── Admin: Approve ────────────────────────────────────────────────────────────
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:approve:(.+)$"))
 async def handle_admin_approve(client: Client, callback: CallbackQuery) -> None:
+    """
+    Approve a payment session.
+
+    Delegates to the service layer which handles subscription provisioning,
+    invite link generation, and user notification. Edits the proof card on
+    success to prevent double-approvals.
+    """
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
@@ -728,15 +1039,19 @@ async def handle_admin_approve(client: Client, callback: CallbackQuery) -> None:
 
     if success:
         suffix = f"\n\n✅ Approved by {callback.from_user.first_name}"
-        try:
-            msg = callback.message
-            if msg.photo or msg.caption:
-                await msg.edit_caption((msg.caption or "") + suffix, reply_markup=None)
-            else:
-                await msg.edit_text((msg.text or "") + suffix, reply_markup=None)
-        except Exception as e:
-            logger.warning("Could not edit approval card", extra={"ctx_error": str(e)})
-        logger.info("Payment approved", extra={"ctx_session": session_id, "ctx_admin": admin_id})
+        msg = callback.message
+        if msg.photo or msg.caption:
+            await _tg_send(
+                msg.edit_caption((msg.caption or "") + suffix, reply_markup=None)
+            )
+        else:
+            await _tg_send(
+                msg.edit_text((msg.text or "") + suffix, reply_markup=None)
+            )
+        logger.info(
+            "payment_approved",
+            extra={"ctx_session": session_id, "ctx_admin": admin_id},
+        )
     else:
         await callback.answer(
             "Could not approve — already processed or session invalid.", show_alert=True
@@ -747,6 +1062,12 @@ async def handle_admin_approve(client: Client, callback: CallbackQuery) -> None:
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:reject:(.+)$"))
 async def handle_admin_reject(client: Client, callback: CallbackQuery) -> None:
+    """
+    Show rejection reason options on the proof card.
+
+    Replaces the Approve/Reject buttons with preset reason choices plus a
+    Custom Reason option that enters the admin into the custom_rejection FSM step.
+    """
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
@@ -764,18 +1085,14 @@ async def handle_admin_reject(client: Client, callback: CallbackQuery) -> None:
         [InlineKeyboardButton("✏️ Custom Reason", callback_data=f"pay:admin:rej_custom:{session_id}")],
     ]
 
-    try:
-        msg = callback.message
-        if msg.photo:
-            await msg.edit_reply_markup(InlineKeyboardMarkup(buttons))
-        else:
-            await msg.edit_reply_markup(InlineKeyboardMarkup(buttons))
-    except Exception as e:
-        logger.warning("Could not edit reject reason buttons", extra={"ctx_error": str(e)})
+    await _tg_send(
+        callback.message.edit_reply_markup(InlineKeyboardMarkup(buttons))
+    )
 
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:rej_rsn:(\w+):(.+)$"))
 async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> None:
+    """Execute a preset rejection reason immediately."""
     parts = callback.data.split(":", 4)
     reason_code = parts[3]
     session_id = parts[4]
@@ -802,6 +1119,12 @@ async def handle_rejection_reason(client: Client, callback: CallbackQuery) -> No
 
 @Client.on_callback_query(filters.regex(r"^pay:admin:rej_custom:(.+)$"))
 async def handle_rejection_custom_start(client: Client, callback: CallbackQuery) -> None:
+    """
+    Enter the admin into the custom_rejection FSM step.
+
+    Persists FSM state to MongoDB before prompting the admin, so the state
+    survives a bot restart while the admin is composing their reason.
+    """
     session_id = callback.data.split(":", 3)[3]
     admin_id = callback.from_user.id
 
@@ -809,15 +1132,18 @@ async def handle_rejection_custom_start(client: Client, callback: CallbackQuery)
         await callback.answer("Unauthorized.", show_alert=True)
         return
 
-    _admin_states[admin_id] = {
+    state = {
         "session_id": session_id,
         "step": "custom_rejection",
         "topic_id": getattr(callback.message, "message_thread_id", None),
         "card_message_id": callback.message.id,
     }
+    await _fsm_set(admin_id, state)
 
     await callback.answer()
-    await callback.message.reply(
-        "✏️ Type your rejection reason and send it now:",
-        parse_mode=ParseMode.HTML,
+    await _tg_send(
+        callback.message.reply(
+            "✏️ Type your rejection reason and send it now:",
+            parse_mode=ParseMode.HTML,
+        )
     )

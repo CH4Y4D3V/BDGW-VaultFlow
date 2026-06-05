@@ -3,7 +3,16 @@ payment_intent_checker.py
 ─────────────────────────
 Background async task — enforces the payment intent timer.
 
-I18N FIX: All user-facing strings hardcoded to English per Spec v1.0.
+Runs every CHECK_INTERVAL_SECONDS. For each user with an active
+``intent_time``:
+  • At 5 min elapsed  → Warning 1/2 (15 minutes remaining)
+  • At 10 min elapsed → Warning 2/2 (10 minutes remaining)
+  • At 20 min elapsed → Auto-ban + kick from all protected groups
+
+All state transitions use find_one_and_update with atomic filters to ensure
+idempotency across concurrent scheduler passes. See _run_check() for details.
+
+I18N: All user-facing strings are hardcoded to English per Spec v1.0.
 """
 
 import asyncio
@@ -14,7 +23,7 @@ from typing import Optional
 from pymongo import ReturnDocument
 from pyrogram import Client
 from pyrogram.enums import ParseMode
-from pyrogram.errors import Forbidden, BadRequest, FloodWait
+from pyrogram.errors import BadRequest, FloodWait, Forbidden
 
 from app.config import settings
 from app.core.database import DatabaseManager
@@ -22,22 +31,27 @@ from app.core.database import DatabaseManager
 log = logging.getLogger("payment_intent_checker")
 
 CHECK_INTERVAL_SECONDS = 120    # run every 2 minutes
-WARN_1_SECONDS         = 300    # 5 minutes
-WARN_2_SECONDS         = 600    # 10 minutes
-BAN_SECONDS            = 1200   # 20 minutes
+WARN_1_SECONDS         = 300    # 5 minutes  → Warning 1/2 (15 min remaining)
+WARN_2_SECONDS         = 600    # 10 minutes → Warning 2/2 (10 min remaining)
+BAN_SECONDS            = 1200   # 20 minutes → auto-ban
 
 _MAX_FLOOD_WAIT_SECONDS = 60    # cap any FloodWait sleep to 60 s
+
+# Maximum users to process per pass — prevents unbounded memory usage
+# on large installs. Increase if needed; consider cursor pagination beyond ~1 000.
+_BATCH_LIMIT = 500
 
 
 async def _safe_notify(client: Client, user_id: int, text: str) -> Optional[int]:
     """
-    Send a single HTML-formatted message to user.
-    Handles FloodWait with one capped retry, Forbidden, and BadRequest explicitly.
-    Returns message_id on success, None on any failure.
+    Send a single HTML-formatted message to a user.
 
-    BUG FIX: Original code called send_message twice — once with parse_mode=None
-    (discarding the result) and once with ParseMode.HTML. Every notification was
-    delivered twice. Fixed by keeping only the HTML send.
+    Handles FloodWait with one capped retry, Forbidden (bot blocked), and
+    BadRequest explicitly. Returns the message_id on success, None on failure.
+
+    Prior bug fixed: original code called send_message twice — once without
+    parse_mode (result discarded) and once with ParseMode.HTML, delivering
+    every notification twice. Only the HTML send is kept.
     """
     try:
         msg = await client.send_message(
@@ -79,9 +93,11 @@ async def _safe_notify(client: Client, user_id: int, text: str) -> Optional[int]
 
 async def _notify_admins_intent_ban(client: Client, user_id: int) -> None:
     """
-    Emit auto-ban notification to the user's permanent Verification Hub topic
+    Emit an auto-ban notification to the user's Verification Hub topic
     AND directly to every admin DM as a failsafe.
-    FloodWait is handled explicitly on each admin DM send.
+
+    FloodWait is handled explicitly on each admin DM send. Topic routing
+    failure is non-fatal — admin DMs serve as the fallback.
     """
     text = (
         f"🚫 <b>Payment Intent Auto-Ban</b>\n\n"
@@ -135,24 +151,26 @@ async def _notify_admins_intent_ban(client: Client, user_id: int) -> None:
 
 async def _run_check(client: Client) -> None:
     """
-    Single pass over all users with an active payment intent.
+    Single pass over at most _BATCH_LIMIT users with an active payment intent.
 
-    All state transitions are performed via find_one_and_update to guarantee
-    atomicity and prevent duplicate actions from concurrent checker passes:
+    All state transitions use find_one_and_update with atomic filter clauses
+    to guarantee idempotency across concurrent scheduler passes:
 
-      • Ban: atomic claim via filter {intent_time: {$ne: None}, is_banned: {$ne: True}}.
-        Only the pass that modifies the document proceeds with kick + notify.
+      • Ban:      filter {intent_time: {$ne: None}, is_banned: {$ne: True}}
+                  Only the winning pass proceeds with kick + notify.
 
-      • Warnings: atomic claim via filter {intent_warn_count: {$lt: N}}.
-        Only the pass that increments the count proceeds with the send.
+      • Warning N: filter {intent_warn_count: {$lt: N}, intent_time: {$ne: None}}
+                  Only the winning pass sends the message and tracks it.
 
-    This eliminates the race condition where two concurrent scheduler passes
-    both observe elapsed >= threshold and both execute side effects.
+    Processing is ordered: ban check first, then warn 2, then warn 1. The
+    ``continue`` after each action ensures a user is never double-processed
+    within a single pass.
     """
     db = DatabaseManager.get_db()
 
-    users_cursor = db["users"].find({"intent_time": {"$ne": None}})
-    users = await users_cursor.to_list(length=None)
+    users = await db["users"].find(
+        {"intent_time": {"$ne": None}}
+    ).limit(_BATCH_LIMIT).to_list(length=_BATCH_LIMIT)
 
     if not users:
         return
@@ -194,10 +212,9 @@ async def _run_check(client: Client) -> None:
 
         # ── BAN threshold ──────────────────────────────────────────────────────
         if elapsed >= BAN_SECONDS:
-            # IDEMPOTENCY: Atomically claim the ban right. The filter requires
-            # intent_time != None AND is_banned != True. If a concurrent pass
-            # already set is_banned=True and cleared intent_time, find_one_and_update
-            # returns None and we skip all side effects for this user.
+            # Atomically claim the ban. The filter requires intent_time != None
+            # AND is_banned != True. A concurrent pass that already set
+            # is_banned=True returns None here and we skip.
             ban_result = await db["users"].find_one_and_update(
                 {
                     "_id": user_id,
@@ -226,9 +243,12 @@ async def _run_check(client: Client) -> None:
                 user_id, elapsed, warn_count,
             )
 
-            # Delete intent warning messages from user chat before notifying of ban
+            # Delete intent warning messages from user chat
             try:
-                from app.services.message_tracker import delete_user_messages, CONTEXT_PAYMENT_INTENT
+                from app.services.message_tracker import (
+                    CONTEXT_PAYMENT_INTENT,
+                    delete_user_messages,
+                )
                 await delete_user_messages(client, user_id, CONTEXT_PAYMENT_INTENT)
             except Exception as exc:
                 log.warning(
@@ -276,11 +296,9 @@ async def _run_check(client: Client) -> None:
             await _notify_admins_intent_ban(client, user_id)
             continue
 
-        # ── Warning 2 ──────────────────────────────────────────────────────────
+        # ── Warning 2/2 ────────────────────────────────────────────────────────
         if elapsed >= WARN_2_SECONDS and warn_count < 2:
-            # IDEMPOTENCY: Atomically increment warn_count only if still < 2 and
-            # intent_time is still set. A concurrent pass that already incremented
-            # to 2 will fail this filter and return None.
+            # Atomically increment warn_count only if still < 2 and intent is active.
             warn2_result = await db["users"].find_one_and_update(
                 {
                     "_id": user_id,
@@ -292,7 +310,7 @@ async def _run_check(client: Client) -> None:
             )
             if warn2_result is None:
                 log.info(
-                    "[INTENT CHECKER] Warning 2 for user %d already claimed by concurrent pass — skipping.",
+                    "[INTENT CHECKER] Warning 2/2 for user %d already claimed by concurrent pass — skipping.",
                     user_id,
                 )
                 continue
@@ -317,14 +335,13 @@ async def _run_check(client: Client) -> None:
                         user_id, exc,
                     )
             log.info(
-                "[INTENT CHECKER] Warning 2/3 sent to user %d (elapsed=%.0fs)",
+                "[INTENT CHECKER] Warning 2/2 sent to user %d (elapsed=%.0fs)",
                 user_id, elapsed,
             )
             continue
 
-        # ── Warning 1 ──────────────────────────────────────────────────────────
+        # ── Warning 1/2 ────────────────────────────────────────────────────────
         if elapsed >= WARN_1_SECONDS and warn_count < 1:
-            # IDEMPOTENCY: Atomically increment warn_count only if still < 1.
             warn1_result = await db["users"].find_one_and_update(
                 {
                     "_id": user_id,
@@ -336,7 +353,7 @@ async def _run_check(client: Client) -> None:
             )
             if warn1_result is None:
                 log.info(
-                    "[INTENT CHECKER] Warning 1 for user %d already claimed by concurrent pass — skipping.",
+                    "[INTENT CHECKER] Warning 1/2 for user %d already claimed by concurrent pass — skipping.",
                     user_id,
                 )
                 continue
@@ -361,7 +378,7 @@ async def _run_check(client: Client) -> None:
                         user_id, exc,
                     )
             log.info(
-                "[INTENT CHECKER] Warning 1/3 sent to user %d (elapsed=%.0fs)",
+                "[INTENT CHECKER] Warning 1/2 sent to user %d (elapsed=%.0fs)",
                 user_id, elapsed,
             )
             continue
@@ -369,15 +386,16 @@ async def _run_check(client: Client) -> None:
 
 async def payment_intent_checker(client: Client) -> None:
     """
-    Main background loop. Runs indefinitely, checking for expired payment
-    intents every CHECK_INTERVAL_SECONDS.
+    Main background loop.
 
-    Never crashes the bot — all exceptions are caught and logged.
-    Handles asyncio.CancelledError for clean shutdown on bot termination.
+    Runs indefinitely, checking for expired payment intents every
+    CHECK_INTERVAL_SECONDS. Never crashes the bot — all exceptions from
+    _run_check are caught and logged. Handles asyncio.CancelledError
+    for clean shutdown on bot termination.
     """
     log.info(
-        "[INTENT CHECKER] Started. Check interval: %ds | Warn at: %ds/%ds | Ban at: %ds",
-        CHECK_INTERVAL_SECONDS, WARN_1_SECONDS, WARN_2_SECONDS, BAN_SECONDS,
+        "[INTENT CHECKER] Started. Interval: %ds | Warn at: %ds/%ds | Ban at: %ds | Batch: %d",
+        CHECK_INTERVAL_SECONDS, WARN_1_SECONDS, WARN_2_SECONDS, BAN_SECONDS, _BATCH_LIMIT,
     )
 
     while True:
