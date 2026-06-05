@@ -1,16 +1,8 @@
 """
 app/services/topic_service.py
 
-Thin compatibility shim so that imports from EITHER:
-  - app.services.topic_service
-  - app.services.topic_manager
-
-resolve to the SAME TopicManager singleton.
-
+Thin compatibility shim for User-Centric Topic Manager.
 The canonical implementation lives in app/services/topic_manager.py.
-This file is a pure re-export with backward-compat aliases.
-
-DO NOT put logic here. All logic stays in topic_manager.py.
 """
 from __future__ import annotations
 
@@ -24,7 +16,7 @@ from app.services.topic_manager import (
     TOPIC_REJECTED,
 )
 
-# Aliases so lifecycle.py and any code using TopicService still works
+# Aliases for backward compatibility
 TopicService = TopicManager
 get_topic_service = get_topic_manager
 
@@ -35,7 +27,6 @@ async def _warm_cache_from_db_alias(self) -> None:
 
 
 # Patch the alias onto the class if it doesn't already have it.
-# This handles lifecycle.py calling `topic_mgr.warm_cache_from_db()`.
 if not hasattr(TopicManager, "warm_cache_from_db"):
     TopicManager.warm_cache_from_db = _warm_cache_from_db_alias
 

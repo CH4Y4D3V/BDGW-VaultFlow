@@ -347,17 +347,17 @@ async def _finalize_submission(
         )
 
         # Get or create content review topic for this user
-        from app.services.topic_manager import get_topic_manager, TOPIC_CONTENT
+        from app.services.topic_manager import get_topic_manager
 
         topic_manager = get_topic_manager()
         topic_id = None
         try:
             topic_id = await topic_manager.get_or_create_user_topic(
-                client, user_id, TOPIC_CONTENT
+                client, user_id
             )
         except Exception as e:
             logger.warning(
-                "Could not get content topic — forwarding to general hub",
+                "Could not get user topic — forwarding to general hub",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
 

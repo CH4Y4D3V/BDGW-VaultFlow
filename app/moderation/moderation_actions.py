@@ -506,11 +506,11 @@ async def execute_approve(
 ) -> None:
     """
     Approve flow:
-    1. Archive to vault with status=POSTED — prevents scheduler double-post
-    2. Verify vault write succeeded (Bug 4 fix)
-    3. Post immediately to destination group
-    4. Delete moderation card
-    5. Notify uploader
+    1. Archive to vault with status=POSTED
+    2. Post immediately to destination group
+    3. Delete moderation card
+    4. Notify uploader
+    5. Log to User Topic
     6. Write audit log
     """
     display_name = _destination_display_name(dest)
@@ -531,12 +531,10 @@ async def execute_approve(
         initial_status=ModerationState.POSTED.value,
     )
 
-    # Bug 4 fix: verify vault write before proceeding.
-    # If all IDs are zero/empty the vault copy failed — abort, do NOT post publicly.
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(
-            "Approve aborted: vault archival returned no valid message IDs",
+            "Approve aborted: vault archival failed",
             extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
         )
         await safe_edit_message(
@@ -544,9 +542,8 @@ async def execute_approve(
             mod_card_chat_id,
             mod_card_message_id,
             f"⚠️ <b>Vault archival failed</b> — content NOT posted.\n"
-            f"Approved by {moderator_name} but vault write returned zero IDs.\n"
-            f"👤 Submitter: <code>{submitter_user_id}</code>\n\n"
-            f"Please retry or investigate vault channel access.",
+            f"Approved by {moderator_name}.\n"
+            f"👤 Submitter: <code>{submitter_user_id}</code>",
         )
         return
 
@@ -560,20 +557,19 @@ async def execute_approve(
             client,
             mod_card_chat_id,
             mod_card_message_id,
-            f"⚠️ <b>Approved</b> by {moderator_name} but delivery to {display_name} failed.\n"
+            f"⚠️ <b>Approved</b> by {moderator_name} but delivery failed.\n"
             f"👤 Submitter: <code>{submitter_user_id}</code>",
         )
         await safe_dm(
             client,
             submitter_user_id,
             f"✅ Your content was approved.\n\nDestination:\n{display_name}\n\n"
-            "⚠️ Note: delivery encountered an issue. Our team will retry.",
+            "⚠️ Note: delivery encountered an issue.",
         )
         return
 
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
     
-    # ── SYSTEM 13: HUB CLEANUP ──
     try:
         hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]
         if hub_msg_ids:
@@ -586,6 +582,24 @@ async def execute_approve(
         submitter_user_id,
         f"✅ Your content was approved.\n\nDestination:\n{display_name}",
     )
+
+    # ── ROUTE TO USER TOPIC ──
+    try:
+        from app.services.topic_manager import get_topic_manager
+        topic_id = await get_topic_manager().get_or_create_user_topic(client, submitter_user_id)
+        
+        await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=(
+                f"✅ <b>CONTENT APPROVED</b>\n\n"
+                f"<b>Destination:</b> {display_name}\n"
+                f"<b>Moderator:</b> {moderator_name}"
+            ),
+            message_thread_id=topic_id,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
 
     # ── Audit & Activity ──
     last_content_id = "unknown"
@@ -618,15 +632,6 @@ async def execute_approve(
         },
     )
 
-    logger.info(
-        "Approve flow complete",
-        extra={
-            "ctx_submitter": submitter_user_id,
-            "ctx_dest": dest,
-            "ctx_moderator": moderator_id,
-        },
-    )
-
 
 async def execute_queue(
     client: Client,
@@ -640,11 +645,11 @@ async def execute_queue(
 ) -> None:
     """
     Queue flow:
-    1. Archive to vault with status=QUEUED — enters scheduler distribution pipeline
-    2. Verify vault write succeeded (Bug 4 fix)
-    3. Enqueue MODERATED-priority job
-    4. Delete moderation card
-    5. Notify uploader
+    1. Archive to vault with status=QUEUED
+    2. Enqueue MODERATED job
+    3. Delete moderation card
+    4. Notify uploader
+    5. Log to User Topic
     6. Write audit log
     """
     display_name = _destination_display_name(dest)
@@ -665,11 +670,10 @@ async def execute_queue(
         initial_status=ModerationState.QUEUED.value,
     )
 
-    # Bug 4 fix: verify vault write before proceeding.
     vault_success = any(vid for vid in vault_ids if vid)
     if not vault_success:
         logger.error(
-            "Queue aborted: vault archival returned no valid message IDs",
+            "Queue aborted: vault archival failed",
             extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
         )
         await safe_edit_message(
@@ -677,16 +681,15 @@ async def execute_queue(
             mod_card_chat_id,
             mod_card_message_id,
             f"⚠️ <b>Vault archival failed</b> — content NOT queued.\n"
-            f"Queued by {moderator_name} but vault write returned zero IDs.\n"
-            f"👤 Submitter: <code>{submitter_user_id}</code>\n\n"
-            f"Please retry or investigate vault channel access.",
+            f"Queued by {moderator_name}.\n"
+            f"👤 Submitter: <code>{submitter_user_id}</code>",
         )
         return
 
     queued = await enqueue_for_distribution(messages, dest, submitter_user_id, vault_ids)
     if not queued:
         logger.error(
-            "Queue: failed to enqueue distribution job",
+            "Queue: failed to enqueue job",
             extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
         )
         await safe_edit_message(
@@ -700,7 +703,6 @@ async def execute_queue(
 
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
     
-    # ── SYSTEM 13: HUB CLEANUP ──
     try:
         hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]
         if hub_msg_ids:
@@ -713,6 +715,24 @@ async def execute_queue(
         submitter_user_id,
         f"✅ Your content has been queued for posting.\n\nDestination:\n{display_name}",
     )
+
+    # ── ROUTE TO USER TOPIC ──
+    try:
+        from app.services.topic_manager import get_topic_manager
+        topic_id = await get_topic_manager().get_or_create_user_topic(client, submitter_user_id)
+        
+        await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=(
+                f"⏳ <b>CONTENT QUEUED</b>\n\n"
+                f"<b>Destination:</b> {display_name}\n"
+                f"<b>Moderator:</b> {moderator_name}"
+            ),
+            message_thread_id=topic_id,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
 
     # ── Audit & Activity ──
     last_content_id = "unknown"
@@ -745,16 +765,6 @@ async def execute_queue(
         },
     )
 
-    logger.info(
-        "Queue flow complete",
-        extra={
-            "ctx_submitter": submitter_user_id,
-            "ctx_dest": dest,
-            "ctx_moderator": moderator_id,
-            "ctx_deadline_hours": settings.QUEUE_DEADLINE_HOURS,
-        },
-    )
-
 
 async def execute_reject(
     client: Client,
@@ -768,9 +778,10 @@ async def execute_reject(
 ) -> None:
     """
     Reject flow:
-    - Update vault status to REJECTED (if messages provided)
-    - Open support ticket for user with rejection context (System 11/13)
-    - Delete Hub media messages (System 13 cleanup)
+    - Update vault status to REJECTED
+    - Log to User Topic
+    - Auto-reopen support session
+    - Delete Hub media messages
     - Moderation card updated
     - Uploader notified
     - Audit log written
@@ -793,22 +804,32 @@ async def execute_reject(
                     {"$set": {"status": ModerationState.REJECTED.value, "updated_at": now}}
                 )
         except Exception as e:
-            logger.warning("Failed to update vault status to REJECTED", extra={"ctx_error": str(e)})
+            logger.warning("Failed to update vault status", extra={"ctx_error": str(e)})
 
-    # ── SYSTEM 11/13: AUTO-SUPPORT ON REJECT ──
+    # ── ROUTE TO USER TOPIC ──
     try:
-        from app.services.support_service import get_support_service
-        from app.services.topic_manager import TOPIC_SUPPORT
-
-        # Ensure topic exists and notify user
-        support_service = get_support_service()
-        # We simulate a "message" from admin to start the topic
-        await support_service.handle_user_message(
-            client, 
-            type("MockMsg", (), {"from_user": type("MockUser", (), {"id": submitter_user_id})(), "text": f"SYSTEM: Submission Rejected\nReason: {reason}"})()
+        from app.services.topic_manager import get_topic_manager
+        topic_id = await get_topic_manager().get_or_create_user_topic(client, submitter_user_id)
+        
+        await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=(
+                f"❌ <b>CONTENT REJECTED</b>\n\n"
+                f"<b>Moderator:</b> {moderator_name}\n"
+                f"<b>Reason:</b> {reason}"
+            ),
+            message_thread_id=topic_id,
+            parse_mode=ParseMode.HTML
         )
+        
+        db = DatabaseManager.get_db()
+        await db["user_topics"].update_one(
+            {"user_id": submitter_user_id},
+            {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc)}}
+        )
+
     except Exception as e:
-        logger.warning("Failed to open support ticket on reject", extra={"ctx_error": str(e)})
+        logger.warning("Failed to route rejection to user topic", extra={"ctx_error": str(e)})
 
     await safe_edit_message(
         client,
@@ -819,7 +840,6 @@ async def execute_reject(
         f"📝 Reason: <i>{reason}</i>",
     )
 
-    # ── SYSTEM 13: HUB CLEANUP ──
     try:
         if messages:
             hub_msg_ids = [m.id for m in messages if m.chat.id == mod_card_chat_id]

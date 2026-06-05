@@ -11,7 +11,7 @@ from pyrogram.errors import FloodWait, RPCError
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
+from app.services.topic_manager import get_topic_manager
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,16 @@ class SupportService:
 
     async def handle_user_message(self, client: Client, message: Message) -> bool:
         """
-        Routes user message from bot DM to their support topic in Hub.
+        Routes user message from bot DM to their unified user topic in Hub.
         """
         user_id = message.from_user.id
         try:
             topic_id = await self.topic_manager.get_or_create_user_topic(
-                client, user_id, TOPIC_SUPPORT
+                client, user_id
             )
+            
+            # Send context header if it's the start of a support interaction
+            # (Optional, but helps admins know it's a support message)
             
             # Forward the message to the topic
             await client.copy_message(
@@ -57,7 +60,7 @@ class SupportService:
             
             return True
         except Exception as e:
-            logger.error(f"Failed to forward message to support topic for {user_id}: {e}")
+            logger.error(f"Failed to forward message to user topic for {user_id}: {e}")
             return False
 
     async def notify_to_topic(
@@ -69,11 +72,11 @@ class SupportService:
         **kwargs
     ) -> Optional[Message]:
         """
-        Sends a notification message to a user's support topic.
+        Sends a notification message to a user's unified topic.
         """
         try:
             topic_id = await self.topic_manager.get_or_create_user_topic(
-                client, user_id, TOPIC_SUPPORT
+                client, user_id
             )
             
             sent = await client.send_message(
@@ -85,7 +88,7 @@ class SupportService:
             )
             return sent
         except Exception as e:
-            logger.error(f"Failed to send notification to support topic for {user_id}: {e}")
+            logger.error(f"Failed to send notification to user topic for {user_id}: {e}")
             return None
 
 _support_service: Optional[SupportService] = None

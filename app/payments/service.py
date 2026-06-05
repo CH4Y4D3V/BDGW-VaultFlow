@@ -275,7 +275,7 @@ class PaymentService:
             await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
             return False
 
-    async def reject_payment(self, payment_id: str, reason: str, admin_id: int) -> bool:
+    async def reject_payment(self, client: Client, payment_id: str, reason: str, admin_id: int) -> bool:
         # Bypass lock if coming from fraud check or other internal path
         # But for admin manual reject, we want the lock
         session = await self.repository.get_session(payment_id)
@@ -293,6 +293,32 @@ class PaymentService:
             rejected_at=datetime.now(timezone.utc),
             rejected_by=admin_id
         )
+
+        # ── ROUTE TO USER TOPIC ──
+        try:
+            from app.services.topic_manager import get_topic_manager
+            topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
+            
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=(
+                    f"❌ <b>PAYMENT REJECTED</b>\n\n"
+                    f"<b>Moderator:</b> {admin_id}\n"
+                    f"<b>Reason:</b> {reason}"
+                ),
+                message_thread_id=topic_id,
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Also auto-reopen support session status
+            db = DatabaseManager.get_db()
+            await db["user_topics"].update_one(
+                {"user_id": session.user_id},
+                {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc)}}
+            )
+        except Exception:
+            pass
+
         return True
 
     async def resume_active_sessions(self) -> None:

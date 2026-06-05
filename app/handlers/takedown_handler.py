@@ -19,7 +19,7 @@ from app.config import settings
 from app.core.redis_client import get_redis
 from app.core.database import DatabaseManager
 from app.services.takedown_service import TakedownService
-from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
+from app.services.topic_manager import get_topic_manager
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -527,18 +527,18 @@ async def handle_takedown_reject_reason(client: Client, message: Message) -> Non
                     extra={"ctx_user_id": user_id, "ctx_error": str(e)},
                 )
 
-            # AUTO-OPEN support ticket (source=TAKEDOWN_REJECTION)
+            # AUTO-OPEN support interaction
             try:
                 from app.services.support_service import get_support_service
-                from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
+                from app.services.topic_manager import get_topic_manager
 
                 topic_manager = get_topic_manager()
                 topic_id = await topic_manager.get_or_create_user_topic(
-                    client, user_id, TOPIC_SUPPORT
+                    client, user_id
                 )
 
                 support_service = get_support_service()
-                # Inject rejection context as first message in topic
+                # Inject rejection context as message in topic
                 await client.send_message(
                     chat_id=settings.VERIFICATION_GROUP_ID,
                     text=(
@@ -568,4 +568,4 @@ async def handle_takedown_reject_reason(client: Client, message: Message) -> Non
             extra={"ctx_record_id": record_id, "ctx_error": str(e)},
             exc_info=True,
         )
-        await message.reply_text("⚠️ Error processing rejection.")
+        await message.reply_text("⚠️ Error processing rejection.")("⚠️ Error processing rejection.")

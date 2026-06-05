@@ -29,18 +29,17 @@ _admin_states: dict[int, dict] = {}
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-async def _get_payments_topic(client: Client) -> Optional[int]:
+async def _get_payments_topic(client: Client, user_id: int) -> Optional[int]:
     try:
         from app.services.topic_manager import get_topic_manager
         topic_manager = get_topic_manager()
-        topic_id = await topic_manager.get_or_create_payments_topic(client)
+        topic_id = await topic_manager.get_or_create_user_topic(client, user_id)
         if topic_id:
             return topic_id
     except Exception as e:
-        logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
+        logger.error("Failed to get user topic for payment", extra={"ctx_error": str(e)})
 
-    # Fallback to the static payments hub topic from settings
-    return getattr(settings, "HUB_TOPIC_PAYMENTS", None)
+    return None
 
 
 async def _post_payment_request_card(
@@ -51,8 +50,8 @@ async def _post_payment_request_card(
     amount: float,
     method: str,
 ) -> None:
-    """Post initial request card in admin hub — admin must click to send details."""
-    topic_id = await _get_payments_topic(client)
+    """Post initial request card in user topic — admin must click to send details."""
+    topic_id = await _get_payments_topic(client, user_id)
     plan = PLANS.get(plan_id, {})
 
     text = (
@@ -158,7 +157,7 @@ async def _execute_rejection(
     card_message: Optional[Message] = None,
 ) -> bool:
     service = get_payment_service()
-    success = await service.reject_payment(session_id, reason, admin_id)
+    success = await service.reject_payment(client, session_id, reason, admin_id)
     if not success:
         logger.warning(
             "Rejection failed — session may be already processed",
