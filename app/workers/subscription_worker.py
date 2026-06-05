@@ -176,7 +176,7 @@ class SubscriptionWorker:
                 try:
                     # Idempotency: re-fetch to confirm still needs transition
                     fresh = await self._service.get_subscription(sub.user_id)
-                    if fresh is None or fresh.status.value != "active":
+                    if fresh is None or fresh.status.value != "ACTIVE":
                         continue
 
                     await self._service.set_grace(sub)
@@ -381,7 +381,7 @@ class SubscriptionWorker:
             async with _redis_lock(lock_key, ttl=60):
                 still_pending = await col.find_one({
                     "user_id": user_id,
-                    "status": "ACTIVE",
+                    "status": "active",
                     "reminder_3d_sent": {"$ne": True},
                 })
                 if not still_pending:
