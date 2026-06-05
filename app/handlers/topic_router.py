@@ -259,28 +259,47 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                     session = await payment_service.get_active_session(user_id)
 
                     if session and session.status == PaymentStatus.PENDING_DETAILS:
-                        await payment_service.update_status(session.id, PaymentStatus.AWAITING_PAYMENT)
-                        await payment_service.start_timeout(session.id)
-
-                        logger.info(
-                            "Payment session activated after confirmed delivery",
-                            extra={"ctx_payment_id": session.id, "ctx_user_id": user_id}
+                        advanced = await payment_service.update_status(
+                            session.id, PaymentStatus.AWAITING_PAYMENT
                         )
-
-                        try:
-                            await client.send_message(
-                                chat_id=message.chat.id,
-                                text="✅ <b>Delivery Confirmed</b>\nPayment session activated. User has 20 minutes to pay.",
-                                message_thread_id=thread_id,
-                                reply_to_message_id=message.id,
-                                parse_mode=ParseMode.HTML
+                        if advanced:
+                            await payment_service.start_timeout(session.id)
+                            logger.info(
+                                "Payment session activated after confirmed delivery",
+                                extra={"ctx_payment_id": session.id, "ctx_user_id": user_id}
                             )
-                        except Exception:
-                            pass
+                            try:
+                                await client.send_message(
+                                    chat_id=message.chat.id,
+                                    text="✅ <b>Delivery Confirmed</b>\nPayment session activated. User has 20 minutes to pay.",
+                                    message_thread_id=thread_id,
+                                    reply_to_message_id=message.id,
+                                    parse_mode=ParseMode.HTML
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            logger.warning(
+                                "Payment session advance rejected",
+                                extra={
+                                    "ctx_payment_id": session.id,
+                                    "ctx_current_status": session.status.value,
+                                    "ctx_attempted_to": PaymentStatus.AWAITING_PAYMENT.value,
+                                }
+                            )
+                    elif session:
+                        logger.debug(
+                            "Payment topic reply received but session not in PENDING_DETAILS — skipping advance",
+                            extra={
+                                "ctx_payment_id": session.id,
+                                "ctx_status": session.status.value,
+                            }
+                        )
                 except Exception as e:
-                    logger.warning(
+                    logger.error(
                         "Failed to advance payment session in topic_router",
-                        extra={"ctx_user_id": user_id, "ctx_error": str(e)}
+                        extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                        exc_info=True
                     )
         else:
             logger.warning(

@@ -105,17 +105,15 @@ class AppLifecycle:
                 },
             )
 
-            from app.services.topic_manager import get_topic_manager
             try:
-                topic_mgr = get_topic_manager()
-                if hasattr(topic_mgr, 'warm_cache_from_db'):
-                    await topic_mgr.warm_cache_from_db()
-                else:
-                    logger.warning("lifecycle_topic_cache_warm_skipped_method_missing")
-            except Exception as cache_warm_err:
+                from app.services.topic_manager import get_topic_manager
+                topic_manager = get_topic_manager()
+                await topic_manager.restore_cache()
+                logger.info("lifecycle_topic_cache_restored")
+            except Exception as e:
                 logger.warning(
-                    "lifecycle_topic_cache_warm_failed",
-                    extra={"ctx_error": str(cache_warm_err)},
+                    "lifecycle_topic_cache_restore_failed",
+                    extra={"ctx_error": str(e)}
                 )
 
         except Exception as e:

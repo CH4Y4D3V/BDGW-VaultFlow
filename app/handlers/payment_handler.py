@@ -33,10 +33,14 @@ async def _get_payments_topic(client: Client) -> Optional[int]:
     try:
         from app.services.topic_service import get_topic_service
         topic_service = get_topic_service()
-        return await topic_service.get_or_create_payments_topic(client)
+        topic_id = await topic_service.get_or_create_payments_topic(client)
+        if topic_id:
+            return topic_id
     except Exception as e:
         logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
-        return None
+    
+    # Fallback to the static payments hub topic from settings
+    return getattr(settings, "HUB_TOPIC_PAYMENTS", None)
 
 
 async def _post_payment_request_card(
@@ -101,6 +105,10 @@ async def _post_proof_card(
     session = await service.get_session(session_id)
     if not session:
         return
+
+    # Ensure topic_id fallback if not provided/persisted
+    if not topic_id:
+        topic_id = await _get_payments_topic(client)
 
     plan = PLANS.get(session.plan_id, {})
     caption = (

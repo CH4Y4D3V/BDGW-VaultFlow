@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -341,7 +341,7 @@ async def archive_to_vault(
         
         # ── Flow I: Hashing Deduplication ──
         content_hash = None
-        if msg.photo:
+        if media_type_str in (MediaType.PHOTO.value, "photo"):
             try:
                 photo_bytes = await client.download_media(msg, in_memory=True)
                 from app.utils.media_hashing import calculate_image_hash
@@ -356,7 +356,10 @@ async def archive_to_vault(
                     )
                     # We still archive but tag it as duplicate
             except Exception as e:
-                logger.warning("hashing_failed_during_archival", extra={"ctx_error": str(e)})
+                logger.warning(
+                    "image_hashing_failed",
+                    extra={"ctx_media_type": media_type_str, "ctx_error": str(e)}
+                )
 
         vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
 
@@ -789,7 +792,7 @@ async def execute_reject(
 
                 await vault_col.update_one(
                     {"content_id": content_id},
-                    {"$set": {"status": ModerationState.REJECTED, "updated_at": now}}
+                    {"$set": {"status": ModerationState.REJECTED.value, "updated_at": now}}
                 )
         except Exception as e:
             logger.warning("Failed to update vault status to REJECTED", extra={"ctx_error": str(e)})

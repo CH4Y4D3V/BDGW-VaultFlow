@@ -47,10 +47,9 @@ class TopicManager:
         self._lock = asyncio.Lock()
 
     async def restore_cache(self) -> None:
-        """Loads all active topic mappings from MongoDB into memory (GAP 8 FIX)."""
+        """Loads all active topic mappings from MongoDB into memory."""
         if self._initialized:
             return
-
         try:
             db = DatabaseManager.get_db()
             cursor = db["user_topics"].find({})
@@ -58,14 +57,18 @@ class TopicManager:
                 u_id = doc["user_id"]
                 t_type = doc["topic_type"]
                 t_id = doc["topic_id"]
-
                 cache_key = f"user:{u_id}:{t_type}"
                 self._local_cache[cache_key] = int(t_id)
-
             self._initialized = True
-            logger.info("TopicManager cache restored", extra={"ctx_count": len(self._local_cache)})
+            logger.info(
+                "TopicManager cache restored",
+                extra={"ctx_count": len(self._local_cache)}
+            )
         except Exception as e:
-            logger.error("Failed to restore TopicManager cache", extra={"ctx_error": str(e)})
+            logger.error(
+                "TopicManager cache restore failed",
+                extra={"ctx_error": str(e)}
+            )
 
     async def get_or_create_user_topic(
         self,

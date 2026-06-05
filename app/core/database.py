@@ -133,6 +133,30 @@ class DataMigrationManager:
 
         logger.info("migration_vault_stabilization_complete")
 
+    @classmethod
+    async def stabilize_support_messages(cls, db: AsyncIOMotorDatabase) -> None:
+        """
+        Drop support_hub_msg_unique if it exists without partialFilterExpression.
+        This is a one-time migration to replace the sparse-only index definition
+        with the partialFilterExpression-gated definition that correctly excludes
+        hub_message_id=null documents from the unique constraint.
+        """
+        collection = db["support_messages"]
+        try:
+            existing = await collection.list_indexes().to_list(length=100)
+            for idx in existing:
+                if idx.get("name") == "support_hub_msg_unique":
+                    # If partialFilterExpression is absent, the old index is in place
+                    if "partialFilterExpression" not in idx:
+                        await collection.drop_index("support_hub_msg_unique")
+                        logger.info("migration_support_hub_msg_index_dropped")
+                    break
+        except Exception as e:
+            logger.warning(
+                "migration_support_hub_msg_index_check_failed",
+                extra={"ctx_error": str(e)}
+            )
+
 
 class DatabaseManager:
     _client: Optional[AsyncIOMotorClient] = None
@@ -181,6 +205,7 @@ class DatabaseManager:
         try:
             await DataMigrationManager.stabilize_queue(cls._db)
             await DataMigrationManager.stabilize_vault(cls._db)
+            await DataMigrationManager.stabilize_support_messages(cls._db)
         except Exception as e:
             logger.error(
                 "migration_stabilization_audit_failed",
@@ -272,7 +297,7 @@ class DatabaseManager:
             
             # ── RC-11: Surgical Index Reconciliation ──────────────────────
             # Specifically for unique indexes which often change definitions
-            target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique"]
+            target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique", "support_hub_msg_unique"]
             
             try:
                 existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
