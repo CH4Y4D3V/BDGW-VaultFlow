@@ -81,7 +81,7 @@ def _flood_buffer() -> int:
 
 def _get_sub_repo() -> SubscriptionRepository:
     """Return a SubscriptionRepository bound to the active Motor database."""
-    return SubscriptionRepository(DatabaseManager.get_db())
+    return SubscriptionRepository()
 
 
 def _get_queue_repo() -> QueueRepository:
@@ -92,13 +92,12 @@ def _get_queue_repo() -> QueueRepository:
 def _get_onboarding_service() -> OnboardingService:
     """Return an OnboardingService with fully-wired dependencies."""
     from app.repositories.user_repository import UserRepository
-    db = DatabaseManager.get_db()
-    return OnboardingService(_get_sub_repo(), UserRepository(db))
+    return OnboardingService(_get_sub_repo(), UserRepository())
 
 
 def _get_sub_service() -> SubscriptionService:
     """Return a SubscriptionService instance."""
-    return SubscriptionService(DatabaseManager.get_db())
+    return SubscriptionService()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -574,12 +573,11 @@ async def handle_start(client: Client, message: Message) -> None:
 
     try:
         from app.repositories.user_repository import UserRepository
-        db = DatabaseManager.get_db()
-        user_repo = UserRepository(db)
+        user_repo = UserRepository()
 
         # ── Look up existing user ──────────────────────────────────────────
         try:
-            user_doc = await user_repo.find_one({"user_id": user_id})
+            user_doc = await user_repo.get_user(user_id)
         except Exception as repo_err:
             logger.error(
                 "start_repo_find_failed",
@@ -618,33 +616,16 @@ async def handle_start(client: Client, message: Message) -> None:
             # bot restart after DB write but before Telegram delivery does
             # not show onboarding twice.
             now = datetime.now(timezone.utc)
-            new_user_doc = {
-                "user_id": user_id,
-                "first_name": first_name,
-                "last_name": message.from_user.last_name,
-                "full_name": (
-                    f"{first_name} {message.from_user.last_name or ''}".strip()
-                ),
-                "username": message.from_user.username,
-                "join_date": now,
-                "is_premium": False,
-                "is_banned": False,
-                "is_muted": False,
-                "ban_reason": None,
-                "mute_reason": None,
-                "mute_until": None,
-                "warnings": 0,
-                "trust_score": 0.0,
-                "fraud_score": 0.0,
-                "referral_code": uuid.uuid4().hex[:8],
-                "referred_by": referred_by,
-                "terms_accepted": False,
-                "onboarded": True,
-                "created_at": now,
-                "updated_at": now,
-            }
+            
             try:
-                await user_repo.insert_one(new_user_doc)
+                new_user = await user_repo.upsert_user(
+                    user_id=user_id,
+                    full_name=f"{first_name} {message.from_user.last_name or ''}".strip(),
+                    username=message.from_user.username,
+                    referred_by=referred_by,
+                )
+                # Mark as onboarded in the same flow
+                await user_repo.set_onboarded(user_id, True)
             except Exception as insert_err:
                 # DuplicateKey means race condition — another /start fired
                 # concurrently.  Load the existing doc and treat as returning.
@@ -656,7 +637,7 @@ async def handle_start(client: Client, message: Message) -> None:
                     },
                 )
                 try:
-                    user_doc = await user_repo.find_one({"user_id": user_id})
+                    user_doc = await user_repo.get_user(user_id)
                 except Exception:
                     pass
                 if user_doc is not None:
@@ -671,8 +652,13 @@ async def handle_start(client: Client, message: Message) -> None:
             try:
                 sub_service = _get_sub_service()
                 from app.models.subscription import Plan
+                # Note: sub_service.grant(user_id, plan, duration, granted_by, notes)
                 await sub_service.grant(
-                    user_id, Plan.FREE, None, 0, "Auto-registered on /start"
+                    user_id=user_id,
+                    plan=Plan.FREE,
+                    duration_days=None,
+                    granted_by=0,  # System
+                    notes="Auto-registered on /start"
                 )
             except Exception as sub_err:
                 logger.warning(
