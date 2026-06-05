@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+from pydantic import BaseModel, Field
 
 
 class PaymentStatus(str, Enum):
@@ -22,9 +22,8 @@ class PaymentStatus(str, Enum):
     PROCESSING = "processing"
 
 
-@dataclass
-class PaymentSession:
-    id: str
+class PaymentSession(BaseModel):
+    id: str = Field(..., alias="_id")
     user_id: int
     plan_id: str
     locked_amount: float
@@ -36,8 +35,8 @@ class PaymentSession:
     screenshot_file_id: Optional[str] = None
     topic_id: Optional[int] = None
     
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: Optional[datetime] = None
     
     locked_at: Optional[datetime] = None
@@ -48,51 +47,29 @@ class PaymentSession:
     rejected_at: Optional[datetime] = None
     rejected_by: Optional[int] = None
 
+    class Config:
+        populate_by_name = True
+
     def to_dict(self) -> dict:
-        return {
-            "_id": self.id,
-            "user_id": self.user_id,
-            "plan_id": self.plan_id,
-            "locked_amount": self.locked_amount,
-            "points_used": self.points_used,
-            "currency": self.currency,
-            "status": self.status.value,
-            "payment_method": self.payment_method,
-            "txid": self.txid,
-            "screenshot_file_id": self.screenshot_file_id,
-            "topic_id": self.topic_id,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "expires_at": self.expires_at,
-            "locked_at": self.locked_at,
-            "approved_at": self.approved_at,
-            "approved_by": self.approved_by,
-            "rejection_reason": self.rejection_reason,
-            "rejected_at": self.rejected_at,
-            "rejected_by": self.rejected_by,
-        }
+        return self.model_dump(by_alias=True)
 
     @classmethod
-    def from_dict(cls, data: dict) -> PaymentSession:
-        return cls(
-            id=data["_id"],
-            user_id=data["user_id"],
-            plan_id=data["plan_id"],
-            locked_amount=data["locked_amount"],
-            points_used=data.get("points_used", 0),
-            currency=data.get("currency", "BDT"),
-            status=PaymentStatus(data["status"]),
-            payment_method=data.get("payment_method"),
-            txid=data.get("txid"),
-            screenshot_file_id=data.get("screenshot_file_id"),
-            topic_id=data.get("topic_id"),
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            expires_at=data.get("expires_at"),
-            locked_at=data.get("locked_at"),
-            approved_at=data.get("approved_at"),
-            approved_by=data.get("approved_by"),
-            rejection_reason=data.get("rejection_reason"),
-            rejected_at=data.get("rejected_at"),
-            rejected_by=data.get("rejected_by"),
-        )
+    def from_dict(cls, data: dict) -> "PaymentSession":
+        return cls(**data)
+
+
+class TXIDRegistry(BaseModel):
+    txid: str = Field(..., alias="_id")
+    user_id: int
+    payment_id: str
+    verified_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Config:
+        populate_by_name = True
+
+    def to_dict(self) -> dict:
+        return self.model_dump(by_alias=True)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TXIDRegistry":
+        return cls(**data)

@@ -31,14 +31,14 @@ _admin_states: dict[int, dict] = {}
 
 async def _get_payments_topic(client: Client) -> Optional[int]:
     try:
-        from app.services.topic_service import get_topic_service
-        topic_service = get_topic_service()
-        topic_id = await topic_service.get_or_create_payments_topic(client)
+        from app.services.topic_manager import get_topic_manager
+        topic_manager = get_topic_manager()
+        topic_id = await topic_manager.get_or_create_payments_topic(client)
         if topic_id:
             return topic_id
     except Exception as e:
         logger.error("Failed to get payments topic", extra={"ctx_error": str(e)})
-    
+
     # Fallback to the static payments hub topic from settings
     return getattr(settings, "HUB_TOPIC_PAYMENTS", None)
 

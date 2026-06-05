@@ -121,8 +121,6 @@ class FFmpegProcessor:
             return output_path
 
     async def _process_video(self, input_path: str, output_path: str, config: dict) -> str:
-        import random
-        
         text1 = config.get("watermark_text", "BDGW")
         text2 = "VaultFlow" # Secondary text
 
