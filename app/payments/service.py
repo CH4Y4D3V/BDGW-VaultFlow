@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 import random
 from datetime import datetime, timedelta, timezone
@@ -7,8 +8,10 @@ from typing import Optional
 
 from pyrogram import Client
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 
 from app.config import settings
+from app.core.database import DatabaseManager  # FIX: was missing, caused NameError in reject_payment
 from app.models.subscription import Plan
 from app.payments.models import PaymentSession, PaymentStatus
 from app.payments.repository import PaymentRepository
@@ -25,6 +28,8 @@ PLANS = {
 }
 
 SESSION_TIMEOUT_MINUTES = 20
+
+_MAX_FLOOD_WAIT_SECONDS = 60
 
 # --- GAP 1 FIX: Correct FSM transitions ---
 ALLOWED_TRANSITIONS = {
@@ -70,6 +75,40 @@ ALLOWED_TRANSITIONS = {
 }
 
 
+async def _send_safe(
+    client: Client,
+    chat_id: int,
+    text: str,
+    parse_mode: ParseMode = ParseMode.HTML,
+) -> bool:
+    """
+    Send a Telegram message with explicit FloodWait handling and a single capped retry.
+    Returns True on success, False on any failure.
+    Used internally by PaymentService to avoid duplicating FloodWait boilerplate.
+    """
+    try:
+        await client.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+        return True
+    except FloodWait as exc:
+        wait = min(exc.value, _MAX_FLOOD_WAIT_SECONDS)
+        logger.warning(
+            "FloodWait %ds on send_message to chat %d — sleeping.",
+            wait, chat_id,
+        )
+        await asyncio.sleep(wait)
+        try:
+            await client.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+            return True
+        except Exception as retry_exc:
+            logger.warning(
+                "Retry after FloodWait failed for chat %d: %s", chat_id, retry_exc
+            )
+            return False
+    except Exception as exc:
+        logger.warning("send_message failed for chat %d: %s", chat_id, exc)
+        return False
+
+
 class PaymentService:
     def __init__(self, repository: PaymentRepository, referral_repo: ReferralRepository):
         self.repository = repository
@@ -81,22 +120,26 @@ class PaymentService:
         plan_id: str,
         method: Optional[str] = None,
     ) -> PaymentSession:
+        """
+        Create a new payment session for the given user and plan.
+        Referral points (if any) are snapshotted as a discount and deducted
+        AFTER the session record is persisted, satisfying restart-safety:
+        if the deduction fails, the session document exists with points_used > 0
+        and can be reconciled on recovery.
+
+        BUG FIX: Original deducted points BEFORE saving the session. If save_session
+        raised, points were permanently lost with no recovery record. Fixed by
+        reversing the order.
+        """
         if plan_id not in PLANS:
             raise ValueError(f"Invalid plan: {plan_id}")
 
         plan = PLANS[plan_id]
         base_price = plan["price"]
 
-        # Referral discount: 1 point = ৳1
+        # Snapshot referral balance — read only, no mutation yet
         wallet = await self.referral_repo.get_wallet(user_id)
         points = wallet.get("points_balance", 0) if wallet else 0
-
-        # ── SYSTEM 14: SNAPSHOT & LOCK POINTS ──
-        if points > 0:
-            from app.referral.service import ReferralService
-            # We use the repository directly to deduct to avoid circular imports
-            await self.referral_repo.deduct_points(user_id, points)
-            logger.info("points_locked_for_session", extra={"ctx_user_id": user_id, "ctx_points": points})
 
         base_payable = max(0, base_price - points)
 
@@ -113,6 +156,7 @@ class PaymentService:
             payment_method=method,
         )
 
+        # FIX: Persist the session BEFORE deducting points (restart-safety)
         await self.repository.save_session(session)
         await self.repository.log_event(session.id, "session_created", {
             "base_price": base_price,
@@ -120,29 +164,58 @@ class PaymentService:
             "locked_amount": locked_amount
         })
 
+        # Deduct points after session is safely persisted
+        if points > 0:
+            try:
+                await self.referral_repo.deduct_points(user_id, points)
+                logger.info(
+                    "points_locked_for_session",
+                    extra={"ctx_user_id": user_id, "ctx_points": points},
+                )
+            except Exception as exc:
+                # Session exists with points_used > 0 — recovery job must reconcile.
+                logger.error(
+                    "points_deduction_failed_after_session_created",
+                    extra={
+                        "ctx_user_id": user_id,
+                        "ctx_points": points,
+                        "ctx_session_id": session.id,
+                        "ctx_error": str(exc),
+                    },
+                )
+
         return session
 
     async def get_session(self, payment_id: str) -> Optional[PaymentSession]:
+        """Fetch a payment session by its ID. Returns None if not found."""
         return await self.repository.get_session(payment_id)
 
     async def check_txid_unique(self, txid: str) -> bool:
         """
-        FIX 9: Verify TxID is not already in use.
+        Verify that a TXID is not already associated with a submitted payment.
+        Returns True if the TXID is unused, False if a duplicate is detected.
+        Fails open (returns True) on database error, but logs the failure.
         """
         try:
             from app.repositories.txid_repository import TXIDRepository
-            from app.core.database import DatabaseManager
             repo = TXIDRepository(DatabaseManager.get_db())
             existing = await repo.get_by_txid(txid)
             return existing is None
         except Exception as e:
             logger.error("txid_uniqueness_check_failed", extra={"ctx_error": str(e)})
-            return True # Fail open to allow payment but log error
+            return True  # Fail open to allow payment but log error
 
     async def get_active_session(self, user_id: int) -> Optional[PaymentSession]:
+        """Fetch the current active (non-terminal) session for a user."""
         return await self.repository.get_active_session(user_id)
 
     async def update_status(self, payment_id: str, status: PaymentStatus, **kwargs) -> bool:
+        """
+        Transition a payment session to a new status, enforcing the FSM.
+        Additional fields can be set via keyword arguments (must be valid session attributes).
+        Returns False if the transition is not permitted by ALLOWED_TRANSITIONS or if
+        the session does not exist.
+        """
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
@@ -171,7 +244,12 @@ class PaymentService:
         return True
 
     async def start_timeout(self, payment_id: str, remaining_seconds: Optional[int] = None) -> bool:
-        """Start or resume the payment timeout."""
+        """
+        Start or resume the payment session timeout.
+        If remaining_seconds is provided, the timer starts from that remaining window.
+        Otherwise the full SESSION_TIMEOUT_MINUTES window is used.
+        Returns False if the session does not exist.
+        """
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
@@ -195,21 +273,41 @@ class PaymentService:
 
     async def approve_payment(self, client: Client, payment_id: str, admin_id: int) -> bool:
         """
-        --- 7.5 SUBSCRIPTION ACTIVATION (ATOMIC) ---
+        Atomic subscription activation flow (Spec Section 7.5).
+
+        Steps:
+          1. Acquire distributed processing lock (prevents concurrent approval).
+          2. Reload and validate session state.
+          3. Activate subscription via SubscriptionService.
+          4. Generate one-time premium invite link.
+          5. Persist payment history record.
+          6. Notify user via DM (FloodWait-safe).
+          7. Mark session APPROVED and clear timeout.
+          8. Route notification to user's Verification Hub topic.
+          9. Emit to Admin Logs topic.
+         10. Release lock in finally block.
+
+        Returns True on success, False if lock not acquired, session invalid, or
+        an unrecoverable error occurs (session rolled back to UNDER_REVIEW).
+
+        BUG FIX: session.currency replaced with getattr(session, 'currency', 'BDT')
+        to prevent AttributeError — PaymentSession has no currency field.
+        BUG FIX: Added FloodWait handling on user DM send.
+        BUG FIX: Lock is now released in a finally block.
         """
-        # Step 3: Acquire distributed lock
         lock_acquired = await self.repository.acquire_processing_lock(payment_id)
         if not lock_acquired:
             return False
 
         try:
-            # Step 1 & 2: Reload and validate state
             session = await self.repository.get_session(payment_id)
             if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):
                 return False
 
-            # Step 4: Activate subscription
             plan = PLANS[session.plan_id]
+            currency = getattr(session, "currency", "BDT")  # FIX: was session.currency → AttributeError
+
+            # Activate subscription
             subscription = await SubscriptionService().grant(
                 user_id=session.user_id,
                 plan=Plan.PREMIUM,
@@ -218,7 +316,7 @@ class PaymentService:
                 notes=f"Payment approved: {payment_id}",
             )
 
-            # Step 5: Generate unique one-time invite link (30 min expiry)
+            # Generate unique one-time invite link
             from app.services.invite_service import InviteService
             invite_service = InviteService()
 
@@ -238,9 +336,12 @@ class PaymentService:
                     )
                     invite_link = invite_obj.telegram_link
                 except Exception as e:
-                    logger.warning("failed_to_generate_invite_during_activation", extra={"ctx_error": str(e)})
+                    logger.warning(
+                        "failed_to_generate_invite_during_activation",
+                        extra={"ctx_error": str(e)},
+                    )
 
-            # Step 7: Save payment history
+            # Persist payment history
             await self.repository.record_subscription_history(
                 payment_id,
                 {
@@ -253,42 +354,46 @@ class PaymentService:
                 },
             )
 
-            # Notify user
+            # Notify user via DM (FloodWait-safe)
             message = "✅ <b>Payment Approved!</b>\n\nYour premium access has been activated."
             if invite_link:
-                message += f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n<i>This link expires in 30 minutes and can only be used once.</i>"
+                message += (
+                    f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n"
+                    "<i>This link expires in 30 minutes and can only be used once.</i>"
+                )
 
-            await client.send_message(session.user_id, message, parse_mode=ParseMode.HTML)
+            await _send_safe(client, session.user_id, message)
 
-            # Step 9: Clear session
+            # Mark session APPROVED and clear timeout
             session.status = PaymentStatus.APPROVED
             session.approved_at = datetime.now(timezone.utc)
             session.approved_by = admin_id
             await self.repository.save_session(session)
             await self.repository.clear_timeout(payment_id)
-
             await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
 
-            # ── ROUTE TO USER TOPIC ──
+            # Route to user's Verification Hub topic
             try:
                 from app.services.topic_manager import get_topic_manager
                 topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
-                
                 await client.send_message(
                     chat_id=settings.VERIFICATION_GROUP_ID,
                     text=(
                         f"✅ <b>PAYMENT APPROVED</b>\n\n"
-                        f"<b>Amount:</b> {session.locked_amount} {session.currency}\n"
+                        f"<b>Amount:</b> {session.locked_amount} {currency}\n"
                         f"<b>Plan:</b> {plan['label']}\n"
                         f"<b>Admin:</b> {admin_id}"
                     ),
                     message_thread_id=topic_id,
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "approve_payment_topic_routing_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
 
-            # ── LOG TO ADMIN LOGS ──
+            # Emit to Admin Logs topic
             try:
                 from app.services.admin_logger import get_admin_logger
                 await get_admin_logger().log(
@@ -297,79 +402,149 @@ class PaymentService:
                     admin_id=admin_id,
                     admin_name=f"Admin {admin_id}",
                     target_user_id=session.user_id,
-                    details=f"Plan: {plan['label']}\nAmount: {session.locked_amount} {session.currency}"
+                    details=f"Plan: {plan['label']}\nAmount: {session.locked_amount} {currency}"
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "approve_payment_admin_log_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
 
             return True
 
         except Exception as e:
-            logger.exception("Atomic approval failed", extra={"ctx_payment_id": payment_id, "ctx_error": str(e)})
+            logger.exception(
+                "Atomic approval failed",
+                extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
+            )
             await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
             return False
 
+        finally:
+            # FIX: Always release the processing lock, whether approval succeeded or failed.
+            try:
+                await self.repository.release_processing_lock(payment_id)
+            except Exception as exc:
+                logger.warning(
+                    "approve_payment_lock_release_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
+
     async def reject_payment(self, client: Client, payment_id: str, reason: str, admin_id: int) -> bool:
-        # Bypass lock if coming from fraud check or other internal path
-        # But for admin manual reject, we want the lock
+        """
+        Reject a payment session, notify the user, route to their topic, and emit admin log.
+
+        Lock is always acquired before state mutation (regardless of current status) to
+        prevent races. Lock is released in a finally block.
+
+        BUG FIX: DatabaseManager was never imported — raised NameError on the
+        db["user_topics"].update_one call. Import now at module level.
+        BUG FIX: User was never notified of rejection. Added client.send_message to user
+        with FloodWait handling.
+        BUG FIX: Lock was only acquired for UNDER_REVIEW status. Moved outside the
+        status check so it always guards the state mutation.
+        BUG FIX: Lock was never released. Added try/finally.
+        """
         session = await self.repository.get_session(payment_id)
-        if not session: return False
+        if not session:
+            return False
 
-        if session.status == PaymentStatus.UNDER_REVIEW:
-            lock_acquired = await self.repository.acquire_processing_lock(payment_id)
-            if not lock_acquired:
-                return False
+        # FIX: Always acquire lock before mutation, not only for UNDER_REVIEW
+        lock_acquired = await self.repository.acquire_processing_lock(payment_id)
+        if not lock_acquired:
+            return False
 
-        await self.update_status(
-            payment_id,
-            PaymentStatus.REJECTED,
-            rejection_reason=reason,
-            rejected_at=datetime.now(timezone.utc),
-            rejected_by=admin_id
-        )
-
-        # ── ROUTE TO USER TOPIC ──
         try:
-            from app.services.topic_manager import get_topic_manager
-            topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
-            
-            await client.send_message(
-                chat_id=settings.VERIFICATION_GROUP_ID,
-                text=(
-                    f"❌ <b>PAYMENT REJECTED</b>\n\n"
-                    f"<b>Moderator:</b> {admin_id}\n"
-                    f"<b>Reason:</b> {reason}"
-                ),
-                message_thread_id=topic_id,
-                parse_mode=ParseMode.HTML
+            await self.update_status(
+                payment_id,
+                PaymentStatus.REJECTED,
+                rejection_reason=reason,
+                rejected_at=datetime.now(timezone.utc),
+                rejected_by=admin_id,
             )
-            
-            # Also auto-reopen support session status
-            db = DatabaseManager.get_db()
-            await db["user_topics"].update_one(
-                {"user_id": session.user_id},
-                {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc)}}
-            )
-        except Exception:
-            pass
 
-        # ── LOG TO ADMIN LOGS ──
-        try:
-            from app.services.admin_logger import get_admin_logger
-            await get_admin_logger().log(
-                client=client,
-                action="PAYMENT REJECTED",
-                admin_id=admin_id,
-                admin_name=f"Admin {admin_id}",
-                target_user_id=session.user_id,
-                details=f"Reason: {reason}"
+            # FIX: Notify user of rejection (was missing entirely)
+            rejection_msg = (
+                "❌ <b>Payment Rejected</b>\n\n"
+                f"<b>Reason:</b> {reason}\n\n"
+                "If you believe this is an error, please contact support via /help."
             )
-        except Exception:
-            pass
+            await _send_safe(client, session.user_id, rejection_msg)
 
-        return True
+            # Route to user's Verification Hub topic
+            try:
+                from app.services.topic_manager import get_topic_manager
+                topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
+
+                await client.send_message(
+                    chat_id=settings.VERIFICATION_GROUP_ID,
+                    text=(
+                        f"❌ <b>PAYMENT REJECTED</b>\n\n"
+                        f"<b>Moderator:</b> {admin_id}\n"
+                        f"<b>Reason:</b> {reason}"
+                    ),
+                    message_thread_id=topic_id,
+                    parse_mode=ParseMode.HTML,
+                )
+
+                # Reopen support session so user can follow up
+                db = DatabaseManager.get_db()  # FIX: DatabaseManager now imported
+                await db["user_topics"].update_one(
+                    {"user_id": session.user_id},
+                    {"$set": {"status": "pending", "updated_at": datetime.now(timezone.utc)}},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reject_payment_topic_routing_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
+
+            # Emit to Admin Logs topic
+            try:
+                from app.services.admin_logger import get_admin_logger
+                await get_admin_logger().log(
+                    client=client,
+                    action="PAYMENT REJECTED",
+                    admin_id=admin_id,
+                    admin_name=f"Admin {admin_id}",
+                    target_user_id=session.user_id,
+                    details=f"Reason: {reason}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "reject_payment_admin_log_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
+
+            return True
+
+        except Exception as exc:
+            logger.exception(
+                "reject_payment_failed",
+                extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+            )
+            return False
+
+        finally:
+            # FIX: Always release the processing lock.
+            try:
+                await self.repository.release_processing_lock(payment_id)
+            except Exception as exc:
+                logger.warning(
+                    "reject_payment_lock_release_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
 
     async def resume_active_sessions(self) -> None:
+        """
+        On bot startup, restore timeout timers for all active payment sessions.
+        Sessions whose expires_at has already passed are expired immediately.
+        Sessions still within their window have their remaining time resumed.
+        Sessions with no expires_at are given a fresh full timeout.
+
+        Resets any sessions stuck in PROCESSING state (crashed mid-approval) back
+        to UNDER_REVIEW before scanning.
+        """
         try:
             reset_count = await self.repository.reset_stuck_processing()
             if reset_count:
@@ -383,10 +558,9 @@ class PaymentService:
                 PaymentStatus.WAITING_SCREENSHOT.value,
                 PaymentStatus.UNDER_REVIEW.value,
             ]
-            docs = await self.repository._collection.find(
-                {"status": {"$in": active_statuses}}
-            ).to_list(length=None)
-            active_sessions = [PaymentSession.from_dict(d) for d in docs]
+
+            # Use a public repository method rather than accessing _collection directly
+            active_sessions = await self.repository.get_sessions_by_statuses(active_statuses)
 
             now = datetime.now(timezone.utc)
             for session in active_sessions:
@@ -401,7 +575,10 @@ class PaymentService:
                     await self.start_timeout(session.id, remaining_seconds=int(remaining))
                     logger.info(
                         "Resumed payment session timer",
-                        extra={"ctx_payment_id": session.id, "ctx_remaining": int(remaining)},
+                        extra={
+                            "ctx_payment_id": session.id,
+                            "ctx_remaining": int(remaining),
+                        },
                     )
                 else:
                     await self.update_status(session.id, PaymentStatus.EXPIRED)

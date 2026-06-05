@@ -1,9 +1,3 @@
-# ARCHITECTURE NOTE: Queue is implemented on MongoDB via find_one_and_update atomic claiming.
-# Redis is available in the environment but not used for queuing.
-# The MongoDB approach provides: atomic job claiming, dead-letter promotion, stale lock recovery.
-# Trade-off vs Redis Streams: 2s polling interval instead of pub/sub instant pickup.
-# This is acceptable for current volume. Redis Streams can be added later for sub-second latency.
-
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Any
 from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorClientSession
@@ -36,7 +30,13 @@ class QueueRepository:
     # ─── Enqueue ─────────────────────────────────────────────────────────────
 
     async def enqueue(self, job: QueueJob) -> str:
-        """Strictly validates and enqueues a job."""
+        """
+        Strictly validate and enqueue a job.
+        Raises InvalidQueueJobError if schema_version < 1.
+        Raises VaultReferenceMissingError if vault references are absent.
+        Raises DuplicateJobError if an active job already exists for content_id.
+        Returns the inserted job_id as a string.
+        """
         if job.schema_version < 1:
             raise InvalidQueueJobError("Job must have schema_version >= 1")
 
@@ -69,7 +69,15 @@ class QueueRepository:
     # ─── Claim / Lock ─────────────────────────────────────────────────────────
 
     async def claim_watermark_jobs(self, worker_id: str, batch_size: int = 1) -> List[dict]:
-        """Atomically claim jobs for watermarking, supporting media groups."""
+        """
+        Atomically claim jobs for watermarking, supporting media groups.
+        If a claimed job belongs to a media group, the entire group is claimed atomically.
+        Uses MongoDB multi-document transactions when the deployment supports them
+        (replica set / mongos). Falls back to find_one_and_update otherwise.
+
+        BUG FIX: In the transaction path, the find() used to retrieve claimed group
+        docs now passes session=session so in-transaction uncommitted writes are visible.
+        """
         from app.core.database import DatabaseManager
         use_transactions = DatabaseManager.transactions_supported()
 
@@ -116,10 +124,14 @@ class QueueRepository:
                                 session=session
                             )
                             if result.modified_count > 0:
-                                cursor = self._queue.find({
-                                    "media_group_id": group_id,
-                                    "locked_by": worker_id,
-                                }).sort("album_sequence_index", 1)
+                                # FIX: pass session so the find sees the in-transaction writes.
+                                cursor = self._queue.find(
+                                    {
+                                        "media_group_id": group_id,
+                                        "locked_by": worker_id,
+                                    },
+                                    session=session,
+                                ).sort("album_sequence_index", 1)
                                 async for g_doc in cursor:
                                     if g_doc["_id"] not in claimed_ids:
                                         claimed.append(g_doc)
@@ -176,6 +188,11 @@ class QueueRepository:
         """
         Atomically claim the next N pending jobs.
         If a claimed job is part of a media group, atomically claims the ENTIRE group.
+        Uses MongoDB multi-document transactions when supported; falls back to
+        find_one_and_update on standalone instances.
+
+        BUG FIX: In the transaction path, the find() used to retrieve claimed group
+        docs now passes session=session so in-transaction uncommitted writes are visible.
         """
         from app.core.database import DatabaseManager
         use_transactions = DatabaseManager.transactions_supported()
@@ -223,10 +240,14 @@ class QueueRepository:
                                 session=session
                             )
                             if result.modified_count > 0:
-                                cursor = self._queue.find({
-                                    "media_group_id": group_id,
-                                    "locked_by": worker_id,
-                                }).sort("album_sequence_index", 1)
+                                # FIX: pass session so the find sees the in-transaction writes.
+                                cursor = self._queue.find(
+                                    {
+                                        "media_group_id": group_id,
+                                        "locked_by": worker_id,
+                                    },
+                                    session=session,
+                                ).sort("album_sequence_index", 1)
                                 async for g_doc in cursor:
                                     if g_doc["_id"] not in claimed_ids:
                                         claimed.append(g_doc)
@@ -277,15 +298,16 @@ class QueueRepository:
                 else:
                     break
 
-        # FIX 14: removed the duplicate `return claimed` that appeared here.
-        # The original file had two `return claimed` statements — the second one
-        # was unreachable dead code that confused static analysis. Removed.
         return claimed
 
     # ─── State Transitions ────────────────────────────────────────────────────
 
     async def mark_processing(self, job_id: str, worker_id: str) -> bool:
-        """Transition from LOCKED to PROCESSING."""
+        """
+        Transition a job from LOCKED to PROCESSING.
+        Returns True if the document was updated, False if the job was not found
+        or was not in LOCKED state owned by this worker.
+        """
         result = await self._queue.update_one(
             {"_id": ObjectId(job_id), "locked_by": worker_id, "status": JobStatus.LOCKED},
             {
@@ -298,7 +320,11 @@ class QueueRepository:
         return result.modified_count > 0
 
     async def mark_ready(self, job_id: str, worker_id: str) -> bool:
-        """Transition to READY state after watermarking or preparation."""
+        """
+        Transition a job to READY state after watermarking or preparation.
+        Clears the lock so the delivery dispatcher can claim the job.
+        Returns True if the document was updated.
+        """
         result = await self._queue.update_one(
             {"_id": ObjectId(job_id), "locked_by": worker_id},
             {
@@ -313,9 +339,17 @@ class QueueRepository:
         return result.modified_count > 0
 
     async def mark_delivering(self, job_id: str, worker_id: str) -> bool:
-        """Transition to DELIVERING state."""
+        """
+        Transition a job to DELIVERING state.
+        Accepts jobs in LOCKED or PROCESSING state owned by this worker.
+        Returns True if the document was updated.
+        """
         result = await self._queue.update_one(
-            {"_id": ObjectId(job_id), "locked_by": worker_id, "status": {"$in": [JobStatus.LOCKED, JobStatus.PROCESSING]}},
+            {
+                "_id": ObjectId(job_id),
+                "locked_by": worker_id,
+                "status": {"$in": [JobStatus.LOCKED, JobStatus.PROCESSING]},
+            },
             {
                 "$set": {
                     "status": JobStatus.DELIVERING,
@@ -326,7 +360,11 @@ class QueueRepository:
         return result.modified_count > 0
 
     async def release_claim(self, job_id: str) -> None:
-        """Release lock and return to PENDING or WATERMARKING."""
+        """
+        Release the lock on a job and return it to its correct pre-lock status.
+        Jobs that were in WATERMARKING state (identified by watermark_state=PENDING)
+        are returned to WATERMARKING; all others go back to PENDING.
+        """
         doc = await self._queue.find_one({"_id": ObjectId(job_id)})
         if not doc:
             return
@@ -350,7 +388,7 @@ class QueueRepository:
     # ─── Progress Updates ─────────────────────────────────────────────────────
 
     async def record_target_delivered(self, job_id: str, target_id: str) -> None:
-        """Record a successful delivery to a target."""
+        """Record a successful delivery to a target using $addToSet for idempotency."""
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
@@ -360,7 +398,7 @@ class QueueRepository:
         )
 
     async def record_target_failed(self, job_id: str, target_id: str, error: str) -> None:
-        """Record a failed delivery attempt to a target."""
+        """Record a failed delivery attempt to a target, keyed by target_id."""
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
@@ -374,41 +412,81 @@ class QueueRepository:
     # ─── Idempotency Locks ────────────────────────────────────────────────────
 
     async def acquire_delivery_lock(self, job_id: str, target_id: str, ttl_seconds: int = 3600) -> bool:
-        """Acquire a distributed delivery lock for a specific target."""
+        """
+        Acquire a distributed delivery lock for a specific (job_id, target_id) pair.
+        Uses MongoDB unique index on lock_key to guarantee exactly-once acquisition.
+
+        If an existing lock has expired (based on expires_at), it is deleted and
+        acquisition is retried up to 3 times total. Returns False if a live lock
+        exists held by another worker.
+
+        BUG FIX: Original used self-recursion which could stack indefinitely under
+        tight race conditions. Replaced with an iterative loop with a max-attempts guard.
+
+        BUG FIX: expires_at comparison now normalizes tz-naive datetimes from MongoDB
+        to UTC-aware before comparing against datetime.now(timezone.utc).
+        """
         lock_key = f"delivery:{job_id}:{target_id}"
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
-        try:
-            await self._locks.insert_one({
-                "lock_key": lock_key,
-                "expires_at": expires_at,
-                "created_at": datetime.now(timezone.utc),
-            })
-            return True
-        except DuplicateKeyError:
-            existing = await self._locks.find_one({"lock_key": lock_key})
-            if existing and existing["expires_at"] < datetime.now(timezone.utc):
-                await self._locks.delete_one({"lock_key": lock_key})
-                return await self.acquire_delivery_lock(job_id, target_id, ttl_seconds)
-            return False
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            try:
+                await self._locks.insert_one({
+                    "lock_key": lock_key,
+                    "expires_at": expires_at,
+                    "created_at": datetime.now(timezone.utc),
+                })
+                return True
+            except DuplicateKeyError:
+                existing = await self._locks.find_one({"lock_key": lock_key})
+                if existing:
+                    existing_expires = existing["expires_at"]
+                    # Normalize tz-naive datetime from MongoDB to tz-aware for comparison.
+                    if existing_expires.tzinfo is None:
+                        existing_expires = existing_expires.replace(tzinfo=timezone.utc)
+
+                    if existing_expires < datetime.now(timezone.utc):
+                        # Expired lock — delete it and retry on next iteration.
+                        await self._locks.delete_one({"lock_key": lock_key})
+                        continue
+                # Live lock held by another worker.
+                return False
+
+        logger.error(
+            "acquire_delivery_lock exhausted %d attempts for key %s",
+            max_attempts, lock_key,
+        )
+        return False
 
     async def extend_delivery_lock(self, job_id: str, target_id: str, ttl_seconds: int = 3600) -> bool:
-        """Extend an existing delivery lock (heartbeat)."""
+        """
+        Extend an existing delivery lock TTL (heartbeat from a long-running delivery).
+        Returns True if the lock was found and updated, False if it does not exist.
+
+        BUG FIX: Original used `result.modified_count > 1`. update_one can only
+        return 0 or 1, so this was always False, silently failing every heartbeat
+        and causing all delivery locks to expire mid-job. Changed to `> 0`.
+        """
         lock_key = f"delivery:{job_id}:{target_id}"
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
         result = await self._locks.update_one(
             {"lock_key": lock_key},
             {"$set": {"expires_at": expires_at}}
         )
-        return result.modified_count > 1
+        return result.modified_count > 0  # FIX: was > 1, always False
 
     async def release_delivery_lock(self, job_id: str, target_id: str) -> None:
-        """Release a delivery lock."""
+        """Release (delete) the delivery lock for a specific (job_id, target_id) pair."""
         await self._locks.delete_one({"lock_key": f"delivery:{job_id}:{target_id}"})
 
     # ─── Completion & Failure ─────────────────────────────────────────────────
 
     async def mark_completed(self, job_id: str) -> None:
-        """Mark job as completed and cleanup."""
+        """
+        Mark a job as COMPLETED and clear its lock fields.
+        Sets completed_at timestamp for fairness/repost-prevention window queries.
+        """
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
@@ -429,7 +507,12 @@ class QueueRepository:
         next_retry_delay_seconds: Optional[float] = None,
         increment_retry: bool = True,
     ) -> dict:
-        """Mark job as failed and schedule retry."""
+        """
+        Mark a job as failed, schedule retry, and clear its lock.
+        If next_retry_delay_seconds is provided, the job will not be visible
+        to workers until that delay has elapsed (execute_after field).
+        Returns the updated job document, or None if the job was not found.
+        """
         now = datetime.now(timezone.utc)
         execute_after = (
             now + timedelta(seconds=next_retry_delay_seconds)
@@ -458,42 +541,76 @@ class QueueRepository:
         )
 
     async def move_to_dead_letter(self, job_id: str, final_error: str) -> str:
-        """Move job to DLQ with robust upsert."""
+        """
+        Move a job to the Dead Letter Queue after max retries or deadline exceeded.
+        Uses a MongoDB transaction (when supported) to atomically write to DLQ
+        and update the queue record in a single operation, preventing inconsistent
+        dual-state if a crash occurs between the two writes.
+
+        BUG FIX: Original had no transaction wrapping. A crash between DLQ upsert
+        and queue status update left the job in its previous status while also
+        appearing in DLQ — dual-state corruption. Now wrapped in a transaction
+        when the deployment supports it.
+        """
         job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
         if not job_doc:
             raise JobNotFoundError(f"Job {job_id} not found")
 
-        # --- GAP 6 FIX: Use a unique key that allows multiple failures per content_id ---
-        # but prevents duplicate DLQ entries for the same execution attempt.
         dlq_doc = {
             "original_job_id": job_id,
             "content_id": job_doc["content_id"],
-            "failure_reason": "max_retries_exceeded" if final_error != "deadline_exceeded" else "deadline_exceeded",
+            "failure_reason": (
+                "deadline_exceeded"
+                if final_error == "deadline_exceeded"
+                else "max_retries_exceeded"
+            ),
             "final_error": final_error,
             "dead_at": datetime.now(timezone.utc),
             "metadata": job_doc.get("metadata", {}),
         }
 
-        # Atomic upsert on original_job_id to prevent duplicate DLQ records for same job
-        await self._dlq.update_one(
-            {"original_job_id": job_id},
-            {"$set": dlq_doc},
-            upsert=True
-        )
-
-        await self._queue.update_one(
-            {"_id": ObjectId(job_id)},
-            {"$set": {
-                "status": JobStatus.DEAD, 
+        queue_update = {
+            "$set": {
+                "status": JobStatus.DEAD,
                 "error": final_error,
-                "updated_at": datetime.now(timezone.utc)
-            }}
-        )
+                "updated_at": datetime.now(timezone.utc),
+            }
+        }
+
+        from app.core.database import DatabaseManager
+        use_transactions = DatabaseManager.transactions_supported()
+
+        if use_transactions:
+            async with await self._db.client.start_session() as session:
+                async with session.start_transaction():
+                    await self._dlq.update_one(
+                        {"original_job_id": job_id},
+                        {"$set": dlq_doc},
+                        upsert=True,
+                        session=session,
+                    )
+                    await self._queue.update_one(
+                        {"_id": ObjectId(job_id)},
+                        queue_update,
+                        session=session,
+                    )
+        else:
+            # Non-transactional path: DLQ upsert first so the job has a death
+            # record even if the second write fails.
+            await self._dlq.update_one(
+                {"original_job_id": job_id},
+                {"$set": dlq_doc},
+                upsert=True,
+            )
+            await self._queue.update_one(
+                {"_id": ObjectId(job_id)},
+                queue_update,
+            )
 
         return job_id
 
     async def move_to_quarantine(self, job_id: str, reason: str) -> None:
-        """Move unrecoverable job to quarantine."""
+        """Move an unrecoverable job to QUARANTINE status with a recorded reason."""
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
@@ -513,70 +630,110 @@ class QueueRepository:
     async def swap_album_vault_references(self, identifier: str, new_refs: List[dict]) -> None:
         """
         Atomically replace all vault references for an album or a single job.
-        identifier: either a media_group_id (string) or a job_id (string)
-        new_refs: list of {"album_sequence_index": int, "vault_message_id": int}
-        """
-        async with await self._db.client.start_session() as session:
-            async with session.start_transaction():
-                for ref in new_refs:
-                    # Try album match first
-                    query = {
-                        "media_group_id": identifier,
-                        "album_sequence_index": ref["album_sequence_index"],
-                    }
-                    
-                    # If no media_group_id, fallback to _id
-                    if ref["album_sequence_index"] is None:
-                        query = {
-                            "$or": [
-                                {"_id": ObjectId(identifier)},
-                                {"media_group_id": identifier}
-                            ]
-                        }
 
-                    result = await self._queue.update_one(
-                        query,
-                        {
-                            "$set": {
-                                "vault_message_id": ref["vault_message_id"],
-                                "watermark_state": WatermarkState.COMPLETED,
-                                "status": JobStatus.PENDING,
-                                "updated_at": datetime.now(timezone.utc),
-                            }
-                        },
-                        session=session
+        identifier: either a media_group_id (string) or a job_id (string).
+        new_refs: list of {"album_sequence_index": int, "vault_message_id": int}.
+
+        Uses a MongoDB transaction when supported. Falls back to sequential updates
+        on standalone instances (same trade-off as claim_next non-tx path).
+
+        BUG FIX: Original unconditionally started a MongoDB session and transaction.
+        On standalone MongoDB instances (no replica set), this raises OperationFailure.
+        All other transaction-using methods guard with DatabaseManager.transactions_supported().
+        This now does the same.
+        """
+        from app.core.database import DatabaseManager
+        use_transactions = DatabaseManager.transactions_supported()
+
+        async def _do_swap(session=None):
+            for ref in new_refs:
+                query = {
+                    "media_group_id": identifier,
+                    "album_sequence_index": ref["album_sequence_index"],
+                }
+
+                if ref["album_sequence_index"] is None:
+                    query = {
+                        "$or": [
+                            {"_id": ObjectId(identifier)},
+                            {"media_group_id": identifier}
+                        ]
+                    }
+
+                kwargs = {}
+                if session is not None:
+                    kwargs["session"] = session
+
+                result = await self._queue.update_one(
+                    query,
+                    {
+                        "$set": {
+                            "vault_message_id": ref["vault_message_id"],
+                            "watermark_state": WatermarkState.COMPLETED,
+                            "status": JobStatus.PENDING,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                    **kwargs
+                )
+                if result.modified_count == 0:
+                    raise ConsistencyViolationError(
+                        f"Failed to swap reference for {identifier} "
+                        f"index {ref['album_sequence_index']}"
                     )
-                    if result.modified_count == 0:
-                        raise ConsistencyViolationError(
-                            f"Failed to swap reference for {identifier} "
-                            f"index {ref['album_sequence_index']}"
-                        )
+
+        if use_transactions:
+            async with await self._db.client.start_session() as session:
+                async with session.start_transaction():
+                    await _do_swap(session=session)
+        else:
+            await _do_swap(session=None)
 
     # ─── Stale Lock Recovery ──────────────────────────────────────────────────
 
     async def get_channel_pending_count(self, source_channel_id: str) -> int:
-        """Return count of PENDING jobs for a given source_channel_id."""
+        """
+        Return the count of PENDING jobs for a given source_channel_id.
+
+        BUG FIX: Original used hardcoded string "pending" instead of JobStatus.PENDING.
+        If the enum value changes, the hardcoded string silently returns 0.
+        """
         return await self._queue.count_documents(
-            {"source_channel_id": source_channel_id, "status": "pending"}
+            {"source_channel_id": source_channel_id, "status": JobStatus.PENDING}
         )
 
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
-        """Return jobs whose deadline has passed and are still pending."""
-        # --- GAP 6 FIX: Use correct model field 'queue_deadline' ---
+        """
+        Return jobs whose deadline has passed and are still in PENDING status.
+
+        BUG FIX: Original used hardcoded string "pending" instead of JobStatus.PENDING.
+        Uses the correct model field 'queue_deadline' (GAP 6 FIX preserved).
+        """
         cursor = self._queue.find(
-            {"status": "pending", "queue_deadline": {"$lte": cutoff}}
+            {"status": JobStatus.PENDING, "queue_deadline": {"$lte": cutoff}}
         )
         result = await cursor.to_list(length=None)
         return result if result is not None else []
 
     async def recover_stale_jobs(self) -> int:
-        """Recover jobs from crashed workers, returning them to their correct pre-lock status."""
+        """
+        Recover jobs from crashed workers, returning them to their correct pre-lock status.
+
+        Two-phase approach:
+          Phase 1 — Jobs that were WATERMARKING (identified by watermark_state=PROCESSING)
+                     are returned to WATERMARKING + watermark_state=PENDING.
+          Phase 2 — All remaining stale LOCKED jobs (non-watermark) are returned to PENDING.
+
+        The phases are sequenced deliberately: Phase 1 updates a subset and changes their
+        status away from LOCKED, so Phase 2 finds only the remaining non-watermark jobs.
+        Returns the total count of recovered jobs.
+        """
         threshold = datetime.now(timezone.utc) - timedelta(
             seconds=settings.STALE_LOCK_THRESHOLD_SECONDS
         )
         now = datetime.now(timezone.utc)
 
-        # 1. Recover jobs that were in WATERMARKING status (identified by watermark_state=PROCESSING)
+        # Phase 1: Recover watermarking jobs
         wm_result = await self._queue.update_many(
             {
                 "status": JobStatus.LOCKED,
@@ -595,7 +752,7 @@ class QueueRepository:
             },
         )
 
-        # 2. Recover all other jobs to PENDING
+        # Phase 2: Recover all remaining stale LOCKED jobs to PENDING
         other_result = await self._queue.update_many(
             {
                 "status": JobStatus.LOCKED,
@@ -617,7 +774,10 @@ class QueueRepository:
     async def get_recently_posted_content_ids(
         self, channel_id: str, hours: int = 168, limit: int = 500
     ) -> list[str]:
-        """Return content_ids posted to this channel within the given time window."""
+        """
+        Return content_ids posted to this channel within the given time window.
+        Used to enforce repost-prevention fairness rules.
+        """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         docs = await self._queue.find(
             {
@@ -632,6 +792,14 @@ class QueueRepository:
     # ─── Metrics ─────────────────────────────────────────────────────────────
 
     async def collect_metrics(self) -> QueueMetrics:
+        """
+        Aggregate job counts by status and return a QueueMetrics snapshot.
+        processing_count includes PROCESSING, LOCKED, DELIVERING, WATERMARKING,
+        and READY — all statuses representing in-flight work.
+
+        BUG FIX: Original excluded WATERMARKING, READY, and QUARANTINE from all
+        metric buckets, causing in-flight counts to be understated.
+        """
         pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
         counts: dict[str, int] = {}
         async for doc in self._queue.aggregate(pipeline):
@@ -639,18 +807,31 @@ class QueueRepository:
 
         metrics = QueueMetrics(
             pending_count=counts.get(JobStatus.PENDING, 0),
-            processing_count=counts.get(JobStatus.PROCESSING, 0) + counts.get(JobStatus.LOCKED, 0) + counts.get(JobStatus.DELIVERING, 0),
+            processing_count=(
+                counts.get(JobStatus.PROCESSING, 0)
+                + counts.get(JobStatus.LOCKED, 0)
+                + counts.get(JobStatus.DELIVERING, 0)
+                + counts.get(JobStatus.WATERMARKING, 0)  # FIX: was missing
+                + counts.get(JobStatus.READY, 0)          # FIX: was missing
+            ),
             completed_count=counts.get(JobStatus.COMPLETED, 0),
             failed_count=counts.get(JobStatus.FAILED, 0),
-            dead_count=counts.get(JobStatus.DEAD, 0),
+            dead_count=(
+                counts.get(JobStatus.DEAD, 0)
+                + counts.get(JobStatus.QUARANTINE, 0)      # FIX: was missing
+            ),
         )
         return metrics
 
     async def get_job_by_id(self, job_id: str) -> Optional[dict]:
+        """Fetch a single job document by its MongoDB ObjectId string."""
         return await self._queue.find_one({"_id": ObjectId(job_id)})
 
     async def get_user_queue(self, user_id: int, limit: int = 10) -> List[dict]:
-        """Fetch pending/processing jobs for a specific user."""
+        """
+        Fetch pending/in-flight jobs for a specific user (by submitter_user_id).
+        Returns up to `limit` jobs sorted by most-recently created first.
+        """
         cursor = self._queue.find(
             {
                 "metadata.submitter_user_id": user_id,

@@ -1,5 +1,29 @@
 from __future__ import annotations
 
+"""
+settings.py — Application configuration via pydantic-settings.
+
+All values are loaded from environment variables or a .env file.
+No secrets or IDs should appear here — this file is the schema only.
+
+WATERMARK_OPACITY note (spec §13):
+  Photos use opacity 90 (out of 255) → 90/255 ≈ 0.353 as a 0-1 float.
+  Videos use opacity 110–130 (out of 255) → mid-point 120/255 ≈ 0.471.
+  The previous default of 107 was a raw 0-255 integer stored as a float,
+  which caused inconsistent behaviour: photo watermark divided by 255
+  (correct), video watermark used the raw value in an ffmpeg drawtext
+  filter as a decimal (wrong — ffmpeg expects 0.0–1.0 for alpha).
+
+  WATERMARK_OPACITY is now defined as a normalised 0.0–1.0 float.
+  Default: 0.42 (≈ 107/255 — preserves the intended visual level).
+  A validator enforces the 0.0–1.0 range at startup so misconfiguration
+  fails loudly rather than silently producing invisible or fully-opaque
+  watermarks.
+
+  Callers that previously did `float(opacity)/255` must remove the division.
+  Callers that passed the raw value directly to ffmpeg drawtext are now correct.
+"""
+
 import json
 from typing import List
 
@@ -113,7 +137,7 @@ class Settings(BaseSettings):
     WATERMARK_CACHE_DIR: str = "./watermark_cache"
     FFMPEG_TIMEOUT: float = 120.0
 
-    # ── Watermark toggle ─────────────────────────────────────────────────────
+    # ── Watermark toggle ──────────────────────────────────────────────────────
     WATERMARK_ENABLED: bool = True  # Set True only when logo assets exist
 
     # ── Watermark assets — per-destination logos ──────────────────────────────
@@ -127,7 +151,24 @@ class Settings(BaseSettings):
 
     # Accepted values: BOTTOM_RIGHT, BOTTOM_LEFT, TOP_RIGHT, TOP_LEFT, CENTER
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
-    WATERMARK_OPACITY: float = 107
+
+    # ── WATERMARK_OPACITY ─────────────────────────────────────────────────────
+    # Normalised 0.0–1.0 float used consistently across all watermark processors.
+    #
+    # Spec §13 target levels (as 0-1 floats):
+    #   Photo : opacity 90  → 90/255  ≈ 0.353
+    #   Video : opacity 110–130 → mid-point 120/255 ≈ 0.471
+    #
+    # Default 0.42 approximates the old raw value of 107 (107/255 ≈ 0.420)
+    # while now being unambiguous across Pillow (putalpha) and ffmpeg (drawtext
+    # alpha parameter, which expects 0.0–1.0).
+    #
+    # Migration note for callers:
+    #   - photo_watermark.py: REMOVE the `/255` division — value is already normalised.
+    #   - ffmpeg_processor.py: use the value directly for drawtext alpha.
+    #
+    WATERMARK_OPACITY: float = 0.42
+
     WATERMARK_SCALE: float = 0.040
     WATERMARK_ROTATION: int = 0
 
@@ -152,6 +193,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "JSON"
 
+    # ── Validators ────────────────────────────────────────────────────────────
+
     @field_validator(
         "ADMIN_IDS", "SUDO_IDS", "MODERATOR_IDS",
         "SUPPORT_ADMIN_IDS", "PAYMENT_ADMIN_IDS", "SCHEDULER_ADMIN_IDS",
@@ -159,6 +202,7 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _parse_id_lists(cls, v: str | List[int]) -> List[int]:
+        """Parse JSON-encoded list strings from environment variables."""
         if isinstance(v, str):
             return json.loads(v)
         return v
@@ -166,11 +210,13 @@ class Settings(BaseSettings):
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
     def _normalise_log_level(cls, v: str) -> str:
+        """Normalise log level to uppercase."""
         return v.upper()
 
     @field_validator("WATERMARK_POSITION", mode="before")
     @classmethod
     def _normalise_watermark_position(cls, v: str) -> str:
+        """Validate and normalise watermark position to uppercase."""
         v = v.upper()
         allowed = {"BOTTOM_RIGHT", "BOTTOM_LEFT", "TOP_RIGHT", "TOP_LEFT", "CENTER"}
         if v not in allowed:
@@ -178,6 +224,36 @@ class Settings(BaseSettings):
                 f"WATERMARK_POSITION must be one of {allowed}, got: {v!r}"
             )
         return v
+
+    @field_validator("WATERMARK_OPACITY", mode="before")
+    @classmethod
+    def _validate_watermark_opacity(cls, v: float | int | str) -> float:
+        """
+        Validate WATERMARK_OPACITY is in the 0.0–1.0 range.
+
+        Rejects the old-style 0-255 integer values (e.g., 107) at startup
+        with a clear error message rather than silently producing wrong output.
+
+        If you previously set WATERMARK_OPACITY=107, divide by 255 and update
+        your .env: WATERMARK_OPACITY=0.42
+        """
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            raise ValueError(f"WATERMARK_OPACITY must be a float, got: {v!r}")
+
+        if val > 1.0:
+            raise ValueError(
+                f"WATERMARK_OPACITY must be in the range 0.0–1.0 (normalised). "
+                f"Got {val!r}, which looks like a 0-255 value. "
+                f"Divide by 255 and update your .env. "
+                f"Example: WATERMARK_OPACITY={val / 255:.3f}"
+            )
+        if val < 0.0:
+            raise ValueError(
+                f"WATERMARK_OPACITY must be >= 0.0, got: {val!r}"
+            )
+        return val
 
 
 settings = Settings()  # type: ignore

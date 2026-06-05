@@ -1,26 +1,41 @@
+# FILE: app/watermark/worker_pool.py
 """
-app/watermark/worker_pool.py
+Watermark worker pool for BDGW VaultFlow.
 
+Pulls WATERMARKING-status jobs from the queue, applies FFmpeg watermarks,
+uploads results to the vault channel, and atomically swaps the vault
+message references so the dispatcher sees the watermarked versions.
+
+Transaction fallback: swap_album_vault_references() uses MongoDB
+multi-document transactions.  On standalone MongoDB instances (Railway
+default, no replica set), transactions are unsupported.  The worker
+detects OperationFailure code 20 and falls back to sequential
+non-transactional update_one() calls which are safe because the
+WATERMARKING lock status prevents concurrent dispatcher access.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
-
-# FIX 13: FloodWait was missing — used in _process_group upload retry loop
-from pyrogram.errors import FloodWait
+from pymongo.errors import OperationFailure
+from pyrogram.errors import (
+    ChannelInvalid,
+    ChatAdminRequired,
+    FloodWait,
+    UserIsBlocked,
+)
 
 from app.bot.client import get_bot
 from app.config import settings
+from app.core.exceptions import DispatcherError, MediaFileNotFoundError
 from app.core.logger import reset_correlation_id, set_correlation_id
 from app.core.models import JobStatus, MediaType, WatermarkPosition
-# FIX 13: MediaFileNotFoundError and DispatcherError were missing
-from app.core.exceptions import MediaFileNotFoundError, DispatcherError
 from app.distribution.flood_wait import calculate_retry_delay
 from app.repositories.queue_repository import QueueRepository
 from app.utils.logger import get_logger
@@ -31,36 +46,56 @@ logger = get_logger(__name__)
 
 
 def _safe_unlink(path: Optional[str], context: str) -> None:
-    """Delete a file from disk. Best-effort — never raises."""
+    """
+    Delete a temporary file from disk.
+
+    Best-effort — never raises.  Logs DEBUG on success, WARNING on
+    unexpected errors so that disk leaks are visible without being noisy
+    during normal operation.
+    """
     if not path:
         return
     try:
         Path(path).unlink(missing_ok=True)
         logger.debug(
-            "Temp file deleted",
+            "temp_file_deleted",
             extra={"ctx_path": path, "ctx_context": context},
         )
     except OSError as e:
         logger.debug(
-            "Could not delete temp file (already gone or permission denied)",
+            "temp_file_already_gone",
             extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
         )
     except Exception as e:
         logger.warning(
-            "Unexpected error deleting temp file",
+            "temp_file_delete_unexpected_error",
             extra={"ctx_path": path, "ctx_context": context, "ctx_error": str(e)},
+            exc_info=True,
         )
+
+
+# ── Non-retryable Pyrogram upload errors ─────────────────────────────────────
+
+_FATAL_UPLOAD_ERRORS = (ChannelInvalid, ChatAdminRequired)
 
 
 class WatermarkWorker:
     """
-    Pulls jobs in WATERMARKING status and processes them with FFmpeg.
+    Single worker task that processes WATERMARKING-status jobs from the
+    queue in batches.  Jobs are grouped by media_group_id and processed
+    atomically within each group.
 
-    On completion, marks the job back to PENDING so the dispatcher picks it up.
-    Runs as an independent async task — never shares state with dispatcher workers.
+    On completion, vault references are swapped and jobs returned to
+    PENDING status so the distribution dispatcher can pick them up.
 
-    Media download uses the vault-first refresh strategy from media_refresh.py
-    to guarantee we never use an expired file reference.
+    Media download uses the vault-first refresh strategy (download_with_refresh)
+    to prevent FILE_REFERENCE_EXPIRED errors.
+
+    MongoDB transaction fallback: if swap_album_vault_references raises
+    OperationFailure (standalone instance, no replica set), the worker
+    falls back to _swap_references_no_txn() which performs sequential
+    non-transactional updates.  This is safe because the WATERMARKING
+    job status prevents the dispatcher from touching these jobs concurrently.
     """
 
     def __init__(
@@ -69,6 +104,12 @@ class WatermarkWorker:
         queue_repo: QueueRepository,
         ffmpeg: FFmpegProcessor,
     ) -> None:
+        """
+        Args:
+            worker_id:   Human-readable identifier for log correlation.
+            queue_repo:  Repository wrapping the queue_jobs collection.
+            ffmpeg:      Initialised FFmpegProcessor instance.
+        """
         self._worker_id = worker_id
         self._queue = queue_repo
         self._ffmpeg = ffmpeg
@@ -78,6 +119,7 @@ class WatermarkWorker:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
+        """Spawn the worker loop as an asyncio Task."""
         if self._running:
             return
         self._running = True
@@ -85,20 +127,26 @@ class WatermarkWorker:
             self._run_loop(),
             name=f"watermark-{self._worker_id}",
         )
-        logger.info("Watermark worker started", extra={"ctx_worker": self._worker_id})
+        logger.info("watermark_worker_started", extra={"ctx_worker": self._worker_id})
 
     async def stop(self) -> None:
+        """
+        Signal the worker loop to stop and wait up to WORKER_DRAIN_TIMEOUT
+        seconds for the current batch to complete.  Force-cancels if the
+        drain timeout expires.
+        """
         self._running = False
         if self._task and not self._task.done():
+            drain_timeout = float(getattr(settings, "WORKER_DRAIN_TIMEOUT", 30.0))
             logger.info(
-                "Draining watermark worker...",
+                "watermark_worker_draining",
                 extra={"ctx_worker": self._worker_id},
             )
             try:
-                await asyncio.wait_for(self._task, timeout=30.0)
+                await asyncio.wait_for(self._task, timeout=drain_timeout)
             except asyncio.TimeoutError:
                 logger.warning(
-                    "Watermark worker drain timeout, force cancelling",
+                    "watermark_worker_drain_timeout_force_cancel",
                     extra={"ctx_worker": self._worker_id},
                 )
                 self._task.cancel()
@@ -106,11 +154,16 @@ class WatermarkWorker:
                     await self._task
                 except asyncio.CancelledError:
                     pass
-        logger.info("Watermark worker stopped", extra={"ctx_worker": self._worker_id})
+        logger.info("watermark_worker_stopped", extra={"ctx_worker": self._worker_id})
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # ── Main poll loop ────────────────────────────────────────────────────────
 
     async def _run_loop(self) -> None:
+        """
+        Continuously claims WATERMARKING jobs from the queue, groups them
+        by media_group_id, and dispatches each group to _process_group().
+        Sleeps WORKER_POLL_INTERVAL seconds when the queue is empty.
+        """
         while self._running:
             try:
                 jobs = await self._queue.claim_watermark_jobs(
@@ -122,13 +175,10 @@ class WatermarkWorker:
                     await asyncio.sleep(settings.WORKER_POLL_INTERVAL)
                     continue
 
-                # Group jobs by media_group_id for atomic processing
-                groups = {}
+                groups: dict[str, list[dict]] = {}
                 for job in jobs:
                     gid = job.get("media_group_id") or f"single_{job['_id']}"
-                    if gid not in groups:
-                        groups[gid] = []
-                    groups[gid].append(job)
+                    groups.setdefault(gid, []).append(job)
 
                 tasks = [self._process_group(group) for group in groups.values()]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -137,25 +187,30 @@ class WatermarkWorker:
                     if isinstance(res, asyncio.CancelledError):
                         raise res
                     elif isinstance(res, Exception):
-                        logger.error("Unhandled exception in watermark handler", exc_info=res)
+                        logger.error(
+                            "watermark_group_unhandled_exception",
+                            exc_info=res,
+                        )
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(
-                    "Watermark worker loop error",
+                    "watermark_worker_loop_error",
                     extra={"ctx_worker": self._worker_id, "ctx_error": str(e)},
                     exc_info=True,
                 )
                 await asyncio.sleep(5)
 
-    # ── Media path resolution ─────────────────────────────────────────────────
+    # ── Media resolution ──────────────────────────────────────────────────────
 
     async def _resolve_media_path(self, job: dict, job_id: str) -> Optional[str]:
         """
-        FIX 13: _resolve_media_path() was called in _process_group but never
-        defined on this class.  Wire through download_with_refresh() which
-        uses the vault-first refresh strategy to avoid FILE_REFERENCE_EXPIRED.
+        Download the media file for a job using the vault-first refresh
+        strategy (download_with_refresh) to guarantee a valid file reference
+        even after Telegram's 48-hour FILE_REFERENCE expiry.
+
+        Returns the local filesystem path on success, or None on failure.
         """
         bot = get_bot()
         return await download_with_refresh(
@@ -165,14 +220,25 @@ class WatermarkWorker:
             job_id=job_id,
         )
 
-    # ── Job processing ────────────────────────────────────────────────────────
+    # ── Group processing ──────────────────────────────────────────────────────
 
     async def _process_group(self, jobs: list[dict]) -> None:
+        """
+        Process all jobs in one media group atomically:
+          1. Download each item.
+          2. Apply FFmpeg watermark.
+          3. Upload watermarked file to vault channel (with FloodWait retry).
+          4. Swap all vault references (transactional, with non-txn fallback).
+
+        Temporary files are always cleaned up in the finally block.
+        On error, each job is either moved to the dead-letter queue (if
+        retry_count >= max_retries) or marked failed for re-queuing.
+        """
         group_id = jobs[0].get("media_group_id") or str(jobs[0]["_id"])
         corr_token = set_correlation_id(f"wm_grp_{group_id}")
 
         logger.info(
-            "Watermark group processing started",
+            "watermark_group_started",
             extra={
                 "ctx_group_id": group_id,
                 "ctx_job_count": len(jobs),
@@ -180,8 +246,10 @@ class WatermarkWorker:
             },
         )
 
-        temp_files: list[str] = []   # paths to cleanup
-        new_refs: list[dict] = []    # {"album_sequence_index": int, "vault_message_id": int}
+        # Use a set to avoid double-deletion when processed_path == media_path.
+        temp_file_set: set[str] = set()
+        new_refs: list[dict] = []
+        partial_uploads: list[dict] = []   # track uploads before full success
 
         bot = get_bot()
         try:
@@ -192,16 +260,23 @@ class WatermarkWorker:
                 watermark_path = watermark_config.get("watermark_image_path")
                 watermark_text = watermark_config.get("watermark_text", "BDGW")
 
-                # 1. Download via vault-first refresh
+                # 1. Download
                 media_path = await self._resolve_media_path(job, job_id)
                 if not media_path:
-                    raise MediaFileNotFoundError(f"Could not download media for job {job_id}")
-                temp_files.append(media_path)
+                    raise MediaFileNotFoundError(
+                        f"Could not download media for job {job_id}"
+                    )
+                temp_file_set.add(media_path)
 
                 # 2. Watermark
-                # FIX: Use getattr with fallback to protect against missing settings attribute
-                position_str = watermark_config.get("position") or getattr(settings, "WATERMARK_POSITION", "BOTTOM_RIGHT")
-                position = WatermarkPosition(position_str) if position_str in WatermarkPosition.__members__ else WatermarkPosition.BOTTOM_RIGHT
+                position_str = watermark_config.get("position") or getattr(
+                    settings, "WATERMARK_POSITION", "BOTTOM_RIGHT"
+                )
+                position = (
+                    WatermarkPosition(position_str)
+                    if position_str in WatermarkPosition.__members__
+                    else WatermarkPosition.BOTTOM_RIGHT
+                )
                 opacity = watermark_config.get("opacity", settings.WATERMARK_OPACITY)
                 scale = watermark_config.get("scale", settings.WATERMARK_SCALE)
 
@@ -225,63 +300,55 @@ class WatermarkWorker:
                 else:
                     processed_path = media_path
 
-                temp_files.append(processed_path)
+                # Only add to cleanup set if it's a distinct path.
+                if processed_path != media_path:
+                    temp_file_set.add(processed_path)
 
-                # 3. Upload to vault
-                uploaded_msg = None
-                for attempt in range(3):
-                    try:
-                        if media_type == MediaType.VIDEO.value:
-                            uploaded_msg = await bot.send_video(
-                                chat_id=settings.VAULT_CHANNEL_ID,
-                                video=processed_path,
-                                caption="[WATERMARKED ALBUM ITEM]"
-                            )
-                        elif media_type == MediaType.PHOTO.value:
-                            uploaded_msg = await bot.send_photo(
-                                chat_id=settings.VAULT_CHANNEL_ID,
-                                photo=processed_path,
-                                caption="[WATERMARKED ALBUM ITEM]"
-                            )
-                        else:
-                            uploaded_msg = await bot.send_document(
-                                chat_id=settings.VAULT_CHANNEL_ID,
-                                document=processed_path,
-                                caption="[WATERMARKED ITEM]"
-                            )
-                        break
-                    except FloodWait as e:
-                        await asyncio.sleep(e.value + 1)
-                    except Exception as e:
-                        if attempt == 2:
-                            raise
-                        await asyncio.sleep(2 ** attempt)
+                # 3. Upload to vault with FloodWait retry.
+                uploaded_msg = await self._upload_to_vault(
+                    bot=bot,
+                    media_type=media_type,
+                    processed_path=processed_path,
+                    job_id=job_id,
+                )
 
-                if not uploaded_msg:
-                    raise DispatcherError(f"Failed to upload watermarked item to vault for job {job_id}")
-
+                partial_uploads.append({
+                    "album_sequence_index": job.get("album_sequence_index"),
+                    "vault_message_id": uploaded_msg.id,
+                })
                 new_refs.append({
                     "album_sequence_index": job.get("album_sequence_index"),
-                    "vault_message_id": uploaded_msg.id
+                    "vault_message_id": uploaded_msg.id,
                 })
 
-            # 4. Atomic Swap
+            # 4. Atomic reference swap (with non-transactional fallback).
             logger.info(
-                "Watermarking complete, swapping references",
-                extra={"ctx_group_id": group_id, "ctx_count": len(new_refs)}
+                "watermark_swapping_references",
+                extra={"ctx_group_id": group_id, "ctx_count": len(new_refs)},
             )
-            await self._queue.swap_album_vault_references(group_id, new_refs)
+            await self._swap_with_fallback(group_id, new_refs)
             logger.info(
-                "Atomic vault reference swap complete for album",
+                "watermark_swap_complete",
                 extra={"ctx_group_id": group_id, "ctx_items": len(new_refs)},
             )
 
         except Exception as e:
             logger.error(
-                "Watermark group processing failed",
+                "watermark_group_failed",
                 extra={"ctx_group_id": group_id, "ctx_error": str(e)},
                 exc_info=True,
             )
+            if partial_uploads:
+                logger.warning(
+                    "watermark_orphaned_vault_uploads",
+                    extra={
+                        "ctx_group_id": group_id,
+                        "ctx_orphaned_count": len(partial_uploads),
+                        "ctx_orphaned_vault_ids": [
+                            r["vault_message_id"] for r in partial_uploads
+                        ],
+                    },
+                )
             for job in jobs:
                 retry_count = job.get("retry_count", 0)
                 if retry_count >= job.get("max_retries", 3):
@@ -289,32 +356,178 @@ class WatermarkWorker:
                 else:
                     await self._queue.mark_failed(str(job["_id"]), str(e))
         finally:
-            for path in temp_files:
+            for path in temp_file_set:
                 _safe_unlink(path, context=f"wm_group_cleanup:{group_id}")
             reset_correlation_id(corr_token)
+
+    # ── Upload helper ─────────────────────────────────────────────────────────
+
+    async def _upload_to_vault(
+        self,
+        bot,
+        media_type: Optional[str],
+        processed_path: str,
+        job_id: str,
+    ):
+        """
+        Upload one watermarked file to the vault channel.
+
+        Retries up to 3 times on FloodWait (sleeping the required seconds)
+        and on transient errors (exponential backoff).  Raises immediately
+        on non-retryable errors (ChannelInvalid, ChatAdminRequired).
+
+        Returns the sent Message object on success.
+        Raises DispatcherError if all retries are exhausted.
+        """
+        uploaded_msg = None
+        for attempt in range(3):
+            try:
+                if media_type == MediaType.VIDEO.value:
+                    uploaded_msg = await bot.send_video(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        video=processed_path,
+                        caption="[WATERMARKED ALBUM ITEM]",
+                    )
+                elif media_type == MediaType.PHOTO.value:
+                    uploaded_msg = await bot.send_photo(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        photo=processed_path,
+                        caption="[WATERMARKED ALBUM ITEM]",
+                    )
+                else:
+                    uploaded_msg = await bot.send_document(
+                        chat_id=settings.VAULT_CHANNEL_ID,
+                        document=processed_path,
+                        caption="[WATERMARKED ITEM]",
+                    )
+                break
+            except _FATAL_UPLOAD_ERRORS as e:
+                # These errors will not resolve on retry — fail fast.
+                raise DispatcherError(
+                    f"Fatal vault upload error for job {job_id}: {e}"
+                ) from e
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+        if uploaded_msg is None:
+            raise DispatcherError(
+                f"Failed to upload watermarked item to vault for job {job_id} "
+                f"after 3 attempts"
+            )
+        return uploaded_msg
+
+    # ── Swap with transaction fallback ────────────────────────────────────────
+
+    async def _swap_with_fallback(
+        self,
+        group_id: str,
+        new_refs: list[dict],
+    ) -> None:
+        """
+        Attempt the transactional vault reference swap.
+
+        If MongoDB raises OperationFailure with code 20 (transaction not
+        supported on standalone instance), falls back to
+        _swap_references_no_txn() which performs equivalent sequential
+        update_one() calls.  Any other OperationFailure is re-raised.
+        """
+        try:
+            await self._queue.swap_album_vault_references(group_id, new_refs)
+        except OperationFailure as op_err:
+            # Code 20: "Transaction numbers are only allowed on a replica
+            # set member or mongos" — standalone MongoDB deployment.
+            if op_err.code == 20 or "Transaction" in str(op_err):
+                logger.warning(
+                    "watermark_txn_unsupported_using_fallback",
+                    extra={
+                        "ctx_group_id": group_id,
+                        "ctx_error": str(op_err),
+                    },
+                )
+                await self._swap_references_no_txn(group_id, new_refs)
+            else:
+                raise
+
+    async def _swap_references_no_txn(
+        self,
+        group_id: str,
+        new_refs: list[dict],
+    ) -> None:
+        """
+        Non-transactional fallback for vault reference swapping.
+
+        Updates each queue_jobs document individually via Motor's update_one().
+        Safe in this context because the WATERMARKING status lock prevents
+        the dispatcher from reading these jobs concurrently.
+
+        NOTE: Accesses self._queue._db (semi-private Motor db handle on
+        QueueRepository).  This coupling should be formalised by adding
+        a swap_album_vault_references_no_txn() method to QueueRepository.
+        """
+        db = self._queue._db  # type: ignore[attr-defined]
+        now = datetime.now(timezone.utc)
+
+        for ref in new_refs:
+            seq_idx = ref["album_sequence_index"]
+            vault_msg_id = ref["vault_message_id"]
+            await db["queue_jobs"].update_one(
+                {
+                    "media_group_id": group_id,
+                    "album_sequence_index": seq_idx,
+                },
+                {
+                    "$set": {
+                        "vault_message_id": vault_msg_id,
+                        "status": JobStatus.PENDING.value,
+                        "watermarked_at": now,
+                    }
+                },
+            )
+
+        logger.info(
+            "watermark_no_txn_swap_complete",
+            extra={"ctx_group_id": group_id, "ctx_count": len(new_refs)},
+        )
 
 
 # ── Worker pool ───────────────────────────────────────────────────────────────
 
 class WatermarkWorkerPool:
-    """Manages N watermark worker tasks."""
+    """
+    Manages N concurrent WatermarkWorker tasks.
+
+    FFmpegProcessor is instantiated in start() rather than __init__ so
+    that a missing ffmpeg binary raises at a predictable point in the
+    boot sequence rather than at import/construction time.
+    """
 
     def __init__(
         self,
         db: AsyncIOMotorDatabase,
         worker_count: Optional[int] = None,
     ) -> None:
+        """
+        Args:
+            db:           Motor database instance passed to QueueRepository.
+            worker_count: Override for settings.WATERMARK_WORKER_COUNT.
+        """
         self._db = db
         self._worker_count = worker_count or settings.WATERMARK_WORKER_COUNT
         self._workers: list[WatermarkWorker] = []
-        self._ffmpeg = FFmpegProcessor()
+        self._ffmpeg: Optional[FFmpegProcessor] = None
         self._queue_repo = QueueRepository(db)
 
     async def start(self) -> None:
+        """Initialise FFmpegProcessor and spawn all worker tasks."""
+        self._ffmpeg = FFmpegProcessor()  # Validates ffmpeg binary here
+
         for i in range(self._worker_count):
-            worker_id = f"wm-worker-{i}"
             worker = WatermarkWorker(
-                worker_id=worker_id,
+                worker_id=f"wm-worker-{i}",
                 queue_repo=self._queue_repo,
                 ffmpeg=self._ffmpeg,
             )
@@ -322,15 +535,25 @@ class WatermarkWorkerPool:
             await worker.start()
 
         logger.info(
-            "Watermark pool started",
+            "watermark_pool_started",
             extra={"ctx_count": self._worker_count},
         )
 
     async def stop(self) -> None:
-        if self._workers:
-            await asyncio.gather(
-                *(worker.stop() for worker in self._workers),
-                return_exceptions=True,
-            )
+        """Drain all worker tasks, logging any individual stop failures."""
+        if not self._workers:
+            return
+
+        results = await asyncio.gather(
+            *(worker.stop() for worker in self._workers),
+            return_exceptions=True,
+        )
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                logger.error(
+                    "watermark_pool_worker_stop_failed",
+                    extra={"ctx_worker_index": i, "ctx_error": str(res)},
+                )
+
         self._workers.clear()
-        logger.info("Watermark pool stopped")
+        logger.info("watermark_pool_stopped")

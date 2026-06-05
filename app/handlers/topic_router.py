@@ -21,6 +21,7 @@ from pyrogram.errors import (
 from pyrogram.types import Message
 
 from app.config import settings
+from app.core.database import DatabaseManager  # FIX CRITICAL: was missing, caused NameError
 from app.services.topic_manager import get_topic_manager
 from app.utils.logger import get_logger
 
@@ -31,6 +32,7 @@ _MAX_RETRIES = 3
 
 
 def _get_thread_id(message: Message) -> int | None:
+    """Extract the forum thread/topic ID from a message, trying both attributes."""
     return (
         getattr(message, "message_thread_id", None)
         or getattr(message, "reply_to_top_message_id", None)
@@ -38,6 +40,11 @@ def _get_thread_id(message: Message) -> int | None:
 
 
 def _is_moderation_card(message: Message) -> bool:
+    """
+    Returns True if the message contains inline buttons that belong to
+    moderation, support, or broadcast card flows.  These must never be
+    re-routed to users.
+    """
     if not message.reply_markup:
         return False
     try:
@@ -46,15 +53,23 @@ def _is_moderation_card(message: Message) -> bool:
                 data = getattr(btn, "callback_data", "") or ""
                 if data.startswith(("mod_", "support_", "bc_")):
                     return True
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "_is_moderation_card: unexpected error parsing markup",
+            extra={"ctx_error": str(e)},
+        )
     return False
 
 
 async def _deliver_to_user(
     client: Client, user_id: int, message: Message
 ) -> bool:
-    """Copy the admin's reply to the user's private chat."""
+    """
+    Copy the admin's reply to the user's private chat.
+
+    Retries up to _MAX_RETRIES times with exponential backoff on transient
+    errors.  Returns True on success, False on permanent failure.
+    """
     for attempt in range(_MAX_RETRIES):
         try:
             await client.copy_message(
@@ -66,17 +81,22 @@ async def _deliver_to_user(
 
         except (UserIsBlocked, PeerIdInvalid, InputUserDeactivated):
             logger.warning(
-                "_deliver_to_user: user unreachable",
+                "_deliver_to_user: user permanently unreachable",
                 extra={"ctx_user_id": user_id},
             )
             return False
 
         except FloodWait as e:
-            await asyncio.sleep(int(e.value) + _FLOOD_BUFFER)
+            wait = int(e.value) + _FLOOD_BUFFER
+            logger.info(
+                "_deliver_to_user: FloodWait",
+                extra={"ctx_user_id": user_id, "ctx_wait": wait},
+            )
+            await asyncio.sleep(wait)
 
         except (RPCError, Exception) as e:
             logger.warning(
-                "_deliver_to_user: error",
+                "_deliver_to_user: transient error",
                 extra={
                     "ctx_user_id": user_id,
                     "ctx_error": str(e),
@@ -90,10 +110,58 @@ async def _deliver_to_user(
     return False
 
 
+async def _send_to_hub(
+    client: Client,
+    chat_id: int,
+    text: str,
+    thread_id: int,
+    reply_to: int,
+) -> None:
+    """
+    Send a status message back into the hub topic, with FloodWait handling.
+
+    Non-fatal — errors are logged but not re-raised.
+    """
+    for attempt in range(_MAX_RETRIES):
+        try:
+            await client.send_message(
+                chat_id=chat_id,
+                text=text,
+                message_thread_id=thread_id,
+                reply_to_message_id=reply_to,
+                parse_mode=ParseMode.HTML,
+            )
+            return
+        except FloodWait as e:
+            wait = int(e.value) + _FLOOD_BUFFER
+            logger.info(
+                "_send_to_hub: FloodWait",
+                extra={"ctx_wait": wait, "ctx_thread_id": thread_id},
+            )
+            await asyncio.sleep(wait)
+        except Exception as e:
+            logger.warning(
+                "_send_to_hub: failed to send status message",
+                extra={"ctx_error": str(e), "ctx_attempt": attempt + 1},
+            )
+            return  # Non-fatal; do not retry on non-FloodWait errors
+
+
 @Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
 async def route_admin_reply_to_user(client: Client, message: Message) -> None:
     """
-    Routes any non-command message from a user-centric topic to the user's DMs.
+    Routes any non-command, non-card message from a user-centric hub topic
+    to the corresponding user's private DMs.
+
+    Gates (in order):
+      1. Message must be inside a forum topic (thread_id present).
+      2. Sender must be a human user (not a bot).
+      3. Message must not be a slash command.
+      4. Message must not be a moderation/support card.
+      5. Topic must map to a known user (via topic_manager).
+
+    On successful delivery, logs the interaction to support_messages and
+    optionally advances a PENDING_DETAILS payment session.
     """
     try:
         # 1. Gate: must be inside a topic
@@ -118,16 +186,12 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
         topic_doc = await topic_manager.get_user_by_topic(thread_id)
 
         if not topic_doc:
-            return  # Not a user-centric topic
+            return  # Not a user-centric topic — ignore silently
 
         user_id: int = topic_doc["user_id"]
 
-        # 6. Support Session Status Check (Optional, but kept for flow control)
-        # If the admin is replying, we assume they have accepted or are ignoring the 'pending' state.
-        # But we'll log it as a support interaction.
-
         logger.info(
-            "ROUTING: admin to user",
+            "ROUTING: admin reply → user DM",
             extra={
                 "ctx_admin_id": message.from_user.id,
                 "ctx_user_id": user_id,
@@ -135,11 +199,11 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
             },
         )
 
-        # 7. Deliver
+        # 6. Deliver to user's DM
         delivered = await _deliver_to_user(client, user_id, message)
 
         if delivered:
-            # Log as support message for history purposes
+            # 6a. Log as support interaction in DB (non-fatal)
             try:
                 db = DatabaseManager.get_db()
                 await db["support_messages"].insert_one({
@@ -150,10 +214,13 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                     "created_at": datetime.now(timezone.utc),
                     "admin_id": message.from_user.id,
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "route_admin_reply: support_messages insert failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
 
-            # Payment Auto-Advance Logic
+            # 6b. Payment auto-advance: PENDING_DETAILS → AWAITING_PAYMENT (non-fatal)
             try:
                 from app.payments import get_payment_service
                 from app.payments.models import PaymentStatus
@@ -166,27 +233,32 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                         session.id, PaymentStatus.AWAITING_PAYMENT
                     )
                     await payment_service.start_timeout(session.id)
-                    await client.send_message(
+                    await _send_to_hub(
+                        client=client,
                         chat_id=message.chat.id,
                         text="✅ <b>Payment session activated</b>. User has 20 minutes to pay.",
-                        message_thread_id=thread_id,
-                        reply_to_message_id=message.id,
-                        parse_mode=ParseMode.HTML
+                        thread_id=thread_id,
+                        reply_to=message.id,
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "route_admin_reply: payment auto-advance failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
 
         else:
-            try:
-                await client.send_message(
-                    chat_id=message.chat.id,
-                    text="⚠️ <b>Delivery Failed</b>\nUser may have blocked the bot.",
-                    message_thread_id=thread_id,
-                    reply_to_message_id=message.id,
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
+            # Delivery failed — notify admin in topic
+            await _send_to_hub(
+                client=client,
+                chat_id=message.chat.id,
+                text="⚠️ <b>Delivery Failed</b>\nUser may have blocked the bot.",
+                thread_id=thread_id,
+                reply_to=message.id,
+            )
 
     except Exception as e:
-        logger.error(f"topic_router crashed: {e}", exc_info=True)
+        logger.error(
+            "topic_router: route_admin_reply_to_user crashed",
+            extra={"ctx_error": str(e)},
+            exc_info=True,
+        )

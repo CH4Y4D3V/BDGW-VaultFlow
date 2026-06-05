@@ -1,59 +1,411 @@
+# FILE: app/core/lifecycle.py
+"""
+Manages the global application boot, health, and shutdown sequence for
+BDGW VaultFlow.
+
+Boot order (strict):
+    Config validation
+    → Health server (Railway liveness)
+    → Database (MongoDB/Motor)
+    → Channel seeding
+    → Telegram client (Pyrogram)
+    → Bot commands + topic cache
+    → Distribution engine
+    → Subscription worker
+    → Referral system
+    → Payment timeout monitor
+    → Support inactivity monitor
+    → Message cleanup worker
+    → Watermark worker pool
+    → Membership reconciliation worker    ← NEW (Section 26)
+
+Shutdown order (reverse, each step isolated in try/except).
+"""
+
+from __future__ import annotations
+
 import asyncio
 import os
 import sys
-from typing import Optional, Any
+from datetime import datetime, timezone
+from typing import Any, Optional
 
+from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait, UserNotParticipant
+
+from app.bot.client import get_bot, set_bot_id
 from app.config import settings
 from app.core.database import DatabaseManager
 from app.core.logger import get_logger
 from app.distribution.engine import DistributionEngine
-from app.services.channel_service import ChannelService
-from app.bot.client import get_bot, set_bot_id
-from app.workers.subscription_worker import SubscriptionWorker
 from app.health import start_health_server
 from app.referral.scheduler import ReferralScheduler
-
+from app.services.channel_service import ChannelService
+from app.workers.subscription_worker import SubscriptionWorker
 
 logger = get_logger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section 26 — Membership Reconciliation Worker
+# NOTE: Extract to app/workers/membership_reconciliation_worker.py in future.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MembershipReconciliationWorker:
+    """
+    Scheduled background worker that enforces the invariant:
+      active subscribers  →  MUST be in their entitled group
+      expired subscribers →  MUST NOT be in that group
+
+    Per spec Section 26, this worker:
+      1. Re-invites active subscribers who are missing from the group.
+      2. Kicks (ban → immediate unban) expired members still in the group.
+      3. Logs every repair action to the audit_logs MongoDB collection.
+      4. Posts a run summary to the Admin Logs topic in the Verification Hub.
+
+    A Redis distributed lock (key: lock:reconciliation:run) prevents
+    concurrent runs when multiple Railway replicas are deployed.
+    """
+
+    LOCK_KEY = "lock:reconciliation:run"
+    LOCK_TTL = 1800  # 30 minutes maximum hold
+
+    def __init__(self, db, bot, redis_client) -> None:
+        """
+        Args:
+            db:           Motor AsyncIOMotorDatabase instance.
+            bot:          Authenticated Pyrogram Client.
+            redis_client: aioredis Redis client (used for distributed lock).
+        """
+        self._db = db
+        self._bot = bot
+        self._redis = redis_client
+
+    # ── Public entry point ────────────────────────────────────────────────────
+
+    async def run_once(self) -> None:
+        """
+        Main entry point called by APScheduler every 6 hours.
+        Acquires a distributed lock before running to prevent concurrent
+        execution across replicas.
+        """
+        lock_acquired = await self._redis.set(
+            self.LOCK_KEY, "1", ex=self.LOCK_TTL, nx=True
+        )
+        if not lock_acquired:
+            logger.info("reconciliation_skipped_lock_held")
+            return
+
+        try:
+            await self._run_reconciliation()
+        except Exception:
+            logger.exception("reconciliation_run_failed")
+        finally:
+            try:
+                await self._redis.delete(self.LOCK_KEY)
+            except Exception:
+                pass  # Lock will TTL out naturally
+
+    # ── Core reconciliation logic ─────────────────────────────────────────────
+
+    async def _run_reconciliation(self) -> None:
+        """
+        Loads hub_config for group IDs, then runs the two repair phases:
+          Phase 1 — re-invite active subscribers who left their group.
+          Phase 2 — kick expired members who are still in the group.
+        Emits a summary to the Admin Logs topic on completion.
+        """
+        now = datetime.now(timezone.utc)
+        summary: dict[str, int] = {"re_invited": 0, "kicked": 0, "errors": 0}
+
+        hub_config = await self._db["hub_config"].find_one({})
+        if not hub_config:
+            logger.error("reconciliation_no_hub_config")
+            return
+
+        group_map: dict[str, Optional[int]] = {
+            "nsfw":    hub_config.get("nsfw_group_id"),
+            "premium": hub_config.get("premium_group_id"),
+        }
+
+        # Phase 1 — active subscribers missing from group
+        async for sub in self._db["subscriptions"].find(
+            {"status": "ACTIVE", "expires_at": {"$gt": now}}
+        ):
+            user_id: int = sub["user_id"]
+            vault_type: str = sub.get("vault_type", "nsfw")
+            group_id = group_map.get(vault_type)
+
+            if not group_id:
+                continue
+
+            try:
+                await self._bot.get_chat_member(group_id, user_id)
+                # Member confirmed present — no action required.
+            except UserNotParticipant:
+                try:
+                    await self._re_invite(user_id, int(group_id), sub)
+                    summary["re_invited"] += 1
+                except Exception as e:
+                    logger.error(
+                        "reconciliation_reinvite_failed",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                    )
+                    summary["errors"] += 1
+            except Exception as e:
+                logger.warning(
+                    "reconciliation_member_check_failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+                summary["errors"] += 1
+
+        # Phase 2 — expired members still in group
+        # Collect distinct (user_id, vault_type) pairs from expired subs
+        expired_pairs: set[tuple[int, str]] = set()
+        async for sub in self._db["subscriptions"].find(
+            {"$or": [{"status": "EXPIRED"}, {"expires_at": {"$lt": now}}]}
+        ):
+            expired_pairs.add((int(sub["user_id"]), sub.get("vault_type", "nsfw")))
+
+        for user_id, vault_type in expired_pairs:
+            group_id = group_map.get(vault_type)
+            if not group_id:
+                continue
+
+            try:
+                await self._bot.get_chat_member(int(group_id), user_id)
+                # Member is still present — kick them.
+                try:
+                    await self._kick_expired_member(user_id, int(group_id))
+                    summary["kicked"] += 1
+                except Exception as e:
+                    logger.error(
+                        "reconciliation_kick_failed",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                    )
+                    summary["errors"] += 1
+            except UserNotParticipant:
+                pass  # Already not a member — nothing to repair.
+            except Exception as e:
+                logger.warning(
+                    "reconciliation_expire_check_failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+                summary["errors"] += 1
+
+        logger.info("reconciliation_complete", extra={"ctx_summary": summary})
+        await self._post_summary(hub_config, summary, now)
+
+    # ── Repair helpers ────────────────────────────────────────────────────────
+
+    async def _re_invite(self, user_id: int, group_id: int, sub: dict) -> None:
+        """
+        Generates a single-use invite link for the target group and
+        DMs it to the user.  FloodWait is handled with up to 3 retries.
+        Action is written to audit_logs on success.
+        """
+        invite_link_obj = await self._bot.create_chat_invite_link(
+            group_id,
+            member_limit=1,
+            name=f"reconcile_{user_id}",
+        )
+        invite_link: str = invite_link_obj.invite_link
+
+        msg_text = (
+            "🔔 Your premium subscription is active but you appear to have "
+            "left the group. Click the link below to rejoin:\n\n"
+            f"{invite_link}"
+        )
+
+        for attempt in range(3):
+            try:
+                await self._bot.send_message(chat_id=user_id, text=msg_text)
+                break
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+        await self._write_audit(
+            action="RECONCILE_REINVITE",
+            user_id=user_id,
+            group_id=group_id,
+            details={"invite_link": invite_link, "sub_id": str(sub.get("_id"))},
+        )
+
+    async def _kick_expired_member(self, user_id: int, group_id: int) -> None:
+        """
+        Removes an expired subscriber from the group via ban + immediate
+        unban (Telegram's standard kick pattern that preserves the ability
+        to rejoin later on a new subscription).
+        Sends a courtesy DM to the user.
+        Writes to audit_logs on success.
+        """
+        for attempt in range(3):
+            try:
+                await self._bot.ban_chat_member(group_id, user_id)
+                await asyncio.sleep(0.5)
+                await self._bot.unban_chat_member(group_id, user_id)
+                break
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+        try:
+            await self._bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "ℹ️ Your premium subscription has expired and you have "
+                    "been removed from the group. Renew at any time via /start."
+                ),
+            )
+        except Exception:
+            pass  # Non-critical — user may have blocked the bot.
+
+        await self._write_audit(
+            action="RECONCILE_KICK_EXPIRED",
+            user_id=user_id,
+            group_id=group_id,
+            details={},
+        )
+
+    # ── Audit & reporting ─────────────────────────────────────────────────────
+
+    async def _write_audit(
+        self,
+        action: str,
+        user_id: int,
+        group_id: int,
+        details: dict,
+    ) -> None:
+        """
+        Writes one reconciliation action record to the audit_logs collection.
+        Failures are logged as errors but never re-raised — audit writes must
+        never abort the repair loop.
+        """
+        doc = {
+            "action": action,
+            "user_id": user_id,
+            "group_id": group_id,
+            "details": details,
+            "timestamp": datetime.now(timezone.utc),
+            "source": "membership_reconciliation_worker",
+        }
+        try:
+            await self._db["audit_logs"].insert_one(doc)
+        except Exception as e:
+            logger.error(
+                "reconciliation_audit_write_failed",
+                extra={"ctx_error": str(e)},
+            )
+
+    async def _post_summary(
+        self,
+        hub_config: dict,
+        summary: dict,
+        run_time: datetime,
+    ) -> None:
+        """
+        Posts a human-readable reconciliation summary to the Admin Logs
+        topic in the Verification Hub. If the topic ID is missing from
+        hub_config the post is silently skipped.
+        """
+        admin_logs_topic_id = hub_config.get("admin_logs_topic_id")
+        verification_group_id = hub_config.get("verification_group_id")
+
+        if not admin_logs_topic_id or not verification_group_id:
+            logger.warning(
+                "reconciliation_summary_skipped_no_topic",
+                extra={"ctx_hub_config_keys": list(hub_config.keys())},
+            )
+            return
+
+        text = (
+            "🔄 <b>Membership Reconciliation — Run Complete</b>\n\n"
+            f"⏰ <b>Time:</b> {run_time.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"✅ <b>Re-invited (active, missing):</b> {summary['re_invited']}\n"
+            f"🚫 <b>Kicked (expired, still present):</b> {summary['kicked']}\n"
+            f"⚠️ <b>Errors:</b> {summary['errors']}"
+        )
+
+        for attempt in range(3):
+            try:
+                await self._bot.send_message(
+                    chat_id=int(verification_group_id),
+                    text=text,
+                    message_thread_id=int(admin_logs_topic_id),
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+            except Exception as e:
+                logger.error(
+                    "reconciliation_summary_post_failed",
+                    extra={"ctx_error": str(e)},
+                )
+                return
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main lifecycle orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
 
 class AppLifecycle:
     """
     Manages the global application boot and shutdown sequence.
 
-    Boot order (strict):
-      Config validation → Logging → DB → Telegram → Engine/Workers → Subscription Worker
-
-    Shutdown order (reverse):
-      Subscription Worker → Engine → Telegram → DB
+    Each startup step is isolated in its own try/except block.  Critical
+    failures (DB, bot client) call sys.exit(1).  Non-critical failures
+    (monitors, schedulers) are logged as errors and skipped so that the
+    rest of the platform can still serve users.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Declare all managed component references with explicit None defaults."""
         self._engine: Optional[DistributionEngine] = None
         self._subscription_worker: Optional[SubscriptionWorker] = None
         self._cleanup_worker: Optional[Any] = None
         self._referral_scheduler: Optional[ReferralScheduler] = None
-        self._bot = get_bot()
+        self._watermark_pool: Optional[Any] = None               # WatermarkWorkerPool
+        self._reconciliation_worker: Optional[MembershipReconciliationWorker] = None
+        self._payment_timeout_monitor: Optional[Any] = None
+        self._support_monitor: Optional[Any] = None
+        self._recovery_task: Optional[asyncio.Task] = None
         self._health_runner: Optional[Any] = None
+        self._bot = get_bot()
         self._running = False
 
+    # ── Boot sequence ──────────────────────────────────────────────────────────
+
     async def start(self) -> None:
+        """
+        Execute the full platform boot sequence in strict dependency order.
+        Any step that fails catastrophically calls sys.exit(1) AFTER logging.
+        Non-critical steps are isolated so a single failure cannot abort
+        the entire startup.
+        """
         if self._running:
             return
 
         logger.info("lifecycle_bootstrapping_start")
 
-        # 0. Start health server immediately for Railway liveness probe
+        # ── Step 0: Health server (Railway liveness probe) ─────────────────
         try:
             port = int(os.environ.get("PORT", 8080))
             self._health_runner = await start_health_server(port)
         except Exception:
             logger.error("lifecycle_health_server_failed", exc_info=True)
 
-        # 1. Config Validation
+        # ── Step 1: Config validation ──────────────────────────────────────
         self._validate_config()
 
-        # 2. Database
+        # ── Step 2: Database ───────────────────────────────────────────────
         try:
             await DatabaseManager.connect()
         except Exception:
@@ -67,14 +419,29 @@ class AppLifecycle:
             logger.exception("lifecycle_channel_seeding_failed")
             sys.exit(1)
 
-        # 3. Telegram Client
+        # ── Step 3: Redis health check ─────────────────────────────────────
+        redis_client = None
+        try:
+            from app.core.redis import get_redis_client
+            redis_client = await get_redis_client()
+            pong = await redis_client.ping()
+            if not pong:
+                raise ConnectionError("Redis ping returned falsy")
+            logger.info("lifecycle_redis_connected")
+        except Exception as e:
+            logger.warning(
+                "lifecycle_redis_unavailable_locks_disabled",
+                extra={"ctx_error": str(e)},
+            )
+            redis_client = None  # Non-fatal; noted for operators
+
+        # ── Step 4: Telegram client ────────────────────────────────────────
         try:
             logger.info("lifecycle_bot_start")
             await self._bot.start()
             me = await self._bot.get_me()
             set_bot_id(me.id)
 
-            # FLOW 2: Register exactly 3 bot commands
             from pyrogram.types import BotCommand
             try:
                 await self._bot.set_bot_commands([
@@ -109,15 +476,12 @@ class AppLifecycle:
                 from app.services.topic_manager import get_topic_manager
                 topic_manager = get_topic_manager()
                 await topic_manager.restore_cache()
-                
-                # Ensure "Admin Logs" and other shared topics exist
                 await topic_manager.ensure_shared_topics(self._bot)
-                
                 logger.info("lifecycle_topic_cache_restored_and_shared_topics_ensured")
             except Exception as e:
                 logger.warning(
                     "lifecycle_topic_initialization_failed",
-                    extra={"ctx_error": str(e)}
+                    extra={"ctx_error": str(e)},
                 )
 
         except Exception as e:
@@ -127,7 +491,7 @@ class AppLifecycle:
             )
             raise
 
-        # 4. Distribution Engine
+        # ── Step 5: Distribution engine ────────────────────────────────────
         from app.bot.delivery import execute_telegram_delivery
         from app.bot.provider import fetch_distribution_content
 
@@ -145,7 +509,7 @@ class AppLifecycle:
             )
             raise
 
-        # 5. Subscription Worker
+        # ── Step 6: Subscription worker ────────────────────────────────────
         self._subscription_worker = SubscriptionWorker()
         try:
             await self._subscription_worker.start(bot=self._bot)
@@ -153,9 +517,7 @@ class AppLifecycle:
             logger.error("lifecycle_subscription_worker_failed", exc_info=True)
             self._subscription_worker = None
 
-        # 6. Referral System Integration
-        # FIX: Each sub-step isolated so one failure doesn't kill the rest.
-        # Bot is fully started at this point — safe to pass to ReferralService.
+        # ── Step 7: Referral system ────────────────────────────────────────
         try:
             from app.referral.repository import ReferralRepository
             from app.referral.service import ReferralService
@@ -163,7 +525,6 @@ class AppLifecycle:
 
             ref_repo = ReferralRepository(DatabaseManager.get_db())
 
-            # create_indexes is now per-index fault-tolerant
             try:
                 await ref_repo.create_indexes()
             except Exception as idx_err:
@@ -172,7 +533,6 @@ class AppLifecycle:
                     extra={"ctx_error": str(idx_err)},
                 )
 
-            # Bot is started — safe to instantiate ReferralService
             ref_service = ReferralService(ref_repo, self._bot)
 
             if self._engine and self._engine.scheduler:
@@ -195,40 +555,40 @@ class AppLifecycle:
                 extra={"ctx_error": str(e)},
             )
 
-        # 7. Payment Timeout Monitor
-        # FIX: Isolated block. Bot reference is passed at call time, not construction.
+        # ── Step 8: Payment timeout monitor ───────────────────────────────
         try:
             from app.payments.repository import PaymentRepository
             from app.payments.timeouts import PaymentTimeoutMonitor
             from app.payments import get_payment_service
 
             payment_repo = PaymentRepository(DatabaseManager.get_db())
-            timeout_monitor = PaymentTimeoutMonitor(payment_repo)
-            bot_ref = self._bot  # capture for closure
+            self._payment_timeout_monitor = PaymentTimeoutMonitor(payment_repo)
+            bot_ref = self._bot
 
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 raw_scheduler.add_job(
-                    timeout_monitor.check_timeouts,
+                    self._payment_timeout_monitor.check_timeouts,
                     "interval",
                     minutes=1,
-                    # FIX: pass bot as keyword arg to match check_timeouts(client) signature
                     kwargs={"client": bot_ref},
                     id="payment_timeout_monitor",
                     replace_existing=True,
                     coalesce=True,
                 )
                 logger.info("lifecycle_payment_monitor_registered")
-
             else:
                 logger.warning(
                     "lifecycle_payment_monitor_skipped",
                     extra={"ctx_reason": "engine_not_available"},
                 )
 
-            # Resume active sessions — method now exists on PaymentService
+            # Resume active sessions; store task reference for shutdown.
             payment_service = get_payment_service()
-            asyncio.create_task(payment_service.resume_active_sessions())
+            self._recovery_task = asyncio.create_task(
+                payment_service.resume_active_sessions(),
+                name="payment_session_recovery",
+            )
             logger.info("lifecycle_payment_recovery_initiated")
 
         except Exception as e:
@@ -238,15 +598,15 @@ class AppLifecycle:
                 exc_info=True,
             )
 
-        # 8. Support Ticket Monitor
+        # ── Step 9: Support inactivity monitor ────────────────────────────
         try:
             from app.services.support_monitor import SupportMonitor
-            support_monitor = SupportMonitor(self._bot)
+            self._support_monitor = SupportMonitor(self._bot)
 
             if self._engine and self._engine.scheduler:
                 raw_scheduler = self._engine.scheduler._scheduler
                 raw_scheduler.add_job(
-                    support_monitor.check_inactivity,
+                    self._support_monitor.check_inactivity,
                     "interval",
                     minutes=1,
                     id="support_inactivity_monitor",
@@ -260,7 +620,7 @@ class AppLifecycle:
                 extra={"ctx_error": str(e)},
             )
 
-        # 9. Message Cleanup Worker
+        # ── Step 10: Message cleanup worker ───────────────────────────────
         try:
             from app.utils.cleanup_worker import CleanupWorker
             self._cleanup_worker = CleanupWorker()
@@ -272,10 +632,73 @@ class AppLifecycle:
                 extra={"ctx_error": str(e)},
             )
 
+        # ── Step 11: Watermark worker pool ─────────────────────────────────
+        try:
+            from app.watermark.worker_pool import WatermarkWorkerPool
+            self._watermark_pool = WatermarkWorkerPool(db=DatabaseManager.get_db())
+            await self._watermark_pool.start()
+            logger.info("lifecycle_watermark_pool_started")
+        except Exception as e:
+            logger.error(
+                "lifecycle_watermark_pool_failed",
+                extra={"ctx_error": str(e)},
+            )
+
+        # ── Step 12: Membership reconciliation worker (Section 26) ─────────
+        try:
+            if redis_client is not None:
+                self._reconciliation_worker = MembershipReconciliationWorker(
+                    db=DatabaseManager.get_db(),
+                    bot=self._bot,
+                    redis_client=redis_client,
+                )
+
+                if self._engine and self._engine.scheduler:
+                    raw_scheduler = self._engine.scheduler._scheduler
+                    interval_hours = int(
+                        getattr(settings, "RECONCILIATION_INTERVAL_HOURS", 6)
+                    )
+                    raw_scheduler.add_job(
+                        self._reconciliation_worker.run_once,
+                        "interval",
+                        hours=interval_hours,
+                        id="membership_reconciliation",
+                        replace_existing=True,
+                        coalesce=True,
+                    )
+                    logger.info(
+                        "lifecycle_reconciliation_worker_registered",
+                        extra={"ctx_interval_hours": interval_hours},
+                    )
+                    # Run immediately on boot to repair any drift since last restart.
+                    asyncio.create_task(
+                        self._reconciliation_worker.run_once(),
+                        name="reconciliation_boot_run",
+                    )
+                else:
+                    logger.warning("lifecycle_reconciliation_scheduler_unavailable")
+            else:
+                logger.warning(
+                    "lifecycle_reconciliation_skipped_no_redis",
+                    extra={"ctx_reason": "Redis client unavailable — lock cannot be acquired"},
+                )
+        except Exception as e:
+            logger.error(
+                "lifecycle_reconciliation_startup_failed",
+                extra={"ctx_error": str(e)},
+            )
+
         self._running = True
         logger.info("lifecycle_startup_complete")
 
+    # ── Channel verification ───────────────────────────────────────────────────
+
     async def _verify_channel_access(self) -> None:
+        """
+        Confirms the bot has read access to all configured channels and groups.
+        A failure on VAULT_CHANNEL_ID is fatal — the bot cannot operate
+        without vault access.  All other failures are non-fatal warnings.
+        """
         logger.info("lifecycle_channel_verification_start")
         channels_to_check = {
             "VAULT_CHANNEL_ID": getattr(settings, "VAULT_CHANNEL_ID", None),
@@ -285,6 +708,7 @@ class AppLifecycle:
             "PREMIUM_GROUP_ID": getattr(settings, "PREMIUM_GROUP_ID", None),
         }
         critical_failure = False
+
         for name, raw_id in channels_to_check.items():
             is_critical = name == "VAULT_CHANNEL_ID"
 
@@ -308,7 +732,7 @@ class AppLifecycle:
                 if is_critical:
                     logger.error(
                         "lifecycle_critical_channel_access_failed",
-                        extra={"ctx_error": str(e)},
+                        extra={"ctx_channel": name, "ctx_error": str(e)},
                     )
                     critical_failure = True
                 else:
@@ -321,7 +745,15 @@ class AppLifecycle:
             logger.error("lifecycle_boot_aborted_channel_failure")
             sys.exit(1)
 
+    # ── Handler audit ──────────────────────────────────────────────────────────
+
     def _audit_handler_registration(self) -> int:
+        """
+        Inspects the Pyrogram dispatcher for registered handler groups and
+        logs a breakdown.  Raises RuntimeError (instead of calling sys.exit)
+        if zero handlers are found so that the boot sequence can still run
+        the graceful shutdown path.
+        """
         total_handlers = 0
         breakdown: dict[int, list[str]] = {}
 
@@ -337,7 +769,7 @@ class AppLifecycle:
                 return 0
 
             for group_id, handlers in groups.items():
-                handler_names = []
+                handler_names: list[str] = []
                 for h in handlers:
                     cb = getattr(h, "callback", None)
                     if cb is not None:
@@ -362,7 +794,12 @@ class AppLifecycle:
                 "lifecycle_audit_no_handlers",
                 extra={"ctx_groups": dict(breakdown)},
             )
-            sys.exit(1)
+            # Raise instead of sys.exit so the caller's try/except can
+            # run the graceful shutdown sequence before the process exits.
+            raise RuntimeError(
+                "No Pyrogram handlers registered — bot would be deaf. "
+                "Check that all handler modules imported correctly."
+            )
 
         for group_id in sorted(breakdown.keys()):
             names = breakdown[group_id]
@@ -391,27 +828,63 @@ class AppLifecycle:
 
         return total_handlers
 
+    # ── Graceful shutdown ──────────────────────────────────────────────────────
+
     async def stop(self) -> None:
+        """
+        Shuts down all managed components in reverse boot order.
+        Each step is individually guarded — one failure must not prevent
+        subsequent cleanup steps from running.
+        """
         logger.info("lifecycle_shutdown_start")
 
+        # Cancel payment recovery task if it is still running.
+        if self._recovery_task and not self._recovery_task.done():
+            self._recovery_task.cancel()
+            try:
+                await self._recovery_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # Reconciliation worker — no background loop to stop; APScheduler
+        # job will be removed when the engine stops.  Release lock if held.
+        if self._reconciliation_worker:
+            try:
+                await self._reconciliation_worker._redis.delete(
+                    MembershipReconciliationWorker.LOCK_KEY
+                )
+            except Exception:
+                pass
+
+        # Watermark pool
+        if self._watermark_pool:
+            try:
+                await self._watermark_pool.stop()
+            except Exception:
+                logger.error("lifecycle_shutdown_watermark_pool_failed", exc_info=True)
+
+        # Referral scheduler
         if self._referral_scheduler:
             try:
                 await self._referral_scheduler.stop()
             except Exception:
                 logger.error("lifecycle_shutdown_referral_failed", exc_info=True)
 
+        # Subscription worker
         if self._subscription_worker:
             try:
                 await self._subscription_worker.stop()
             except Exception:
                 logger.error("lifecycle_shutdown_sub_worker_failed", exc_info=True)
 
+        # Cleanup worker
         if self._cleanup_worker:
             try:
                 await self._cleanup_worker.stop()
             except Exception:
                 logger.error("lifecycle_shutdown_cleanup_worker_failed", exc_info=True)
 
+        # Distribution engine (owns the APScheduler — stops all registered jobs)
         if self._engine and self._engine.is_running:
             try:
                 await asyncio.wait_for(self._engine.stop(), timeout=45.0)
@@ -420,17 +893,20 @@ class AppLifecycle:
             except Exception:
                 logger.error("lifecycle_shutdown_engine_failed", exc_info=True)
 
-        if self._bot and getattr(self._bot, "is_connected", False):
-            try:
+        # Telegram client
+        try:
+            if self._bot and getattr(self._bot, "is_connected", False):
                 await self._bot.stop()
-            except Exception:
-                logger.error("lifecycle_shutdown_bot_failed", exc_info=True)
+        except Exception:
+            logger.error("lifecycle_shutdown_bot_failed", exc_info=True)
 
+        # Database
         try:
             await DatabaseManager.disconnect()
         except Exception:
             logger.error("lifecycle_shutdown_db_failed", exc_info=True)
 
+        # Health server
         if self._health_runner:
             try:
                 await self._health_runner.cleanup()
@@ -440,15 +916,24 @@ class AppLifecycle:
         self._running = False
         logger.info("lifecycle_shutdown_complete")
 
+    # ── Config validation ──────────────────────────────────────────────────────
+
     def _validate_config(self) -> None:
+        """
+        Checks that all mandatory environment variables / settings are set.
+        Calls sys.exit(1) immediately on any missing value so the container
+        restart policy can surface the misconfiguration clearly in logs.
+        """
         required = [
-            ("MONGO_URI", getattr(settings, "MONGO_URI", None)),
-            ("MONGO_DB_NAME", getattr(settings, "MONGO_DB_NAME", None)),
-            ("BOT_TOKEN", getattr(settings, "BOT_TOKEN", None)),
-            ("API_ID", getattr(settings, "API_ID", None)),
-            ("API_HASH", getattr(settings, "API_HASH", None)),
+            ("MONGO_URI",             getattr(settings, "MONGO_URI", None)),
+            ("MONGO_DB_NAME",         getattr(settings, "MONGO_DB_NAME", None)),
+            ("BOT_TOKEN",             getattr(settings, "BOT_TOKEN", None)),
+            ("API_ID",                getattr(settings, "API_ID", None)),
+            ("API_HASH",              getattr(settings, "API_HASH", None)),
             ("VERIFICATION_GROUP_ID", getattr(settings, "VERIFICATION_GROUP_ID", None)),
-            ("VAULT_CHANNEL_ID", getattr(settings, "VAULT_CHANNEL_ID", None)),
+            ("VAULT_CHANNEL_ID",      getattr(settings, "VAULT_CHANNEL_ID", None)),
+            ("ADMIN_IDS",             getattr(settings, "ADMIN_IDS", None)),
+            ("REDIS_URL",             getattr(settings, "REDIS_URL", None)),
         ]
         missing = [name for name, val in required if not val]
         if missing:

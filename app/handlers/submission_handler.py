@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+submission_handler.py — User content submission flow.
+
+Handles:
+  - Channel membership gate (Section 10.1)
+  - Consent / terms acceptance gate (Section 10.1)
+  - Daily submission cap
+  - Album buffering and batching (Section 10.4)
+  - Vault staging, topic routing, and pending registration
+"""
+
 import asyncio
 import time
 from datetime import datetime, timezone
@@ -7,7 +18,7 @@ from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ChatMemberStatus, ParseMode
-from pyrogram.errors import UserNotParticipant, RPCError
+from pyrogram.errors import FloodWait, RPCError, UserNotParticipant
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -27,45 +38,128 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ── Album collector ───────────────────────────────────────────────────────────
-# FIX GAP 5: WeakValueDictionary removed — weak refs to asyncio.Lock objects
-# get GC'd between `_album_locks[group_id] = lock` and `async with lock`,
-# losing the lock entirely. Use a plain dict with explicit cleanup instead.
+# WeakValueDictionary is NOT used here (intentionally).  Weak refs to
+# asyncio.Lock objects get GC'd between assignment and `async with lock`,
+# silently losing the lock.  Use plain dicts with explicit cleanup instead.
 
 _album_cache: dict[str, list[Message]] = {}
 _album_locks: dict[str, asyncio.Lock] = {}
 _album_tasks: dict[str, asyncio.Task] = {}
 _ALBUM_WAIT_SECONDS = 2.0
 
+_MAX_RETRIES = 3
+_FLOOD_BUFFER = settings.FLOODWAIT_EXTRA_BUFFER
+
+# Cached bot username to avoid repeated get_me() calls.
+_bot_username: Optional[str] = None
+
+
+# ── Internal utilities ────────────────────────────────────────────────────────
 
 async def _safe_reply(
     message: Message, text: str, reply_markup=None
 ) -> Optional[Message]:
+    """
+    Reply to a message with HTML parse mode.
+    Swallows all exceptions — used only for user-facing feedback where
+    failure is non-fatal.
+    """
     try:
         return await message.reply_text(
             text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
         )
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            "_safe_reply: failed to send reply",
+            extra={"ctx_error": str(e)},
+        )
         return None
+
+
+async def _send_hub_message(
+    client: Client,
+    chat_id: int,
+    text: str,
+    thread_id: Optional[int] = None,
+) -> Optional[Message]:
+    """
+    Send a message to the hub group with FloodWait handling and exponential backoff.
+
+    Returns the sent Message on success, None on permanent failure.
+    """
+    for attempt in range(_MAX_RETRIES):
+        try:
+            kwargs = {"parse_mode": ParseMode.HTML}
+            if thread_id:
+                kwargs["message_thread_id"] = thread_id
+            return await client.send_message(
+                chat_id=chat_id,
+                text=text,
+                **kwargs,
+            )
+        except FloodWait as e:
+            wait = int(e.value) + _FLOOD_BUFFER
+            logger.info(
+                "_send_hub_message: FloodWait",
+                extra={"ctx_chat_id": chat_id, "ctx_wait": wait},
+            )
+            await asyncio.sleep(wait)
+        except RPCError as e:
+            logger.warning(
+                "_send_hub_message: RPCError",
+                extra={
+                    "ctx_chat_id": chat_id,
+                    "ctx_error": str(e),
+                    "ctx_attempt": attempt + 1,
+                },
+            )
+            if attempt == _MAX_RETRIES - 1:
+                return None
+            await asyncio.sleep(2 ** attempt)
+        except Exception as e:
+            logger.error(
+                "_send_hub_message: unexpected error",
+                extra={"ctx_chat_id": chat_id, "ctx_error": str(e)},
+            )
+            return None
+    return None
+
+
+async def _get_bot_username(client: Client) -> str:
+    """
+    Return the bot's username, cached after the first successful fetch.
+    Falls back to an empty string on error.
+    """
+    global _bot_username
+    if _bot_username:
+        return _bot_username
+    try:
+        me = await client.get_me()
+        _bot_username = me.username or ""
+    except Exception as e:
+        logger.warning(
+            "_get_bot_username: get_me() failed",
+            extra={"ctx_error": str(e)},
+        )
+        _bot_username = ""
+    return _bot_username
 
 
 # ── Membership gate ───────────────────────────────────────────────────────────
 
-async def _verify_channel_membership(
-    client: Client, user_id: int
-) -> bool:
+async def _verify_channel_membership(client: Client, user_id: int) -> bool:
     """
-    FIX GAP 5: Channel membership gate — user must be member of VAULT_CHANNEL_ID
-    (main channel) before they can submit content (Section 10.1).
-    Returns True if member, False otherwise.
+    Verify that a user is an active member of VAULT_CHANNEL_ID (Section 10.1).
+
+    Returns True if the user is a member or if no channel is configured.
+    Returns False on any access-denial error; logs and returns False on unexpected errors.
     """
     channel_id = settings.VAULT_CHANNEL_ID
     if not channel_id:
-        return True  # No gate configured
+        return True  # No gate configured — allow all
 
     try:
-        member = await client.get_chat_member(
-            chat_id=channel_id, user_id=user_id
-        )
+        member = await client.get_chat_member(chat_id=channel_id, user_id=user_id)
         return member.status not in (
             ChatMemberStatus.LEFT,
             ChatMemberStatus.BANNED,
@@ -74,13 +168,13 @@ async def _verify_channel_membership(
         return False
     except RPCError as e:
         logger.warning(
-            "Membership check RPC error",
+            "_verify_channel_membership: RPC error",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
         return False
     except Exception as e:
         logger.error(
-            "Membership check unexpected error",
+            "_verify_channel_membership: unexpected error",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
         return False
@@ -90,6 +184,7 @@ async def _verify_channel_membership(
 
 @Client.on_callback_query(filters.regex(r"^menu:submit$"))
 async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
+    """Handle the 'Submit Content' menu button — show submission instructions."""
     await callback.answer()
     await callback.message.edit_text(
         "📨 <b>Submit Content</b>\n\n"
@@ -104,6 +199,7 @@ async def handle_submit_menu(client: Client, callback: CallbackQuery) -> None:
 
 @Client.on_callback_query(filters.regex(r"^menu:anonymous$"))
 async def handle_anonymous_toggle(client: Client, callback: CallbackQuery) -> None:
+    """Toggle anonymous submission mode for the user (stored in Redis, 30-day TTL)."""
     user_id = callback.from_user.id
     redis = get_redis()
     key = f"user:anon:{user_id}"
@@ -118,30 +214,42 @@ async def handle_anonymous_toggle(client: Client, callback: CallbackQuery) -> No
 
 
 # ── Consent callback ──────────────────────────────────────────────────────────
-# FIX GAP 5: This handler uses `consent:agree` (no user_id) for the submission
-# flow. The creator onboarding handler uses `consent:agree:{user_id}`.
-# Both can coexist — the regex patterns are different.
+# NOTE: This handler uses `consent:agree` (no user_id suffix) for the
+# submission flow.  The creator onboarding handler uses `consent:agree:{user_id}`.
+# The regex patterns are distinct — both can coexist safely.
 
 @Client.on_callback_query(filters.regex(r"^consent:agree$"))
 async def handle_consent_agree_submission(client: Client, callback: CallbackQuery) -> None:
-    """Consent agreement for content submission flow."""
+    """
+    Record the user's consent to submission terms in the consent_records collection.
+
+    Uses upsert so repeated clicks are idempotent.
+    """
     user_id = callback.from_user.id
     db = DatabaseManager.get_db()
     now = datetime.now(timezone.utc)
 
-    await db["consent_records"].update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "user_id": user_id,
-                "is_active": True,
-                "agreed_at": now,
-                "record_type": "attestation",
-                "attestation_version": "v1.0",
-            }
-        },
-        upsert=True,
-    )
+    try:
+        await db["consent_records"].update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "user_id": user_id,
+                    "is_active": True,
+                    "agreed_at": now,
+                    "record_type": "attestation",
+                    "attestation_version": "v1.0",
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        logger.error(
+            "handle_consent_agree_submission: DB write failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        await callback.answer("⚠️ Could not record consent. Please try again.", show_alert=True)
+        return
 
     await callback.answer("Thank you! You can now submit content.", show_alert=True)
     try:
@@ -171,6 +279,20 @@ async def handle_consent_agree_submission(client: Client, callback: CallbackQuer
     )
 )
 async def handle_media_submission(client: Client, message: Message) -> None:
+    """
+    Entry point for all private media messages.
+
+    Gate sequence (each gate returns early on failure):
+      1. Payment flow exclusion.
+      2. Channel membership check (Section 10.1).
+      3. Consent / terms acceptance (Section 10.1).
+      4. Daily submission cap.
+
+    After gates pass:
+      - Single media: forwarded directly to _finalize_submission.
+      - Album (media_group_id): buffered per-group; _process_album fires after
+        _ALBUM_WAIT_SECONDS to collect all parts before submitting.
+    """
     if not message.from_user:
         return
 
@@ -186,24 +308,29 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         },
     )
 
-    # Skip if user is in payment flow
     redis = get_redis()
+
+    # Gate 1: Skip if user has an active payment session
     if await redis.exists(f"pay_session:{user_id}"):
         return
 
-    # ── Gate 1: Channel membership (Section 10.1) ─────────────────────────────
+    # Gate 2: Channel membership (Section 10.1)
     is_member = await _verify_channel_membership(client, user_id)
     if not is_member:
-        bot_username = (await client.get_me()).username
-        channel_link = f"https://t.me/{bot_username}"
+        # Build join link — use bot username as final fallback to avoid
+        # calling get_me() on every non-member message.
+        channel_link = f"https://t.me/{await _get_bot_username(client)}"
         try:
             chat = await client.get_chat(settings.VAULT_CHANNEL_ID)
-            if hasattr(chat, "invite_link") and chat.invite_link:
+            if getattr(chat, "invite_link", None):
                 channel_link = chat.invite_link
-            elif hasattr(chat, "username") and chat.username:
+            elif getattr(chat, "username", None):
                 channel_link = f"https://t.me/{chat.username}"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "handle_media_submission: could not fetch channel link",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
 
         await _safe_reply(
             message,
@@ -217,11 +344,20 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         )
         return
 
-    # ── Gate 2: Consent / Terms acceptance (Section 10.1) ────────────────────
+    # Gate 3: Consent / terms acceptance (Section 10.1)
     db = DatabaseManager.get_db()
-    consent = await db["consent_records"].find_one(
-        {"user_id": user_id, "is_active": True}
-    )
+    try:
+        consent = await db["consent_records"].find_one(
+            {"user_id": user_id, "is_active": True}
+        )
+    except Exception as e:
+        logger.error(
+            "handle_media_submission: consent_records lookup failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        await _safe_reply(message, "⚠️ An error occurred. Please try again.")
+        return
+
     if not consent:
         await _safe_reply(
             message,
@@ -236,28 +372,43 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         )
         return
 
-    # ── Gate 3: Daily submission cap ──────────────────────────────────────────
+    # Gate 4: Daily submission cap
     sub_service = SubscriptionService()
-    plan = await sub_service.get_effective_plan(user_id)
-    daily_cap = 50 if plan != Plan.FREE else 5
+    try:
+        plan = await sub_service.get_effective_plan(user_id)
+    except Exception as e:
+        logger.warning(
+            "handle_media_submission: plan lookup failed — defaulting to FREE",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        plan = Plan.FREE
 
+    daily_cap = 50 if plan != Plan.FREE else 5
     cap_key = f"cap:submit:{user_id}:{time.strftime('%Y-%m-%d')}"
-    current_count = int(await redis.get(cap_key) or 0)
+
+    try:
+        current_count = int(await redis.get(cap_key) or 0)
+    except Exception as e:
+        logger.warning(
+            "handle_media_submission: cap_key read failed — allowing submission",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
+        current_count = 0
 
     if current_count >= daily_cap:
         await _safe_reply(
             message,
             f"🚫 <b>Daily Limit Reached</b>\n\n"
             f"You have reached your daily limit of {daily_cap} submissions.\n"
-            f"Premium users get higher limits.",
+            "Premium users get higher limits.",
         )
         return
 
-    # ── Album handling ─────────────────────────────────────────────────────────
+    # ── Album handling (Section 10.4) ──────────────────────────────────────────
     if message.media_group_id:
         group_id = message.media_group_id
 
-        # FIX GAP 5: Use plain dict lock — no WeakValueDictionary
+        # Use plain dict for locks — WeakValueDictionary causes GC races.
         if group_id not in _album_locks:
             _album_locks[group_id] = asyncio.Lock()
 
@@ -266,7 +417,7 @@ async def handle_media_submission(client: Client, message: Message) -> None:
         async with lock:
             if group_id not in _album_cache:
                 _album_cache[group_id] = []
-                # Cancel existing task if any
+                # Cancel any stale task for this group
                 existing = _album_tasks.get(group_id)
                 if existing and not existing.done():
                     existing.cancel()
@@ -279,14 +430,18 @@ async def handle_media_submission(client: Client, message: Message) -> None:
             _album_cache[group_id].append(message)
         return
 
-    # ── Single media ───────────────────────────────────────────────────────────
+    # ── Single media ────────────────────────────────────────────────────────────
     await _finalize_submission(client, [message], user_id, cap_key)
 
 
 async def _process_album(
     client: Client, group_id: str, user_id: int, cap_key: str
 ) -> None:
-    """Wait for album collection window, then submit."""
+    """
+    Wait for the album collection window to close, then submit the buffered album.
+
+    Albums are always submitted as a single logical unit (Section 10.4).
+    """
     await asyncio.sleep(_ALBUM_WAIT_SECONDS)
 
     lock = _album_locks.get(group_id)
@@ -296,7 +451,7 @@ async def _process_album(
     async with lock:
         messages = _album_cache.pop(group_id, [])
         _album_tasks.pop(group_id, None)
-        _album_locks.pop(group_id, None)  # Clean up lock
+        _album_locks.pop(group_id, None)  # Explicit cleanup
 
     if not messages:
         return
@@ -312,32 +467,50 @@ async def _finalize_submission(
     cap_key: str,
 ) -> None:
     """
-    Complete the submission flow:
-    1. Increment daily cap
-    2. Archive to vault as PENDING (restart-safe — content preserved if bot restarts)
-    3. Create/get user's content review topic in verification hub
-    4. Forward to verification hub for moderation
-    5. Register in pending registry
-    6. Notify user
+    Complete the submission pipeline:
 
-    FIX: archive_to_vault called with dest="nsfw" as safe staging default.
-    The actual destination is overridden by the moderator's approval action.
-    initial_status uses .value to pass a string as expected by the function.
+      1. Increment daily cap counter (Redis).
+      2. Archive content to vault as PENDING — write to MongoDB BEFORE any
+         Telegram message is sent (restart-safe).
+      3. Get-or-create the user's permanent content review topic in the hub.
+      4. Forward content to the verification hub for moderation.
+      5. Post a submission summary card to the user's hub topic.
+      6. Register submission in the pending registry.
+      7. Notify user of successful submission.
+
+    NOTE on approve buttons:
+      The dynamic "Approve → [Group Name]" buttons per spec §10.3 are built
+      inside verification_hub.forward_to_verification using QUEUE_GROUPS from
+      settings.  This file correctly delegates that responsibility — no
+      hardcoded group names here.
+
+    NOTE on duplicate prevention:
+      Content hash deduplication (spec §10.3) is the responsibility of
+      archive_to_vault / submission_service.  If archive_to_vault raises on
+      duplicate, the exception is caught here and the user is notified.
     """
     first_msg = messages[0]
 
     try:
-        # Increment daily cap counter
         redis = get_redis()
-        await redis.incr(cap_key)
-        await redis.expire(cap_key, 86400)
 
-        # Archive to vault immediately as PENDING staging
+        # Step 1: Increment daily cap
+        try:
+            await redis.incr(cap_key)
+            await redis.expire(cap_key, 86400)
+        except Exception as e:
+            logger.warning(
+                "_finalize_submission: cap increment failed",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
+
+        # Step 2: Archive to vault as PENDING (MongoDB write — restart-safe)
         from app.moderation.moderation_actions import archive_to_vault
         from app.core.models import ModerationState
 
-        # FIX BUG A: dest="nsfw" — valid staging destination, overridden on approve/queue
-        # FIX BUG B: initial_status=ModerationState.PENDING.value — pass string not enum
+        # dest="nsfw" is the safe staging default.
+        # The moderator's approval action overrides the final destination.
+        # initial_status must be a string (.value) not the enum object.
         await archive_to_vault(
             client=client,
             messages=messages,
@@ -346,22 +519,22 @@ async def _finalize_submission(
             initial_status=ModerationState.PENDING.value,
         )
 
-        # Get or create content review topic for this user
+        # Step 3: Get or create user's permanent review topic
         from app.services.topic_manager import get_topic_manager
 
         topic_manager = get_topic_manager()
-        topic_id = None
+        topic_id: Optional[int] = None
         try:
-            topic_id = await topic_manager.get_or_create_user_topic(
-                client, user_id
-            )
+            topic_id = await topic_manager.get_or_create_user_topic(client, user_id)
         except Exception as e:
             logger.warning(
-                "Could not get user topic — forwarding to general hub",
+                "_finalize_submission: topic creation failed — using general hub",
                 extra={"ctx_user_id": user_id, "ctx_error": str(e)},
             )
 
-        # Forward to verification hub
+        # Step 4: Forward to verification hub
+        # Dynamic approve buttons ("Approve → [Group Name]" per §10.3) are
+        # built inside forward_to_verification using QUEUE_GROUPS from settings.
         success = await forward_to_verification(
             client=client,
             messages=messages,
@@ -370,37 +543,54 @@ async def _finalize_submission(
         )
 
         if success:
-            # ── ROUTE HEADER TO USER TOPIC ──
+            # Step 5: Post submission summary card to user's hub topic
             try:
                 media_count = len(messages)
-                caption = first_msg.caption or first_msg.text or "-"
+                caption = first_msg.caption or first_msg.text or "—"
                 if len(caption) > 100:
                     caption = caption[:97] + "..."
-                
-                await client.send_message(
+
+                await _send_hub_message(
+                    client=client,
                     chat_id=settings.VERIFICATION_GROUP_ID,
                     text=(
                         f"📥 <b>CONTENT SUBMITTED</b>\n\n"
                         f"<b>Media Count:</b> {media_count}\n"
                         f"<b>Caption:</b> {caption}"
                     ),
-                    message_thread_id=topic_id,
-                    parse_mode=ParseMode.HTML
+                    thread_id=topic_id,
                 )
-                
-                # Audit log
+            except Exception as e:
+                logger.warning(
+                    "_finalize_submission: hub card post failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+
+            # Audit log (non-fatal)
+            try:
                 from app.services.audit_service import get_audit
                 await get_audit().log(
                     action="CONTENT_SUBMITTED",
                     performed_by=user_id,
                     target_user_id=user_id,
-                    details={"media_count": media_count}
+                    details={"media_count": len(messages)},
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "_finalize_submission: audit_log failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
 
-            # FIX GAP 5: pending registry keyed by ORIGINAL first message ID
-            await register_pending(user_id, messages)
+            # Step 6: Register in pending registry (keyed by original first message ID)
+            try:
+                await register_pending(user_id, messages)
+            except Exception as e:
+                logger.warning(
+                    "_finalize_submission: register_pending failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+
+            # Step 7: Notify user
             await _safe_reply(
                 first_msg,
                 "✅ <b>Content Submitted!</b>\n\n"
@@ -415,13 +605,10 @@ async def _finalize_submission(
 
     except Exception as e:
         logger.exception(
-            "Submission finalization failed",
+            "_finalize_submission: unhandled exception",
             extra={"ctx_user_id": user_id, "ctx_error": str(e)},
         )
-        try:
-            await _safe_reply(
-                first_msg,
-                "⚠️ An unexpected error occurred. Please try again.",
-            )
-        except Exception:
-            pass
+        await _safe_reply(
+            first_msg,
+            "⚠️ An unexpected error occurred. Please try again.",
+        )

@@ -11,8 +11,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+from pymongo import ReturnDocument
 from pyrogram import Client
-from pyrogram.errors import Forbidden, BadRequest
+from pyrogram.enums import ParseMode
+from pyrogram.errors import Forbidden, BadRequest, FloodWait
 
 from app.config import settings
 from app.core.database import DatabaseManager
@@ -24,17 +26,46 @@ WARN_1_SECONDS         = 300    # 5 minutes
 WARN_2_SECONDS         = 600    # 10 minutes
 BAN_SECONDS            = 1200   # 20 minutes
 
+_MAX_FLOOD_WAIT_SECONDS = 60    # cap any FloodWait sleep to 60 s
+
 
 async def _safe_notify(client: Client, user_id: int, text: str) -> Optional[int]:
     """
-    Send message to user. Returns message_id on success, None on any failure.
+    Send a single HTML-formatted message to user.
+    Handles FloodWait with one capped retry, Forbidden, and BadRequest explicitly.
+    Returns message_id on success, None on any failure.
+
+    BUG FIX: Original code called send_message twice — once with parse_mode=None
+    (discarding the result) and once with ParseMode.HTML. Every notification was
+    delivered twice. Fixed by keeping only the HTML send.
     """
     try:
-        msg = await client.send_message(chat_id=user_id, text=text, parse_mode=None) # Pyrogram default is HTML if not set, but we usually use ParseMode.HTML
-        # Wait, Pyrogram enums are better
-        from pyrogram.enums import ParseMode
-        msg = await client.send_message(chat_id=user_id, text=text, parse_mode=ParseMode.HTML)
+        msg = await client.send_message(
+            chat_id=user_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+        )
         return msg.id
+    except FloodWait as exc:
+        wait = min(exc.value, _MAX_FLOOD_WAIT_SECONDS)
+        log.warning(
+            "[INTENT CHECKER] FloodWait %ds before notifying user %d — sleeping.",
+            wait, user_id,
+        )
+        await asyncio.sleep(wait)
+        try:
+            msg = await client.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+            return msg.id
+        except Exception as retry_exc:
+            log.warning(
+                "[INTENT CHECKER] Retry after FloodWait failed for user %d: %s",
+                user_id, retry_exc,
+            )
+            return None
     except Forbidden:
         log.warning("[INTENT CHECKER] User %d has blocked the bot.", user_id)
         return None
@@ -46,9 +77,12 @@ async def _safe_notify(client: Client, user_id: int, text: str) -> Optional[int]
         return None
 
 
-async def _notify_admins_intent_ban(
-    client: Client, user_id: int
-) -> None:
+async def _notify_admins_intent_ban(client: Client, user_id: int) -> None:
+    """
+    Emit auto-ban notification to the user's permanent Verification Hub topic
+    AND directly to every admin DM as a failsafe.
+    FloodWait is handled explicitly on each admin DM send.
+    """
     text = (
         f"🚫 <b>Payment Intent Auto-Ban</b>\n\n"
         f"👤 User: <code>{user_id}</code>\n"
@@ -57,7 +91,6 @@ async def _notify_admins_intent_ban(
         f"🗑 Intent warning messages deleted from user's chat."
     )
 
-    # Note: using support_service instead of direct topic routing for consistency
     try:
         from app.services.support_service import get_support_service
         support_service = get_support_service()
@@ -70,21 +103,57 @@ async def _notify_admins_intent_ban(
 
     for admin_id in settings.ADMIN_IDS:
         try:
-            from pyrogram.enums import ParseMode
-            await client.send_message(chat_id=admin_id, text=text, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+            await client.send_message(
+                chat_id=admin_id,
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+        except FloodWait as exc:
+            wait = min(exc.value, _MAX_FLOOD_WAIT_SECONDS)
+            log.warning(
+                "[INTENT CHECKER] FloodWait %ds notifying admin %d — sleeping.",
+                wait, admin_id,
+            )
+            await asyncio.sleep(wait)
+            try:
+                await client.send_message(
+                    chat_id=admin_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception as retry_exc:
+                log.warning(
+                    "[INTENT CHECKER] Retry after FloodWait failed for admin %d: %s",
+                    admin_id, retry_exc,
+                )
+        except Exception as exc:
+            log.warning(
+                "[INTENT CHECKER] Failed to notify admin %d of auto-ban for user %d: %s",
+                admin_id, user_id, exc,
+            )
 
 
 async def _run_check(client: Client) -> None:
-    """Single pass over all users with active payment intent."""
+    """
+    Single pass over all users with an active payment intent.
+
+    All state transitions are performed via find_one_and_update to guarantee
+    atomicity and prevent duplicate actions from concurrent checker passes:
+
+      • Ban: atomic claim via filter {intent_time: {$ne: None}, is_banned: {$ne: True}}.
+        Only the pass that modifies the document proceeds with kick + notify.
+
+      • Warnings: atomic claim via filter {intent_warn_count: {$lt: N}}.
+        Only the pass that increments the count proceeds with the send.
+
+    This eliminates the race condition where two concurrent scheduler passes
+    both observe elapsed >= threshold and both execute side effects.
+    """
     db = DatabaseManager.get_db()
-    
-    # SYSTEM 14 logic: find users with intent_time set
-    # Using direct Motor query as Database repository might be aiogram-based
+
     users_cursor = db["users"].find({"intent_time": {"$ne": None}})
     users = await users_cursor.to_list(length=None)
-    
+
     if not users:
         return
 
@@ -93,43 +162,73 @@ async def _run_check(client: Client) -> None:
     for user in users:
         user_id: int = user["_id"]
         warn_count: int = user.get("intent_warn_count", 0)
-        intent_time_str: str = user.get("intent_time", "")
+        intent_time_raw = user.get("intent_time")
 
-        if not intent_time_str:
-            await db["users"].update_one({"_id": user_id}, {"$set": {"intent_time": None, "intent_warn_count": 0}})
+        if not intent_time_raw:
+            await db["users"].update_one(
+                {"_id": user_id},
+                {"$set": {"intent_time": None, "intent_warn_count": 0}},
+            )
             continue
 
         try:
-            if isinstance(intent_time_str, datetime):
-                intent_time = intent_time_str
+            if isinstance(intent_time_raw, datetime):
+                intent_time = intent_time_raw
             else:
-                intent_time = datetime.fromisoformat(intent_time_str)
-                
+                intent_time = datetime.fromisoformat(str(intent_time_raw))
+
             if intent_time.tzinfo is None:
                 intent_time = intent_time.replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             log.error(
                 "[INTENT CHECKER] Invalid intent_time for user %d: %r — clearing",
-                user_id, intent_time_str,
+                user_id, intent_time_raw,
             )
-            await db["users"].update_one({"_id": user_id}, {"$set": {"intent_time": None, "intent_warn_count": 0}})
+            await db["users"].update_one(
+                {"_id": user_id},
+                {"$set": {"intent_time": None, "intent_warn_count": 0}},
+            )
             continue
 
         elapsed = (now - intent_time).total_seconds()
 
         # ── BAN threshold ──────────────────────────────────────────────────────
         if elapsed >= BAN_SECONDS:
+            # IDEMPOTENCY: Atomically claim the ban right. The filter requires
+            # intent_time != None AND is_banned != True. If a concurrent pass
+            # already set is_banned=True and cleared intent_time, find_one_and_update
+            # returns None and we skip all side effects for this user.
+            ban_result = await db["users"].find_one_and_update(
+                {
+                    "_id": user_id,
+                    "intent_time": {"$ne": None},
+                    "is_banned": {"$ne": True},
+                },
+                {
+                    "$set": {
+                        "is_banned": True,
+                        "intent_time": None,
+                        "intent_warn_count": 0,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+
+            if ban_result is None:
+                log.info(
+                    "[INTENT CHECKER] Ban for user %d already claimed by concurrent pass — skipping.",
+                    user_id,
+                )
+                continue
+
             log.warning(
                 "[INTENT CHECKER] Auto-banning user %d (elapsed=%.0fs, warns=%d)",
                 user_id, elapsed, warn_count,
             )
-            
-            # Ban logic
-            await db["users"].update_one({"_id": user_id}, {"$set": {"is_banned": True, "intent_time": None, "intent_warn_count": 0}})
 
+            # Delete intent warning messages from user chat before notifying of ban
             try:
                 from app.services.message_tracker import delete_user_messages, CONTEXT_PAYMENT_INTENT
-                # Ensure tracker uses Pyrogram
                 await delete_user_messages(client, user_id, CONTEXT_PAYMENT_INTENT)
             except Exception as exc:
                 log.warning(
@@ -137,33 +236,86 @@ async def _run_check(client: Client) -> None:
                     user_id, exc,
                 )
 
-            # Kick logic (simplified, should be in a service)
-            protected_chats = [settings.NSFW_GROUP_ID, settings.PREMIUM_GROUP_ID, settings.VERIFICATION_GROUP_ID]
+            # Kick from all protected chats with explicit FloodWait handling
+            protected_chats = [
+                settings.NSFW_GROUP_ID,
+                settings.PREMIUM_GROUP_ID,
+                settings.VERIFICATION_GROUP_ID,
+            ]
             for chat_id in protected_chats:
-                if chat_id:
+                if not chat_id:
+                    continue
+                try:
+                    await client.ban_chat_member(chat_id, user_id)
+                except FloodWait as exc:
+                    wait = min(exc.value, _MAX_FLOOD_WAIT_SECONDS)
+                    log.warning(
+                        "[INTENT CHECKER] FloodWait %ds kicking user %d from chat %d.",
+                        wait, user_id, chat_id,
+                    )
+                    await asyncio.sleep(wait)
                     try:
                         await client.ban_chat_member(chat_id, user_id)
-                    except Exception:
-                        pass
+                    except Exception as retry_exc:
+                        log.warning(
+                            "[INTENT CHECKER] Kick retry failed for user %d in chat %d: %s",
+                            user_id, chat_id, retry_exc,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "[INTENT CHECKER] Could not kick user %d from chat %d: %s",
+                        user_id, chat_id, exc,
+                    )
 
-            ban_msg = "🚫 <b>You have been banned.</b>\n\nYou failed to complete payment within the 20-minute window after receiving details."
+            ban_msg = (
+                "🚫 <b>You have been banned.</b>\n\n"
+                "You failed to complete payment within the 20-minute window "
+                "after receiving details."
+            )
             await _safe_notify(client, user_id, ban_msg)
             await _notify_admins_intent_ban(client, user_id)
             continue
 
         # ── Warning 2 ──────────────────────────────────────────────────────────
         if elapsed >= WARN_2_SECONDS and warn_count < 2:
-            await db["users"].update_one({"_id": user_id}, {"$inc": {"intent_warn_count": 1}})
-            warn_msg = "⚠️ <b>Final Warning</b>\n\nYou have 10 minutes left to submit your payment proof before an automatic ban is issued."
+            # IDEMPOTENCY: Atomically increment warn_count only if still < 2 and
+            # intent_time is still set. A concurrent pass that already incremented
+            # to 2 will fail this filter and return None.
+            warn2_result = await db["users"].find_one_and_update(
+                {
+                    "_id": user_id,
+                    "intent_warn_count": {"$lt": 2},
+                    "intent_time": {"$ne": None},
+                },
+                {"$inc": {"intent_warn_count": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if warn2_result is None:
+                log.info(
+                    "[INTENT CHECKER] Warning 2 for user %d already claimed by concurrent pass — skipping.",
+                    user_id,
+                )
+                continue
+
+            warn_msg = (
+                "⚠️ <b>Final Warning</b>\n\n"
+                "You have 10 minutes left to submit your payment proof "
+                "before an automatic ban is issued."
+            )
             msg_id = await _safe_notify(client, user_id, warn_msg)
             if msg_id:
-                # Track for cleanup
-                await db["message_tracker"].insert_one({
-                    "user_id": user_id,
-                    "message_id": msg_id,
-                    "context": "payment_intent",
-                    "created_at": datetime.now(timezone.utc)
-                })
+                try:
+                    await db["message_tracker"].insert_one({
+                        "user_id": user_id,
+                        "message_id": msg_id,
+                        "context": "payment_intent",
+                        "created_at": datetime.now(timezone.utc),
+                    })
+                except Exception as exc:
+                    log.warning(
+                        "[INTENT CHECKER] Failed to track warn-2 message for user %d: %s",
+                        user_id, exc,
+                    )
             log.info(
                 "[INTENT CHECKER] Warning 2/3 sent to user %d (elapsed=%.0fs)",
                 user_id, elapsed,
@@ -172,26 +324,56 @@ async def _run_check(client: Client) -> None:
 
         # ── Warning 1 ──────────────────────────────────────────────────────────
         if elapsed >= WARN_1_SECONDS and warn_count < 1:
-            await db["users"].update_one({"_id": user_id}, {"$inc": {"intent_warn_count": 1}})
-            warn_msg = "⚠️ <b>Payment Pending</b>\n\nPlease submit your TXID and screenshot. You have 15 minutes remaining."
+            # IDEMPOTENCY: Atomically increment warn_count only if still < 1.
+            warn1_result = await db["users"].find_one_and_update(
+                {
+                    "_id": user_id,
+                    "intent_warn_count": {"$lt": 1},
+                    "intent_time": {"$ne": None},
+                },
+                {"$inc": {"intent_warn_count": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if warn1_result is None:
+                log.info(
+                    "[INTENT CHECKER] Warning 1 for user %d already claimed by concurrent pass — skipping.",
+                    user_id,
+                )
+                continue
+
+            warn_msg = (
+                "⚠️ <b>Payment Pending</b>\n\n"
+                "Please submit your TXID and screenshot. "
+                "You have 15 minutes remaining."
+            )
             msg_id = await _safe_notify(client, user_id, warn_msg)
             if msg_id:
-                await db["message_tracker"].insert_one({
-                    "user_id": user_id,
-                    "message_id": msg_id,
-                    "context": "payment_intent",
-                    "created_at": datetime.now(timezone.utc)
-                })
+                try:
+                    await db["message_tracker"].insert_one({
+                        "user_id": user_id,
+                        "message_id": msg_id,
+                        "context": "payment_intent",
+                        "created_at": datetime.now(timezone.utc),
+                    })
+                except Exception as exc:
+                    log.warning(
+                        "[INTENT CHECKER] Failed to track warn-1 message for user %d: %s",
+                        user_id, exc,
+                    )
             log.info(
                 "[INTENT CHECKER] Warning 1/3 sent to user %d (elapsed=%.0fs)",
                 user_id, elapsed,
             )
+            continue
 
 
 async def payment_intent_checker(client: Client) -> None:
     """
-    Main background loop. Never crashes the bot.
-    All exceptions are caught and logged.
+    Main background loop. Runs indefinitely, checking for expired payment
+    intents every CHECK_INTERVAL_SECONDS.
+
+    Never crashes the bot — all exceptions are caught and logged.
+    Handles asyncio.CancelledError for clean shutdown on bot termination.
     """
     log.info(
         "[INTENT CHECKER] Started. Check interval: %ds | Warn at: %ds/%ds | Ban at: %ds",
