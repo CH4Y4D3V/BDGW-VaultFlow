@@ -202,41 +202,46 @@ class DatabaseManager:
         try:
             from app.referral.repository import ReferralRepository
             ref_repo = ReferralRepository(cls._db)
-            await ref_repo.create_indexes()
-            logger.info("referral_indexes_verified")
-        except Exception as e:
-            logger.error(
-                "referral_index_setup_failed",
-                extra={"ctx_mongo_error": str(e)},
-                exc_info=True
-            )
+            try:
+                await ref_repo.create_indexes()
+            except Exception as e:
+                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={
+                        "ctx_collection": "referral",
+                        "ctx_index_name": index_name,
+                        "ctx_mongo_error": str(e)
+                    },
+                    exc_info=True
+                )
 
-        try:
             from app.payments.repository import PaymentRepository
             payment_repo = PaymentRepository(cls._db)
-            await payment_repo.create_indexes()
-            logger.info("payment_indexes_verified")
+            try:
+                await payment_repo.create_indexes()
+                logger.info("mongodb_initialization_complete")
+            except Exception as e:
+                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
+                logger.error(
+                    "non_core_index_setup_failed",
+                    extra={
+                        "ctx_collection": "payments",
+                        "ctx_index_name": index_name,
+                        "ctx_mongo_error": str(e)
+                    },
+                    exc_info=True
+                )
+            
         except Exception as e:
             logger.error(
-                "payment_index_setup_failed", 
-                extra={"ctx_mongo_error": str(e)}, 
+                "non_core_final_init_failed",
+                extra={"ctx_error": repr(e)},
                 exc_info=True
             )
 
-        try:
-            from app.repositories.txid_repository import TXIDRepository
-            txid_repo = TXIDRepository()
-            await txid_repo.create_indexes()
-            logger.info("txid_indexes_verified")
-        except Exception as e:
-            logger.error(
-                "txid_index_setup_failed", 
-                extra={"ctx_mongo_error": str(e)}
-            )
-            
-        logger.info("mongodb_initialization_complete")
-
         cls._initialized = True
+
     @classmethod
     def transactions_supported(cls) -> bool:
         return cls._transactions_supported
@@ -615,11 +620,18 @@ class DatabaseManager:
                 name="support_user_direction",
                 background=True,
             ),
+            # FIX: sparse=True alone does not exclude documents where hub_message_id
+            # is present but null — MongoDB only skips documents where the field is
+            # entirely absent. Multiple user_to_admin messages with hub_message_id=None
+            # all collide on the unique constraint.
+            # partialFilterExpression restricts the unique index to documents where
+            # hub_message_id is both present AND not null, which is the correct intent.
             IndexModel(
                 [("hub_message_id", ASCENDING), ("direction", ASCENDING)],
                 name="support_hub_msg_unique",
                 unique=True,
                 sparse=True,
+                partialFilterExpression={"hub_message_id": {"$exists": True, "$ne": None}},
             ),
         ])
 

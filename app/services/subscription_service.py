@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -23,28 +22,16 @@ class SubscriptionService:
 
     async def get_effective_plan(self, user_id: int) -> Plan:
         """Return the highest plan the user currently holds, including hardcoded roles."""
-        # 1. Hardcoded Owner/Sudo overrides
         if user_id == settings.OWNER_ID:
             return Plan.OWNER
         if user_id in settings.SUDO_IDS:
             return Plan.SUDO
-            
-        # 2. Check Database Subscription
         sub = await self._repo.get_by_user_id(user_id)
         if not sub:
             return Plan.FREE
-            
-        # 3. Verify Status
-        # Banned or Expired (without grace) users get FREE plan
-        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.BANNED, SubscriptionStatus.CANCELLED):
+        if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.BANNED):
             return Plan.FREE
-            
-        # 4. Handle Grace Period
-        if sub.status == SubscriptionStatus.GRACE:
-            # Still grant access during grace
-            return sub.plan or Plan.FREE
-            
-        return sub.plan or Plan.FREE
+        return sub.plan
 
     async def has_access(self, user_id: int, required_plan: Plan) -> bool:
         effective = await self.get_effective_plan(user_id)
@@ -76,6 +63,9 @@ class SubscriptionService:
 
         If the user already has an active non-lifetime subscription of the same
         plan, we extend from the current expiry rather than overwriting it.
+
+        granted_by and notes are stored in metadata so the dataclass constructor
+        receives only the fields it declares as positional/keyword arguments.
         """
         now = datetime.now(timezone.utc)
         existing = await self._repo.get_by_user_id(user_id)
@@ -98,10 +88,19 @@ class SubscriptionService:
             expires_at = exp
             grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
+        # Build the merged metadata dict first, then construct Subscription.
+        # granted_by and notes are intentionally kept in metadata rather than
+        # as top-level kwargs so callers that query metadata can always find
+        # full grant provenance, and the constructor call stays compatible with
+        # the Subscription dataclass field list.
+        merged_metadata = {
+            **(existing.metadata if existing and existing.metadata else {}),
+            "granted_by": granted_by,
+            "notes": notes or "",
+        }
+
         sub = Subscription(
-            subscription_id=existing.subscription_id if existing else str(_uuid.uuid4()),
             user_id=user_id,
-            package_id=plan.value,
             plan=plan,
             status=SubscriptionStatus.ACTIVE,
             started_at=now,
@@ -109,11 +108,7 @@ class SubscriptionService:
             grace_until=grace_until,
             created_at=existing.created_at if existing else now,
             updated_at=now,
-            metadata={
-                **(existing.metadata if existing else {}),
-                "notes": notes,
-                "granted_by": granted_by,
-            },
+            metadata=merged_metadata,
         )
         await self._repo.upsert(sub)
         logger.info(
@@ -139,10 +134,7 @@ class SubscriptionService:
         sub.plan = Plan.FREE
         sub.updated_at = now
         await self._repo.upsert(sub)
-        logger.info(
-            "Subscription revoked",
-            extra={"ctx_user_id": user_id, "ctx_revoked_by": revoked_by}
-        )
+        logger.info("Subscription revoked", extra={"ctx_user_id": user_id, "ctx_revoked_by": revoked_by})
         return sub
 
     async def set_grace(self, sub: Subscription) -> Subscription:

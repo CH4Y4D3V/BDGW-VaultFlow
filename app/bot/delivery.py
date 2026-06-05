@@ -26,11 +26,13 @@ logger = get_logger(__name__)
 
 
 # Maps source_channel_id string labels → actual Telegram channel IDs
-# Add any other labels your job creation code uses here
 _CHANNEL_LABEL_MAP: dict[str, str] = {
-    "submission_premium": str(settings.PREMIUM_CHANNEL_ID),
-    "submission_main":    str(settings.VAULT_CHANNEL_ID),
-    "submission_nsfw":    str(settings.NSFW_GROUP_ID),
+    "submission_premium": str(
+        getattr(settings, "PREMIUM_CHANNEL_ID", None)
+        or getattr(settings, "PREMIUM_GROUP_ID", 0)
+    ),
+    "submission_main": str(settings.VAULT_CHANNEL_ID),
+    "submission_nsfw": str(settings.NSFW_GROUP_ID),
 }
 
 
