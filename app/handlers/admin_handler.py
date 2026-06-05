@@ -914,7 +914,7 @@ async def handle_paymentdone_command(client: Client, message: Message) -> None:
         admin_id = message.from_user.id
         admin_name = message.from_user.full_name or "Admin"
 
-        from app.services.payment_service import get_payment_service
+        from app.payments import get_payment_service
         service = get_payment_service()
         session = await service.get_active_session(target_id)
 

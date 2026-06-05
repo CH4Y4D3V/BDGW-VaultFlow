@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 
 from pyrogram.client import Client
 from pyrogram.errors import (
@@ -82,305 +82,416 @@ _ADMIN_LOG_TEMPLATE = (
 # Telegram error names that indicate a forum topic no longer exists
 _TOPIC_GONE_ERRORS = (TopicDeleted, TopicClosed, MessageIdInvalid)
 
+# Topic types (backward compatibility for legacy multi-topic calls)
+TOPIC_CONTENT = "content"
+TOPIC_SUPPORT = "support"
+TOPIC_PAYMENT = "payment"
+TOPIC_REJECTED = "rejected"
 
-# ── Public API ────────────────────────────────────────────────────────────────
 
-
-async def ensure_shared_topics(bot: Client) -> None:
+class TopicManager:
     """
-    Bootstrap the Verification Hub's shared infrastructure topics.
-
-    Must be called ONCE during bot startup, before any other system
-    attempts to post to the Admin Logs topic.
-
-    Behaviour:
-      1. Reads hub_supergroup_id from hub_config (MongoDB).
-         Logs a fatal warning and returns early if not set — operators
-         must configure this before launch.
-      2. Checks hub_config for an existing admin_logs_topic_id.
-         If found, patches settings.HUB_TOPIC_ADMIN_LOGS in-process
-         (so AdminLogger sees it immediately) and returns — nothing to do.
-      3. If the topic_id is missing from hub_config, creates the
-         "📋 Admin Logs" forum topic in the hub supergroup via the
-         Telegram API (with FloodWait handling).
-      4. Writes the new topic_id to hub_config using upsert so the write
-         is idempotent on concurrent startups.
-      5. Patches settings.HUB_TOPIC_ADMIN_LOGS in-process.
-      6. Logs the creation event to audit_logs (MongoDB).
-         NOTE: We cannot post to the Admin Logs topic at this point because
-         the topic was just created — we write to audit_logs only.
-
-    Args:
-        bot: Authenticated Pyrogram client with forum admin rights.
+    User-Centric Topic Manager (Section 9.2).
+    Ensures every user has exactly one permanent forum topic in the Hub.
     """
-    hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
-    if not hub_id:
-        logger.critical(
-            "hub_supergroup_id not set in hub_config — "
-            "cannot ensure shared topics. Set this key before launch.",
-        )
-        return
 
-    # ── Check if Admin Logs topic already exists ──────────────────────────────
-    existing_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOPIC_ID)
-    if existing_topic_id:
-        logger.info(
-            "Admin Logs topic already configured",
-            extra={"ctx_topic_id": existing_topic_id},
-        )
-        _patch_settings_admin_logs(existing_topic_id)
-        return
+    _instance: Optional[TopicManager] = None
 
-    # ── Create Admin Logs topic — guarded by a startup-scoped lock ────────────
-    lock_key = "topic_create:admin_logs"
-    async with _redis_lock(lock_key, ttl=60):
-        # Re-check inside lock — another instance may have just created it
+    def __new__(cls) -> TopicManager:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    async def restore_cache(self) -> None:
+        """
+        Warms up internal caches from database.
+        Currently a no-op as MongoDB is the source of truth for every call.
+        """
+        logger.debug("TopicManager: cache restoration complete (no-op)")
+
+    async def ensure_shared_topics(self, bot: Client) -> None:
+        """
+        Bootstrap the Verification Hub's shared infrastructure topics.
+
+        Must be called ONCE during bot startup, before any other system
+        attempts to post to the Admin Logs topic.
+
+        Behaviour:
+          1. Reads hub_supergroup_id from hub_config (MongoDB).
+             Logs a fatal warning and returns early if not set — operators
+             must configure this before launch.
+          2. Checks hub_config for an existing admin_logs_topic_id.
+             If found, patches settings.HUB_TOPIC_ADMIN_LOGS in-process
+             (so AdminLogger sees it immediately) and returns — nothing to do.
+          3. If the topic_id is missing from hub_config, creates the
+             "📋 Admin Logs" forum topic in the hub supergroup via the
+             Telegram API (with FloodWait handling).
+          4. Writes the new topic_id to hub_config using upsert so the write
+             is idempotent on concurrent startups.
+          5. Patches settings.HUB_TOPIC_ADMIN_LOGS in-process.
+          6. Logs the creation event to audit_logs (MongoDB).
+             NOTE: We cannot post to the Admin Logs topic at this point because
+             the topic was just created — we write to audit_logs only.
+
+        Args:
+            bot: Authenticated Pyrogram client with forum admin rights.
+        """
+        hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
+        if not hub_id:
+            logger.critical(
+                "hub_supergroup_id not set in hub_config — "
+                "cannot ensure shared topics. Set this key before launch.",
+            )
+            return
+
+        # ── Check if Admin Logs topic already exists ──────────────────────────────
         existing_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOPIC_ID)
         if existing_topic_id:
             logger.info(
-                "Admin Logs topic was created by a concurrent startup — using it",
+                "Admin Logs topic already configured",
                 extra={"ctx_topic_id": existing_topic_id},
             )
             _patch_settings_admin_logs(existing_topic_id)
             return
 
-        topic_id = await _create_forum_topic(
-            bot=bot,
-            chat_id=hub_id,
-            name=_ADMIN_LOGS_TOPIC_NAME,
-        )
-        if topic_id is None:
-            logger.error(
-                "Failed to create Admin Logs topic — AdminLogger will be silenced "
-                "until the topic is manually created and hub_config is updated.",
+        # ── Create Admin Logs topic — guarded by a startup-scoped lock ────────────
+        lock_key = "topic_create:admin_logs"
+        async with _redis_lock(lock_key, ttl=60):
+            # Re-check inside lock — another instance may have just created it
+            existing_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOP_ID)
+            if existing_topic_id:
+                logger.info(
+                    "Admin Logs topic was created by a concurrent startup — using it",
+                    extra={"ctx_topic_id": existing_topic_id},
+                )
+                _patch_settings_admin_logs(existing_topic_id)
+                return
+
+            topic_id = await _create_forum_topic(
+                bot=bot,
+                chat_id=hub_id,
+                name=_ADMIN_LOGS_TOPIC_NAME,
             )
-            return
+            if topic_id is None:
+                logger.error(
+                    "Failed to create Admin Logs topic — AdminLogger will be silenced "
+                    "until the topic is manually created and hub_config is updated.",
+                )
+                return
 
-        # ── Write topic_id back to hub_config (Section 25A.19) ───────────────
-        await _upsert_hub_config(_KEY_ADMIN_LOGS_TOPIC_ID, topic_id)
+            # ── Write topic_id back to hub_config (Section 25A.19) ───────────────
+            await _upsert_hub_config(_KEY_ADMIN_LOGS_TOPIC_ID, topic_id)
 
-        # ── Patch settings in-process so AdminLogger can use it immediately ──
-        _patch_settings_admin_logs(topic_id)
+            # ── Patch settings in-process so AdminLogger can use it immediately ──
+            _patch_settings_admin_logs(topic_id)
 
-        # ── Audit log (MongoDB only — cannot post to topic that was just made)─
-        await _write_audit_log(
-            action="TOPIC CREATED",
-            admin_user_id=None,
-            target_user_id=None,
-            detail={
-                "topic_name": _ADMIN_LOGS_TOPIC_NAME,
-                "topic_id": topic_id,
-                "hub_id": hub_id,
-                "note": "Admin Logs topic auto-created on startup",
-            },
-        )
+            # ── Audit log (MongoDB only — cannot post to topic that was just made)─
+            await _write_audit_log(
+                action="TOPIC CREATED",
+                admin_user_id=None,
+                target_user_id=None,
+                detail={
+                    "topic_name": _ADMIN_LOGS_TOPIC_NAME,
+                    "topic_id": topic_id,
+                    "hub_id": hub_id,
+                    "note": "Admin Logs topic auto-created on startup",
+                },
+            )
 
-        logger.info(
-            "Admin Logs topic created and persisted to hub_config",
-            extra={"ctx_topic_id": topic_id, "ctx_hub_id": hub_id},
-        )
+            logger.info(
+                "Admin Logs topic created and persisted to hub_config",
+                extra={"ctx_topic_id": topic_id, "ctx_hub_id": hub_id},
+            )
+
+    async def get_or_create_user_topic(
+        self,
+        bot: Client,
+        user_id: int,
+        full_name: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        Return the permanent forum topic ID for a user, creating it if needed.
+
+        This is the ONLY function all systems should call when they need to post
+        into a user's topic. It enforces the "one user = one permanent topic"
+        invariant (Section 9.2, Core Principle 9).
+
+        Algorithm:
+          1. Look up user_topics collection in MongoDB for an existing topic_id.
+             If found, return it immediately (fast path — no lock needed).
+          2. Acquire a per-user Redis distributed lock to prevent concurrent
+             duplicate creation.
+          3. Re-check MongoDB inside the lock (TOCTOU guard).
+          4. Create the forum topic via Telegram API with FloodWait handling.
+          5. Write the new mapping to user_topics (upsert — idempotent).
+          6. Write to audit_logs (MongoDB).
+          7. Post a TOPIC CREATED entry to the Admin Logs topic.
+          8. Return the new topic_id.
+
+        Args:
+            bot:       Authenticated Pyrogram client.
+            user_id:   Telegram user ID of the target user.
+            full_name: User's display name (used in topic title). If None, fetched from DB.
+            username:  Telegram username without @, or None.
+
+        Returns:
+            Integer forum topic ID, or None if creation failed.
+        """
+        # ── Fast path: existing mapping ───────────────────────────────────────────
+        existing = await self.get_user_topic_id(user_id)
+        if existing:
+            return existing
+
+        # ── Resolve missing name from DB if needed ───────────────────────────────
+        if full_name is None:
+            db = DatabaseManager.get_db()
+            user_doc = await db["users"].find_one({"_id": user_id})
+            if user_doc:
+                full_name = user_doc.get("full_name", f"User {user_id}")
+                username = username or user_doc.get("username")
+            else:
+                full_name = f"User {user_id}"
+
+        # ── Slow path: create under lock ─────────────────────────────────────────
+        lock_key = f"topic_create:{user_id}"
+        async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
+            # TOCTOU guard: another request may have created the topic while we
+            # were waiting for the lock.
+            existing = await self.get_user_topic_id(user_id)
+            if existing:
+                return existing
+
+            hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
+            if not hub_id:
+                logger.error(
+                    "hub_supergroup_id not configured — cannot create user topic",
+                    extra={"ctx_user_id": user_id},
+                )
+                return None
+
+            topic_name = _USER_TOPIC_NAME_TEMPLATE.format(
+                full_name=full_name,
+                user_id=user_id,
+            )
+            topic_id = await _create_forum_topic(
+                bot=bot,
+                chat_id=hub_id,
+                name=topic_name,
+            )
+            if topic_id is None:
+                logger.error(
+                    "Failed to create user topic",
+                    extra={"ctx_user_id": user_id, "ctx_topic_name": topic_name},
+                )
+                return None
+
+            # ── Persist mapping to MongoDB BEFORE any Telegram post (Section 25) ─
+            await _upsert_user_topic(user_id=user_id, topic_id=topic_id)
+
+            # ── Dual audit write (Section 22) ─────────────────────────────────────
+            await _write_audit_log(
+                action="TOPIC CREATED",
+                admin_user_id=None,
+                target_user_id=user_id,
+                detail={
+                    "topic_name": topic_name,
+                    "topic_id": topic_id,
+                    "hub_id": hub_id,
+                },
+            )
+            await _post_admin_log_entry(
+                bot=bot,
+                action="TOPIC CREATED",
+                full_name=full_name,
+                username=username or "N/A",
+                user_id=user_id,
+                detail=f"User topic auto-created: {topic_name} (topic_id={topic_id})",
+            )
+
+            logger.info(
+                "User topic created",
+                extra={
+                    "ctx_user_id": user_id,
+                    "ctx_topic_id": topic_id,
+                    "ctx_topic_name": topic_name,
+                },
+            )
+            return topic_id
+
+    async def get_user_topic_id(self, user_id: int, topic_type: Optional[str] = None) -> Optional[int]:
+        """
+        Return the existing topic ID for a user from MongoDB.
+        
+        Args:
+            user_id: Telegram user ID.
+            topic_type: Ignored (Section 9.2: One User = One Permanent Topic).
+            
+        Returns:
+            Integer topic_id or None.
+        """
+        return await _get_user_topic_id(user_id)
+
+    async def get_user_by_topic(self, topic_id: int) -> Optional[dict]:
+        """
+        Return the user document associated with a topic ID.
+        Used by topic_router for bidirectional routing.
+        """
+        try:
+            db = DatabaseManager.get_db()
+            doc = await db["user_topics"].find_one({"topic_id": topic_id})
+            return doc
+        except Exception as exc:
+            logger.error(
+                "Failed to query user_topics by topic_id",
+                extra={"ctx_topic_id": topic_id, "ctx_error": str(exc)},
+                exc_info=exc,
+            )
+        return None
+
+    async def recover_user_topic(
+        self,
+        bot: Client,
+        user_id: int,
+        full_name: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        Recover a user topic that was manually deleted by a Telegram admin.
+
+        Must be called by any sender that receives a Telegram API error
+        (TopicDeleted, TopicClosed, MessageIdInvalid) when posting to a user's
+        topic ID that is stored in MongoDB. The topic was externally deleted;
+        this function repairs the state.
+
+        Recovery procedure (Section 9.2):
+          1. Acquire a per-user Redis lock (prevents concurrent recovery storms).
+          2. Create a new forum topic with the same name format.
+          3. Update the user_topics mapping in MongoDB with the new topic_id.
+          4. Write to audit_logs (MongoDB) with action TOPIC RECOVERED.
+          5. Post a TOPIC RECOVERED entry to the Admin Logs topic.
+          6. Return the new topic_id so the caller can retry its send.
+
+        Args:
+            bot:       Authenticated Pyrogram client.
+            user_id:   Telegram user ID whose topic needs recovery.
+            full_name: User's display name. If None, fetched from DB.
+            username:  Telegram username without @, or None.
+
+        Returns:
+            New integer forum topic ID, or None if recovery failed.
+        """
+        # ── Resolve missing name from DB if needed ───────────────────────────────
+        if full_name is None:
+            db = DatabaseManager.get_db()
+            user_doc = await db["users"].find_one({"_id": user_id})
+            if user_doc:
+                full_name = user_doc.get("full_name", f"User {user_id}")
+                username = username or user_doc.get("username")
+            else:
+                full_name = f"User {user_id}"
+
+        lock_key = f"topic_recover:{user_id}"
+        async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
+            hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
+            if not hub_id:
+                logger.error(
+                    "hub_supergroup_id not configured — cannot recover user topic",
+                    extra={"ctx_user_id": user_id},
+                )
+                return None
+
+            topic_name = _USER_TOPIC_NAME_TEMPLATE.format(
+                full_name=full_name,
+                user_id=user_id,
+            )
+            topic_id = await _create_forum_topic(
+                bot=bot,
+                chat_id=hub_id,
+                name=topic_name,
+            )
+            if topic_id is None:
+                logger.error(
+                    "Failed to recover user topic — Telegram API error during creation",
+                    extra={"ctx_user_id": user_id},
+                )
+                return None
+
+            # ── Update MongoDB mapping BEFORE any re-send attempt ─────────────────
+            await _upsert_user_topic(user_id=user_id, topic_id=topic_id)
+
+            # ── Dual audit write (Section 22) ─────────────────────────────────────
+            await _write_audit_log(
+                action="TOPIC RECOVERED",
+                admin_user_id=None,
+                target_user_id=user_id,
+                detail={
+                    "new_topic_id": topic_id,
+                    "topic_name": topic_name,
+                    "hub_id": hub_id,
+                    "reason": "Previous topic was manually deleted by a Telegram admin",
+                },
+            )
+            await _post_admin_log_entry(
+                bot=bot,
+                action="TOPIC RECOVERED",
+                full_name=full_name,
+                username=username or "N/A",
+                user_id=user_id,
+                detail=(
+                    f"Topic was manually deleted and has been recreated. "
+                    f"New topic_id={topic_id}. History prior to deletion is lost."
+                ),
+            )
+
+            logger.warning(
+                "User topic recovered after deletion",
+                extra={
+                    "ctx_user_id": user_id,
+                    "ctx_new_topic_id": topic_id,
+                },
+            )
+            return topic_id
+
+
+# ── Factory ──────────────────────────────────────────────────────────────────
+
+
+def get_topic_manager() -> TopicManager:
+    """Return the TopicManager singleton."""
+    return TopicManager()
+
+
+# ── Public API (Global Wrappers for backward compatibility) ──────────────────
+
+
+async def ensure_shared_topics(bot: Client) -> None:
+    await get_topic_manager().ensure_shared_topics(bot)
 
 
 async def get_or_create_user_topic(
     bot: Client,
-    *,
     user_id: int,
-    full_name: str,
+    full_name: Optional[str] = None,
     username: Optional[str] = None,
+    **kwargs: Any,
 ) -> Optional[int]:
-    """
-    Return the permanent forum topic ID for a user, creating it if needed.
-
-    This is the ONLY function all systems should call when they need to post
-    into a user's topic. It enforces the "one user = one permanent topic"
-    invariant (Section 9.2, Core Principle 9).
-
-    Algorithm:
-      1. Look up user_topics collection in MongoDB for an existing topic_id.
-         If found, return it immediately (fast path — no lock needed).
-      2. Acquire a per-user Redis distributed lock to prevent concurrent
-         duplicate creation.
-      3. Re-check MongoDB inside the lock (TOCTOU guard).
-      4. Create the forum topic via Telegram API with FloodWait handling.
-      5. Write the new mapping to user_topics (upsert — idempotent).
-      6. Write to audit_logs (MongoDB).
-      7. Post a TOPIC CREATED entry to the Admin Logs topic.
-      8. Return the new topic_id.
-
-    Args:
-        bot:       Authenticated Pyrogram client.
-        user_id:   Telegram user ID of the target user.
-        full_name: User's display name (used in topic title).
-        username:  Telegram username without @, or None.
-
-    Returns:
-        Integer forum topic ID, or None if creation failed.
-    """
-    # ── Fast path: existing mapping ───────────────────────────────────────────
-    existing = await _get_user_topic_id(user_id)
-    if existing:
-        return existing
-
-    # ── Slow path: create under lock ─────────────────────────────────────────
-    lock_key = f"topic_create:{user_id}"
-    async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
-        # TOCTOU guard: another request may have created the topic while we
-        # were waiting for the lock.
-        existing = await _get_user_topic_id(user_id)
-        if existing:
-            return existing
-
-        hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
-        if not hub_id:
-            logger.error(
-                "hub_supergroup_id not configured — cannot create user topic",
-                extra={"ctx_user_id": user_id},
-            )
-            return None
-
-        topic_name = _USER_TOPIC_NAME_TEMPLATE.format(
-            full_name=full_name,
-            user_id=user_id,
-        )
-        topic_id = await _create_forum_topic(
-            bot=bot,
-            chat_id=hub_id,
-            name=topic_name,
-        )
-        if topic_id is None:
-            logger.error(
-                "Failed to create user topic",
-                extra={"ctx_user_id": user_id, "ctx_topic_name": topic_name},
-            )
-            return None
-
-        # ── Persist mapping to MongoDB BEFORE any Telegram post (Section 25) ─
-        await _upsert_user_topic(user_id=user_id, topic_id=topic_id)
-
-        # ── Dual audit write (Section 22) ─────────────────────────────────────
-        await _write_audit_log(
-            action="TOPIC CREATED",
-            admin_user_id=None,
-            target_user_id=user_id,
-            detail={
-                "topic_name": topic_name,
-                "topic_id": topic_id,
-                "hub_id": hub_id,
-            },
-        )
-        await _post_admin_log_entry(
-            bot=bot,
-            action="TOPIC CREATED",
-            full_name=full_name,
-            username=username or "N/A",
-            user_id=user_id,
-            detail=f"User topic auto-created: {topic_name} (topic_id={topic_id})",
-        )
-
-        logger.info(
-            "User topic created",
-            extra={
-                "ctx_user_id": user_id,
-                "ctx_topic_id": topic_id,
-                "ctx_topic_name": topic_name,
-            },
-        )
-        return topic_id
+    """Wrapper for backward compatibility."""
+    return await get_topic_manager().get_or_create_user_topic(
+        bot=bot, user_id=user_id, full_name=full_name, username=username
+    )
 
 
 async def recover_user_topic(
     bot: Client,
-    *,
     user_id: int,
-    full_name: str,
+    full_name: Optional[str] = None,
     username: Optional[str] = None,
 ) -> Optional[int]:
-    """
-    Recover a user topic that was manually deleted by a Telegram admin.
-
-    Must be called by any sender that receives a Telegram API error
-    (TopicDeleted, TopicClosed, MessageIdInvalid) when posting to a user's
-    topic ID that is stored in MongoDB. The topic was externally deleted;
-    this function repairs the state.
-
-    Recovery procedure (Section 9.2):
-      1. Acquire a per-user Redis lock (prevents concurrent recovery storms).
-      2. Create a new forum topic with the same name format.
-      3. Update the user_topics mapping in MongoDB with the new topic_id.
-      4. Write to audit_logs (MongoDB) with action TOPIC RECOVERED.
-      5. Post a TOPIC RECOVERED entry to the Admin Logs topic.
-      6. Return the new topic_id so the caller can retry its send.
-
-    Args:
-        bot:       Authenticated Pyrogram client.
-        user_id:   Telegram user ID whose topic needs recovery.
-        full_name: User's display name (reconstructed from users collection).
-        username:  Telegram username without @, or None.
-
-    Returns:
-        New integer forum topic ID, or None if recovery failed.
-    """
-    lock_key = f"topic_recover:{user_id}"
-    async with _redis_lock(lock_key, ttl=_LOCK_TTL_SECONDS):
-        hub_id = await _get_hub_config_int(_KEY_HUB_SUPERGROUP_ID)
-        if not hub_id:
-            logger.error(
-                "hub_supergroup_id not configured — cannot recover user topic",
-                extra={"ctx_user_id": user_id},
-            )
-            return None
-
-        topic_name = _USER_TOPIC_NAME_TEMPLATE.format(
-            full_name=full_name,
-            user_id=user_id,
-        )
-        topic_id = await _create_forum_topic(
-            bot=bot,
-            chat_id=hub_id,
-            name=topic_name,
-        )
-        if topic_id is None:
-            logger.error(
-                "Failed to recover user topic — Telegram API error during creation",
-                extra={"ctx_user_id": user_id},
-            )
-            return None
-
-        # ── Update MongoDB mapping BEFORE any re-send attempt ─────────────────
-        await _upsert_user_topic(user_id=user_id, topic_id=topic_id)
-
-        # ── Dual audit write (Section 22) ─────────────────────────────────────
-        await _write_audit_log(
-            action="TOPIC RECOVERED",
-            admin_user_id=None,
-            target_user_id=user_id,
-            detail={
-                "new_topic_id": topic_id,
-                "topic_name": topic_name,
-                "hub_id": hub_id,
-                "reason": "Previous topic was manually deleted by a Telegram admin",
-            },
-        )
-        await _post_admin_log_entry(
-            bot=bot,
-            action="TOPIC RECOVERED",
-            full_name=full_name,
-            username=username or "N/A",
-            user_id=user_id,
-            detail=(
-                f"Topic was manually deleted and has been recreated. "
-                f"New topic_id={topic_id}. History prior to deletion is lost."
-            ),
-        )
-
-        logger.warning(
-            "User topic recovered after deletion",
-            extra={
-                "ctx_user_id": user_id,
-                "ctx_new_topic_id": topic_id,
-            },
-        )
-        return topic_id
+    """Wrapper for backward compatibility."""
+    return await get_topic_manager().recover_user_topic(
+        bot=bot, user_id=user_id, full_name=full_name, username=username
+    )
 
 
 def is_topic_gone_error(exc: Exception) -> bool:
