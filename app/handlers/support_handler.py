@@ -163,7 +163,7 @@ async def msg_support_forward(client: Client, message: Message):
     if ok:
         await message.reply("✅ Message received by support team.", parse_mode=ParseMode.HTML)
 
-@Client.on_message((filters.text | filters.photo | filters.video | filters.document) & filters.private & ~filters.command, group=1)
+@Client.on_message((filters.text | filters.photo | filters.video | filters.document) & filters.private & ~filters.command([]), group=1)
 async def private_message_handler(client: Client, message: Message):
     user_id = message.from_user.id
     if user_states.get(user_id) == SUPPORT_STATE_ACTIVE or await is_session_active(DatabaseManager.get_db(), user_id):
