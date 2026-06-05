@@ -15,7 +15,6 @@ from app.core.database import DatabaseManager
 from app.services.support_service import get_support_service, build_accept_markup
 from app.services.topic_manager import TOPIC_SUPPORT, get_topic_manager
 from app.utils.logger import get_logger
-from locales import get_user_lang, get_text
 
 log = get_logger(__name__)
 
@@ -56,7 +55,7 @@ async def cmd_support(client: Client, message: Message):
     db = DatabaseManager.get_db()
     user_id = message.from_user.id
 
-    if user_id in settings.admin_ids:
+    if user_id in settings.ADMIN_IDS:
         await message.reply(
             "ℹ️ You are an admin. Use <code>/closesupport &lt;user_id&gt;</code> "
             "to manage user sessions.",
@@ -64,10 +63,8 @@ async def cmd_support(client: Client, message: Message):
         )
         return
 
-    lang = (await get_user_lang(db, user_id)) or "en"
-
     if await is_session_active(db, user_id):
-        await message.reply(get_text("support_already_active", lang), parse_mode=ParseMode.HTML)
+        await message.reply("⚠️ You already have an active support session. An admin will respond shortly.", parse_mode=ParseMode.HTML)
         return
 
     minutes = _support_session_minutes()
@@ -87,7 +84,7 @@ async def cmd_support(client: Client, message: Message):
     )
     user_states[user_id] = SUPPORT_STATE_ACTIVE
 
-    await message.reply(get_text("support_session_started", lang), parse_mode=ParseMode.HTML)
+    await message.reply("✅ Support request received. Our team will respond as soon as possible.", parse_mode=ParseMode.HTML)
 
     user = message.from_user
     user_link = f"tg://user?id={user_id}"
@@ -117,8 +114,7 @@ async def handle_support_accept(client: Client, callback: CallbackQuery):
     # Verify the session is still pending
     doc = await db["user_topics"].find_one({"user_id": user_id, "topic_type": TOPIC_SUPPORT})
     if not doc or doc.get("status") != "pending":
-        handler = doc.get("accepted_by_name", "another admin") if doc else "unknown"
-        await callback.answer(get_text("support_already_accepted", "en", user_id=user_id, handler=handler), show_alert=True)
+        await callback.answer("This ticket has already been accepted.", show_alert=True)
         return
 
     admin_name = callback.from_user.first_name or "Admin"
@@ -141,11 +137,10 @@ async def handle_support_accept(client: Client, callback: CallbackQuery):
     )
     
     # Notify user
-    lang = (await get_user_lang(db, user_id)) or "en"
     try:
         await client.send_message(
             chat_id=user_id,
-            text=get_text("support_connected", lang),
+            text="✅ An admin has accepted your support request. You can now chat freely.",
             parse_mode=ParseMode.HTML
         )
     except Exception:
@@ -158,8 +153,7 @@ async def msg_support_forward(client: Client, message: Message):
     user_id = message.from_user.id
 
     if not await is_session_active(db, user_id):
-        lang = (await get_user_lang(db, user_id)) or "en"
-        await message.reply(get_text("support_session_expired", lang), parse_mode=ParseMode.HTML)
+        await message.reply("⌛ Your support session has expired. Send /help to start a new one.", parse_mode=ParseMode.HTML)
         user_states.pop(user_id, None)
         return
 
@@ -167,8 +161,7 @@ async def msg_support_forward(client: Client, message: Message):
     ok = await support_service.handle_user_message(client, message)
     
     if ok:
-        lang = (await get_user_lang(db, user_id)) or "en"
-        await message.reply(get_text("support_message_received", lang), parse_mode=ParseMode.HTML)
+        await message.reply("✅ Message received by support team.", parse_mode=ParseMode.HTML)
 
 @Client.on_message((filters.text | filters.photo | filters.video | filters.document) & filters.private & ~filters.command, group=1)
 async def private_message_handler(client: Client, message: Message):
@@ -180,7 +173,7 @@ async def private_message_handler(client: Client, message: Message):
 @Client.on_message(filters.command("closesupport") & filters.private)
 async def cmd_close_support(client: Client, message: Message):
     db = DatabaseManager.get_db()
-    if message.from_user.id not in settings.admin_ids:
+    if message.from_user.id not in settings.ADMIN_IDS:
         return
 
     parts = message.text.split()
@@ -201,10 +194,9 @@ async def cmd_close_support(client: Client, message: Message):
     await message.reply(f"✅ Support session closed for user {user_id}.")
     
     try:
-        lang = (await get_user_lang(db, user_id)) or "en"
         await client.send_message(
             chat_id=user_id,
-            text=get_text("support_session_closed_user", lang),
+            text="✅ Your support session has been closed. Thank you for contacting us.",
             parse_mode=ParseMode.HTML
         )
     except Exception:

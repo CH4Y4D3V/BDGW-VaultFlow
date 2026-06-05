@@ -49,3 +49,7 @@ class TXIDRegistry(BaseModel):
 
     def to_dict(self) -> dict:
         return self.model_dump(by_alias=True)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TXIDRegistry":
+        return cls(**data)

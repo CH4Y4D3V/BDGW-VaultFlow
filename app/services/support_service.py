@@ -12,7 +12,6 @@ from pyrogram.errors import FloodWait, RPCError
 from app.config import settings
 from app.core.database import DatabaseManager
 from app.services.topic_manager import get_topic_manager, TOPIC_SUPPORT
-from locales import get_text
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ class SupportService:
             
             # Log the message to DB
             db = DatabaseManager.get_db()
-            await db.support_messages.insert_one({
+            await db["support_messages"].insert_one({
                 "user_id": user_id,
                 "topic_id": topic_id,
                 "user_message_id": message.id,

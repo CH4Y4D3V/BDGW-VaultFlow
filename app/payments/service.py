@@ -296,11 +296,7 @@ class PaymentService:
         return True
 
     async def resume_active_sessions(self) -> None:
-        """
-        --- GAP 8 FIX: RESTART SAFE TIMER ---
-        """
         try:
-            # Recover sessions stuck in PROCESSING from a previous crash
             reset_count = await self.repository.reset_stuck_processing()
             if reset_count:
                 logger.info(
@@ -308,26 +304,40 @@ class PaymentService:
                     extra={"ctx_count": reset_count},
                 )
 
-            active_sessions = await self.repository.get_sessions_by_status([
-                PaymentStatus.AWAITING_PAYMENT,
-                PaymentStatus.WAITING_SCREENSHOT,
-                PaymentStatus.UNDER_REVIEW
-            ])
+            active_statuses = [
+                PaymentStatus.AWAITING_PAYMENT.value,
+                PaymentStatus.WAITING_SCREENSHOT.value,
+                PaymentStatus.UNDER_REVIEW.value,
+            ]
+            docs = await self.repository._collection.find(
+                {"status": {"$in": active_statuses}}
+            ).to_list(length=None)
+            active_sessions = [PaymentSession.from_dict(d) for d in docs]
 
             now = datetime.now(timezone.utc)
             for session in active_sessions:
                 if not session.expires_at:
                     await self.start_timeout(session.id)
                     continue
-
-                remaining = (session.expires_at.replace(tzinfo=timezone.utc) - now).total_seconds()
+                expires = session.expires_at
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                remaining = (expires - now).total_seconds()
                 if remaining > 0:
                     await self.start_timeout(session.id, remaining_seconds=int(remaining))
-                    logger.info("Resumed payment session timer", extra={"ctx_payment_id": session.id, "ctx_remaining": remaining})
+                    logger.info(
+                        "Resumed payment session timer",
+                        extra={"ctx_payment_id": session.id, "ctx_remaining": int(remaining)},
+                    )
                 else:
-                    # Session expired while bot was down
                     await self.update_status(session.id, PaymentStatus.EXPIRED)
-                    logger.info("Closed expired session on startup", extra={"ctx_payment_id": session.id})
+                    logger.info(
+                        "Closed expired session on startup",
+                        extra={"ctx_payment_id": session.id},
+                    )
 
         except Exception as e:
-            logger.error("Failed to resume active sessions", extra={"ctx_error": str(e)})
+            logger.error(
+                "Failed to resume active sessions",
+                extra={"ctx_error": str(e)},
+            )

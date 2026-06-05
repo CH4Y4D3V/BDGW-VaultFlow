@@ -10,7 +10,6 @@ from app.distribution.engine import DistributionEngine
 from app.services.channel_service import ChannelService
 from app.bot.client import get_bot, set_bot_id
 from app.workers.subscription_worker import SubscriptionWorker
-from app.workers.membership_worker import MembershipReconciliationWorker
 from app.health import start_health_server
 from app.referral.scheduler import ReferralScheduler
 
@@ -31,8 +30,7 @@ class AppLifecycle:
 
     def __init__(self):
         self._engine: Optional[DistributionEngine] = None
-                self._subscription_worker: Optional[SubscriptionWorker] = None
-        self._membership_worker: Optional[MembershipReconciliationWorker] = None
+        self._subscription_worker: Optional[SubscriptionWorker] = None
         self._cleanup_worker: Optional[Any] = None
         self._referral_scheduler: Optional[ReferralScheduler] = None
         self._bot = get_bot()
@@ -107,7 +105,7 @@ class AppLifecycle:
                 },
             )
 
-            from app.services.topic_service import get_topic_manager
+            from app.services.topic_manager import get_topic_manager
             try:
                 topic_mgr = get_topic_manager()
                 if hasattr(topic_mgr, 'warm_cache_from_db'):
@@ -275,17 +273,6 @@ class AppLifecycle:
         self._running = True
         logger.info("lifecycle_startup_complete")
 
-        # 10. Membership Reconciliation Worker
-        try:
-            self._membership_worker = MembershipReconciliationWorker()
-            await self._membership_worker.start(bot=self._bot)
-            logger.info("lifecycle_membership_worker_started")
-        except Exception as e:
-            logger.error(
-                "lifecycle_membership_worker_failed",
-                extra={"ctx_error": str(e)},
-            )
-
     async def _verify_channel_access(self) -> None:
         logger.info("lifecycle_channel_verification_start")
         channels_to_check = {
@@ -416,12 +403,6 @@ class AppLifecycle:
                 await self._subscription_worker.stop()
             except Exception:
                 logger.error("lifecycle_shutdown_sub_worker_failed", exc_info=True)
-
-        if self._membership_worker:
-            try:
-                await self._membership_worker.stop()
-            except Exception:
-                logger.error("lifecycle_shutdown_membership_worker_failed", exc_info=True)
 
         if self._cleanup_worker:
             try:
