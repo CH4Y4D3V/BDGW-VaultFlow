@@ -101,6 +101,13 @@ class FloodWaitHandler:
             if until > now
         }
 
+    async def wait(self, target_id: str) -> None:
+        """If a target is blocked, wait until it is available."""
+        remaining = self.seconds_until_available(target_id)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+
+
     async def load_from_redis(self) -> None:
         """
         Pre-populate in-memory state from Redis on worker startup.

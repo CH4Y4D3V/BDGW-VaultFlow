@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
     WATERMARK_OPACITY: float = 107
     WATERMARK_SCALE: float = 0.040
-    WATERMARK_ROTATION: int = -27
+        WATERMARK_ROTATION: int = 0
 
     # ── Verification Hub Topics ───────────────────────────────────────────────
     HUB_TOPIC_PAYMENTS: int = 0

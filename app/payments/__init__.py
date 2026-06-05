@@ -5,7 +5,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from app.payments.service import PaymentService
 
-_payment_service: "Optional[PaymentService]" = None
+_payment_service: Optional["PaymentService"] = None
 
 
 def get_payment_service() -> "PaymentService":

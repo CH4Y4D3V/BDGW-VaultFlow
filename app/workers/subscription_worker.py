@@ -172,9 +172,9 @@ class SubscriptionWorker:
         db = DatabaseManager.get_db()
         col = db["subscriptions"]
 
-        # ── 7-day reminder (window: 6.5d → 7.5d) ─────────────────────────────
-        min_7d = now + timedelta(days=6, hours=12)
-        max_7d = now + timedelta(days=7, hours=12)
+        # ── 7-day reminder (window: now -> 7d) ─────────────────────────────
+        min_7d = now
+        max_7d = now + timedelta(days=7)
 
         subs_7d = await col.find({
             "status": "active",

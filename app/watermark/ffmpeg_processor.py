@@ -97,7 +97,7 @@ class FFmpegProcessor:
                     "BOTTOM_RIGHT": (base.width - logo_w - margin, base.height - logo_h - margin),
                     "CENTER": ((base.width - logo_w) // 2, (base.height - logo_h) // 2)
                 }
-                pos = positions[random.choice(list(positions.keys()))]
+                                pos = positions[config.get("position", random.choice(list(positions.keys())))]
                 
                 # ── OPACITY 0.9 ──
                 opacity = 0.9
@@ -144,7 +144,7 @@ class FFmpegProcessor:
         offset_y2 = random.randint(20, 100)
         
         # Corner selection for pos1
-        corner1 = random.choice(["TL", "TR", "BL", "BR", "C"])
+                corner1 = config.get("position", random.choice(["TL", "TR", "BL", "BR", "C"]))
         if corner1 == "TL": pos1 = f"x={offset_x1}:y={offset_y1}"
         elif corner1 == "TR": pos1 = f"x=w-text_w-{offset_x1}:y={offset_y1}"
         elif corner1 == "BL": pos1 = f"x={offset_x1}:y=h-text_h-{offset_y1}"
@@ -224,8 +224,18 @@ class FFmpegProcessor:
 
     async def apply_image_watermark(self, input_path: str, watermark_path: str, position: WatermarkPosition, opacity: float, scale: float) -> str:
         output_path = self._generate_output_path(input_path)
-        return await self._process_photo(input_path, output_path, {"watermark_image_path": watermark_path})
+        return await self._process_photo(input_path, output_path, {
+            "watermark_image_path": watermark_path,
+            "position": position.value,
+            "opacity": opacity,
+            "scale": scale,
+        })
 
     async def apply_video_watermark(self, input_path: str, watermark_path: str, position: WatermarkPosition, opacity: float, scale: float, watermark_text: str = "BDGW") -> str:
         output_path = self._generate_output_path(input_path)
-        return await self._process_video(input_path, output_path, {"watermark_text": watermark_text})
+        return await self._process_video(input_path, output_path, {
+            "watermark_text": watermark_text,
+            "position": position.value,
+            "opacity": opacity,
+            "scale": scale,
+        })

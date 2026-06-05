@@ -41,18 +41,10 @@ class TopicManager:
     - Distributed safety (MongoDB atomic upserts)
     """
 
-    _instance: Optional["TopicManager"] = None
-    _lock = asyncio.Lock()
-
-    @classmethod
-    def get_instance(cls) -> "TopicManager":
-        if cls._instance is None:
-            cls._instance = TopicManager()
-        return cls._instance
-
     def __init__(self) -> None:
         self._local_cache: Dict[str, int] = {}
         self._initialized = False
+        self._lock = asyncio.Lock()
 
     async def restore_cache(self) -> None:
         """Loads all active topic mappings from MongoDB into memory (GAP 8 FIX)."""
@@ -376,6 +368,10 @@ class TopicManager:
 
         raise RuntimeError(f"Failed to create forum topic: {title}")
 
+_topic_manager: Optional[TopicManager] = None
 
 def get_topic_manager() -> TopicManager:
-    return TopicManager.get_instance()
+    global _topic_manager
+    if _topic_manager is None:
+        _topic_manager = TopicManager()
+    return _topic_manager
