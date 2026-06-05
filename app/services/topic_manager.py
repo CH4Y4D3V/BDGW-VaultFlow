@@ -143,6 +143,30 @@ class TopicManager:
             self._local_cache[cache_key] = topic_id
             return topic_id
 
+    async def get_or_create_payments_topic(
+        self,
+        client: Client,
+        payment_id: str = "",
+        user_id: int = 0,
+    ) -> int:
+        """
+        Delegates to PaymentTopicManager to handle payment-specific topics.
+        """
+        from app.payments.topics import PaymentTopicManager
+        from app.payments.repository import PaymentRepository
+        
+        db = DatabaseManager.get_db()
+        repo = PaymentRepository(db)
+        pm_manager = PaymentTopicManager(repo)
+        
+        # If payment_id is empty, this might be a generic "Payments" hub topic
+        # But based on PaymentTopicManager, it expects a payment_id.
+        if not payment_id:
+            # Fallback to shared topic for general payments if no specific session
+            return await self.get_or_create_shared_topic(client, "payments_hub", "💎 Payments Hub")
+            
+        return await pm_manager.get_or_create_payments_topic(client, payment_id, user_id)
+
     async def get_or_create_shared_topic(
         self,
         client: Client,

@@ -199,39 +199,38 @@ class PaymentRepository:
         ]
 
         try:
+            # Check for mismatches before attempting creation to be proactive
+            existing = await collection.list_indexes().to_list(length=100)
+            for spec in specs:
+                name = spec.get("name")
+                if not name:
+                    continue
+                found = next((idx for idx in existing if idx["name"] == name), None)
+                if found:
+                    # Check if options match (simplified check for unique/sparse)
+                    if (spec.get("unique", False) != found.get("unique", False) or
+                        spec.get("sparse", False) != found.get("sparse", False)):
+                        logger.warning(
+                            f"Index options mismatch for {label}:{name}. Dropping for recreation.",
+                        )
+                        await collection.drop_index(name)
+
             await collection.create_indexes(index_models)
         except OperationFailure as e:
             if e.code == 85:  # IndexOptionsConflict
                 logger.warning(
-                    f"Index conflict on {label} — dropping stale indexes and retrying",
+                    f"Index conflict on {label} — dropping all non-id indexes and retrying",
                     extra={"ctx_error": str(e)},
                 )
                 try:
+                    await collection.drop_indexes()
                     # Rebuild index models (originals were consumed above)
                     index_models_retry = [
                         IndexModel(s["keys"], **{k: v for k, v in s.items() if k != "keys"})
                         for s in specs
                     ]
-                    desired_names = {m.document.get("name") for m in index_models_retry}
-
-                    existing = await collection.list_indexes().to_list(length=100)
-                    for idx in existing:
-                        if idx["name"] == "_id_":
-                            continue
-                        if idx["name"] not in desired_names:
-                            try:
-                                await collection.drop_index(idx["name"])
-                                logger.info(
-                                    f"Dropped stale index '{idx['name']}' from {label}",
-                                )
-                            except Exception as drop_err:
-                                logger.warning(
-                                    f"Could not drop index '{idx['name']}' from {label}",
-                                    extra={"ctx_error": str(drop_err)},
-                                )
-
                     await collection.create_indexes(index_models_retry)
-                    logger.info(f"{label} indexes reconciled after conflict resolution")
+                    logger.info(f"{label} indexes reconciled after full drop")
                 except Exception as retry_err:
                     logger.error(
                         f"Failed to reconcile indexes for {label}",

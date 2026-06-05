@@ -3,7 +3,7 @@ from typing import Optional
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import IndexModel, ASCENDING, DESCENDING
 from app.config import settings
-from app.core.logger import get_logger
+from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -16,66 +16,53 @@ class DataMigrationManager:
 
     @classmethod
     async def stabilize_queue(cls, db: AsyncIOMotorDatabase) -> None:
-        """
-        Audit and stabilize the queue collection to prevent index creation failures.
-        """
-        logger.info("migration_queue_stabilization_start")
-        
+        logger.info("MIGRATION: Starting queue stabilization audit...")
+
         queue = db[settings.QUEUE_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
-        
-        # 1. Detect and Quarantine NULL Vault References in Active Jobs
-        # These are the primary cause of E11000 duplicate key errors on unique indexes.
+
         active_statuses = ["pending", "processing", "locked", "watermarking", "ready", "delivering"]
-        
+
         invalid_ref_query = {
             "status": {"$in": active_statuses},
             "$or": [
                 {"vault_chat_id": None},
                 {"vault_message_id": None},
                 {"vault_chat_id": 0},
-                {"vault_message_id": 0}
-            ]
+                {"vault_message_id": 0},
+            ],
         }
-        
+
         invalid_count = await queue.count_documents(invalid_ref_query)
         if invalid_count > 0:
             logger.warning(
-                "migration_invalid_vault_refs_detected",
-                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_count": invalid_count}
+                "MIGRATION: Detected active jobs with null/invalid vault references. Quarantining...",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_count": invalid_count},
             )
-            
-            # Move to quarantine before deletion to preserve history
             cursor = queue.find(invalid_ref_query)
             async for doc in cursor:
                 doc["quarantine_reason"] = "migration_null_vault_reference"
                 doc["quarantined_at"] = datetime.now(timezone.utc)
                 doc["original_collection"] = settings.QUEUE_COLLECTION
                 await quarantine.insert_one(doc)
-            
-            # Purge from active queue so index creation can proceed
             result = await queue.delete_many(invalid_ref_query)
             logger.info(
-                "migration_invalid_jobs_removed",
-                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_deleted": result.deleted_count}
+                "MIGRATION: Removed invalid jobs from active queue.",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_deleted": result.deleted_count},
             )
 
-        # 2. Resolve Content ID Duplicates in Active Queue
-        # Enforces uniqueness for content_id across all active states.
         pipeline = [
             {"$match": {"status": {"$in": active_statuses}}},
             {"$group": {"_id": "$content_id", "count": {"$sum": 1}, "ids": {"$push": "$_id"}}},
-            {"$match": {"count": {"$gt": 1}}}
+            {"$match": {"count": {"$gt": 1}}},
         ]
-        
         content_dups = await queue.aggregate(pipeline).to_list(length=None)
         if content_dups:
             logger.warning(
-                "migration_duplicate_content_groups_detected",
-                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_dups": len(content_dups)}
+                "MIGRATION: Detected duplicate active content groups. Resolving...",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_dups": len(content_dups)},
             )
             for dup in content_dups:
-                # Keep the first one, quarantine others
                 ids_to_quarantine = dup["ids"][1:]
                 for doc_id in ids_to_quarantine:
                     doc = await queue.find_one({"_id": doc_id})
@@ -86,76 +73,45 @@ class DataMigrationManager:
                         await quarantine.insert_one(doc)
                         await queue.delete_one({"_id": doc_id})
             logger.info(
-                "migration_content_id_conflicts_resolved",
-                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_resolved": len(content_dups)}
+                "MIGRATION: Resolved content_id conflicts.",
+                extra={"ctx_collection": settings.QUEUE_COLLECTION, "ctx_resolved": len(content_dups)},
             )
 
-        logger.info("migration_queue_stabilization_complete")
+        logger.info("MIGRATION: Queue stabilization complete.")
 
     @classmethod
     async def stabilize_vault(cls, db: AsyncIOMotorDatabase) -> None:
-        """
-        Audit and stabilize the vault collection before index creation.
-        """
-        logger.info("migration_vault_stabilization_start")
-        
+        logger.info("MIGRATION: Starting vault stabilization audit...")
+
         vault = db[settings.VAULT_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
-        
-        # Detect and Quarantine NULL Vault References in Vault items
-        # E11000 duplicate key error { vault_chat_id: null, vault_message_id: null }
+
         invalid_vault_query = {
             "$or": [
                 {"vault_chat_id": None},
-                {"vault_message_id": None}
+                {"vault_message_id": None},
             ]
         }
-        
+
         invalid_count = await vault.count_documents(invalid_vault_query)
         if invalid_count > 0:
             logger.warning(
-                "migration_null_vault_refs_detected",
-                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_count": invalid_count}
+                "MIGRATION: Detected vault items with null references. Quarantining...",
+                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_count": invalid_count},
             )
-            
             cursor = vault.find(invalid_vault_query)
             async for doc in cursor:
                 doc["quarantine_reason"] = "migration_null_vault_reference"
                 doc["quarantined_at"] = datetime.now(timezone.utc)
                 doc["original_collection"] = settings.VAULT_COLLECTION
                 await quarantine.insert_one(doc)
-            
             result = await vault.delete_many(invalid_vault_query)
             logger.info(
-                "migration_invalid_vault_items_removed",
-                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_deleted": result.deleted_count}
+                "MIGRATION: Removed invalid vault items.",
+                extra={"ctx_collection": settings.VAULT_COLLECTION, "ctx_deleted": result.deleted_count},
             )
 
-        logger.info("migration_vault_stabilization_complete")
-
-    @classmethod
-    async def stabilize_support_messages(cls, db: AsyncIOMotorDatabase) -> None:
-        """
-        Drop support_hub_msg_unique if it exists without partialFilterExpression.
-        This is a one-time migration to replace the sparse-only index definition
-        with the partialFilterExpression-gated definition that correctly excludes
-        hub_message_id=null documents from the unique constraint.
-        """
-        collection = db["support_messages"]
-        try:
-            existing = await collection.list_indexes().to_list(length=100)
-            for idx in existing:
-                if idx.get("name") == "support_hub_msg_unique":
-                    # If partialFilterExpression is absent, the old index is in place
-                    if "partialFilterExpression" not in idx:
-                        await collection.drop_index("support_hub_msg_unique")
-                        logger.info("migration_support_hub_msg_index_dropped")
-                    break
-        except Exception as e:
-            logger.warning(
-                "migration_support_hub_msg_index_check_failed",
-                extra={"ctx_error": str(e)}
-            )
+        logger.info("MIGRATION: Vault stabilization complete.")
 
 
 class DatabaseManager:
@@ -169,7 +125,7 @@ class DatabaseManager:
         if cls._initialized:
             return
 
-        logger.info("mongodb_connection_start")
+        logger.info("Starting MongoDB connection process...")
         try:
             client = AsyncIOMotorClient(
                 settings.MONGO_URI,
@@ -181,89 +137,66 @@ class DatabaseManager:
             cls._client = client
             cls._db = client[settings.MONGO_DB_NAME]
 
-            # ── Connection Test (FATAL if fails) ───────────────────────────
-            logger.debug("mongodb_ping_admin")
+            logger.debug("Pinging MongoDB admin database...")
             await client.admin.command("ping")
-            logger.info("mongodb_connection_established", extra={"ctx_db": settings.MONGO_DB_NAME})
+            logger.info("MongoDB socket connection established", extra={"ctx_db": settings.MONGO_DB_NAME})
 
-            # ── Capabilities Audit ──────────────────────────────────────────
             try:
-                # Check for replica set status (needed for transactions)
                 status = await client.admin.command("replSetGetStatus")
-                logger.info("mongodb_replica_set_detected", extra={"ctx_set_name": status.get("set")})
+                logger.info("MongoDB replica set detected", extra={"ctx_set_name": status.get("set")})
                 cls._transactions_supported = True
             except Exception:
-                logger.warning("mongodb_replica_set_missing")
+                logger.warning("MongoDB replica set NOT detected — transactions disabled")
                 cls._transactions_supported = False
 
         except Exception as e:
-            logger.exception("mongodb_connection_failed")
+            logger.exception("FATAL: MongoDB connection or authentication failed")
             raise e
 
-        # ── MIGRATION STABILIZATION (Non-FATAL) ──────────────────────────
-        # CRITICAL: Audit and clean legacy data BEFORE creating strict indexes.
         try:
             await DataMigrationManager.stabilize_queue(cls._db)
             await DataMigrationManager.stabilize_vault(cls._db)
-            await DataMigrationManager.stabilize_support_messages(cls._db)
         except Exception as e:
             logger.error(
-                "migration_stabilization_audit_failed",
-                extra={"ctx_error": str(e)}
+                "MIGRATION: Data stabilization audit failed — attempting to proceed",
+                extra={"ctx_error": str(e)},
             )
 
-        # Schema Verification
-        logger.debug("mongodb_index_verification_start")
+        logger.debug("Initiating index verification/creation phase...")
         try:
             await cls._ensure_indexes()
-            logger.info("mongodb_indexes_verified")
+            logger.info("All MongoDB indexes verified/created")
         except Exception as e:
             logger.error(
-                "mongodb_index_verification_failed",
-                extra={"ctx_error": str(e)}
+                "DEGRADED: Index verification failed. Application will boot with missing/stale indexes.",
+                extra={"ctx_error": str(e)},
             )
 
-        # Non-Core System Indexes
         try:
             from app.referral.repository import ReferralRepository
             ref_repo = ReferralRepository(cls._db)
             try:
                 await ref_repo.create_indexes()
             except Exception as e:
-                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
                     "non_core_index_setup_failed",
-                    extra={
-                        "ctx_collection": "referral",
-                        "ctx_index_name": index_name,
-                        "ctx_mongo_error": str(e)
-                    },
-                    exc_info=True
+                    extra={"ctx_collection": "referral", "ctx_error": str(e)},
+                    exc_info=True,
                 )
 
             from app.payments.repository import PaymentRepository
             payment_repo = PaymentRepository(cls._db)
             try:
                 await payment_repo.create_indexes()
-                logger.info("mongodb_initialization_complete")
             except Exception as e:
-                index_name = getattr(e, "details", {}).get("index", "unknown") if hasattr(e, "details") and isinstance(e.details, dict) else "unknown"
                 logger.error(
                     "non_core_index_setup_failed",
-                    extra={
-                        "ctx_collection": "payments",
-                        "ctx_index_name": index_name,
-                        "ctx_mongo_error": str(e)
-                    },
-                    exc_info=True
+                    extra={"ctx_collection": "payments", "ctx_error": str(e)},
+                    exc_info=True,
                 )
-            
+            logger.info("MongoDB initialization complete (Connection + Indices)")
         except Exception as e:
-            logger.error(
-                "non_core_final_init_failed",
-                extra={"ctx_error": repr(e)},
-                exc_info=True
-            )
+            logger.exception("non_core_index_setup_failed", extra={"ctx_error": str(e)})
 
         cls._initialized = True
 
@@ -279,7 +212,7 @@ class DatabaseManager:
             cls._client = None
             cls._db = None
             cls._initialized = False
-            logger.info("mongodb_connection_closed")
+            logger.info("MongoDB connection closed")
 
     @classmethod
     def get_db(cls) -> AsyncIOMotorDatabase:
@@ -293,74 +226,90 @@ class DatabaseManager:
         db = cls.get_db()
 
         async def _safe_create(collection_name: str, indexes: list[IndexModel]) -> None:
-            logger.debug("mongodb_index_verification_collection", extra={"ctx_collection": collection_name})
-            
-            # ── RC-11: Surgical Index Reconciliation ──────────────────────
-            # Specifically for unique indexes which often change definitions
+            logger.debug(f"Verifying indexes for collection: {collection_name}")
+
+            # Surgical index reconciliation for indexes that often change definitions.
             target_indexes = ["unique_active_content", "vault_ref_unique", "vault_message_unique", "support_hub_msg_unique"]
-            
+
             try:
                 existing_indexes = await db[collection_name].list_indexes().to_list(length=100)
                 for target_name in target_indexes:
-                    found_index = next((idx for idx in existing_indexes if idx["name"] == target_name), None)
+                    found_index = next(
+                        (idx for idx in existing_indexes if idx["name"] == target_name), None
+                    )
                     if found_index:
-                        expected = next((idx for idx in indexes if idx.document["name"] == target_name), None)
+                        expected = next(
+                            (idx for idx in indexes if idx.document["name"] == target_name), None
+                        )
                         if expected:
                             expected_doc = expected.document
-                            
-                            # Compare critical options: unique, sparse, partialFilterExpression
                             mismatch = False
-                            if found_index.get("unique") != expected_doc.get("unique"): mismatch = True
-                            if found_index.get("sparse") != expected_doc.get("sparse"): mismatch = True
-                            if found_index.get("partialFilterExpression") != expected_doc.get("partialFilterExpression"): mismatch = True
-                            
+                            if found_index.get("unique") != expected_doc.get("unique"):
+                                mismatch = True
+                            # Treat sparse vs partialFilterExpression as a mismatch
+                            # so the old sparse index is replaced with partialFilterExpression.
+                            if bool(found_index.get("sparse")) != bool(expected_doc.get("sparse")):
+                                mismatch = True
+                            if found_index.get("partialFilterExpression") != expected_doc.get(
+                                "partialFilterExpression"
+                            ):
+                                mismatch = True
+
                             if mismatch:
                                 logger.warning(
-                                    "mongodb_index_definition_mismatch",
+                                    f"Index definition mismatch for {target_name}. Surgically recreating...",
                                     extra={
                                         "ctx_collection": collection_name,
                                         "ctx_index": target_name,
-                                        "ctx_actual": found_index,
-                                        "ctx_expected": expected_doc
-                                    }
+                                    },
                                 )
-                                await db[collection_name].drop_index(target_name)
+                                try:
+                                    await db[collection_name].drop_index(target_name)
+                                except Exception as drop_err:
+                                    logger.warning(
+                                        f"Could not drop mismatched index {target_name} (non-fatal)",
+                                        extra={"ctx_error": str(drop_err)},
+                                    )
             except Exception as e:
                 logger.warning(
-                    "mongodb_index_audit_failed",
-                    extra={"ctx_collection": collection_name, "ctx_error": str(e)}
+                    f"Surgical index audit failed for {collection_name} (non-fatal)",
+                    extra={"ctx_error": str(e)},
                 )
 
             try:
                 await db[collection_name].create_indexes(indexes)
-                logger.debug("mongodb_index_verified_collection", extra={"ctx_collection": collection_name})
+                logger.debug(f"Successfully verified indexes for {collection_name}")
             except Exception as e:
-                # RC-10 FIX: Catch other index specification mismatches.
                 error_str = str(e)
-                if "already exists with different options" in error_str or "IndexOptionsConflict" in error_str:
+                if (
+                    "already exists with different options" in error_str
+                    or "IndexOptionsConflict" in error_str
+                ):
                     logger.warning(
-                        "mongodb_index_conflict_detected",
-                        extra={"ctx_collection": collection_name, "ctx_error": error_str}
+                        f"Index conflict detected in {collection_name}. Attempting full collection recovery...",
+                        extra={"ctx_collection": collection_name, "ctx_error": error_str},
                     )
                     try:
                         await db[collection_name].drop_indexes()
                         await db[collection_name].create_indexes(indexes)
-                        logger.info("mongodb_index_recovered_collection", extra={"ctx_collection": collection_name})
+                        logger.info(
+                            f"Successfully recovered and recreated indexes for {collection_name}"
+                        )
                         return
                     except Exception as secondary_e:
                         logger.error(
-                            "mongodb_index_recovery_failed",
-                            extra={"ctx_collection": collection_name, "ctx_error": str(secondary_e)}
+                            f"Index recovery failed for {collection_name}",
+                            extra={"ctx_collection": collection_name, "ctx_error": str(secondary_e)},
                         )
                         raise secondary_e
-                
+
                 logger.error(
-                    "mongodb_index_creation_failed",
-                    extra={"ctx_collection": collection_name, "ctx_error": str(e)}
+                    f"Index creation failed for collection: {collection_name}",
+                    extra={"ctx_collection": collection_name, "ctx_error": str(e)},
                 )
                 raise e
 
-        # ── Queue ────────────────────────────────────────────────────────
+        # ── Queue ─────────────────────────────────────────────────────────────
         await _safe_create(settings.QUEUE_COLLECTION, [
             IndexModel(
                 [("content_id", ASCENDING)],
@@ -385,7 +334,7 @@ class DatabaseManager:
                 partialFilterExpression={
                     "status": {"$in": ["pending", "processing", "locked", "watermarking", "ready", "delivering"]},
                     "vault_chat_id": {"$gt": 0},
-                    "vault_message_id": {"$gt": 0}
+                    "vault_message_id": {"$gt": 0},
                 },
             ),
             IndexModel(
@@ -444,7 +393,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Vault ────────────────────────────────────────────────────────
+        # ── Vault ─────────────────────────────────────────────────────────────
         await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel([("content_id", ASCENDING)], name="vault_content_unique", unique=True),
             IndexModel(
@@ -471,7 +420,6 @@ class DatabaseManager:
                 background=True,
                 sparse=True,
             ),
-            # M3 checksum/cooldown/submitter indexes
             IndexModel(
                 [("checksum", ASCENDING)],
                 name="vault_checksum_unique",
@@ -492,7 +440,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Pending submissions ──────────────────────────────────────────
+        # ── Pending submissions ────────────────────────────────────────────────
         await _safe_create(settings.PENDING_COLLECTION, [
             IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
             IndexModel(
@@ -507,7 +455,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Subscriptions ──────────────────────────────────────────────
+        # ── Subscriptions ──────────────────────────────────────────────────────
         await _safe_create("subscriptions", [
             IndexModel([("user_id", ASCENDING)], name="sub_user_unique", unique=True),
             IndexModel(
@@ -532,7 +480,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Memberships ────────────────────────────────────────────────
+        # ── Memberships ────────────────────────────────────────────────────────
         await _safe_create("memberships", [
             IndexModel(
                 [("user_id", ASCENDING), ("chat_id", ASCENDING)],
@@ -556,7 +504,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Invites ────────────────────────────────────────────────────
+        # ── Invites ────────────────────────────────────────────────────────────
         await _safe_create("invites", [
             IndexModel([("token", ASCENDING)], name="invite_token_unique", unique=True),
             IndexModel(
@@ -582,7 +530,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Activity ───────────────────────────────────────────────────
+        # ── Activity ───────────────────────────────────────────────────────────
         await _safe_create("activity", [
             IndexModel(
                 [("user_id", ASCENDING), ("timestamp", DESCENDING)],
@@ -608,12 +556,12 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Bot config ─────────────────────────────────────────────────
+        # ── Bot config ─────────────────────────────────────────────────────────
         await _safe_create("bot_config", [
             IndexModel([("key", ASCENDING)], name="config_key_unique", unique=True),
         ])
 
-        # ── User topics ────────────────────────────────────────────────
+        # ── User topics ────────────────────────────────────────────────────────
         await _safe_create("user_topics", [
             IndexModel(
                 [("user_id", ASCENDING), ("topic_type", ASCENDING)],
@@ -628,7 +576,13 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Support messages ───────────────────────────────────────────
+        # ── Support messages ───────────────────────────────────────────────────
+        # FIX: support_hub_msg_unique previously used sparse=True.
+        # MongoDB does not allow mixing sparse and partialFilterExpression.
+        # Using partialFilterExpression exclusively is correct — it filters
+        # out documents where hub_message_id is absent or null so nulls never
+        # participate in the uniqueness check, which is the same semantic as
+        # sparse but without the conflict.
         await _safe_create("support_messages", [
             IndexModel(
                 [("topic_id", ASCENDING)],
@@ -645,22 +599,19 @@ class DatabaseManager:
                 name="support_user_direction",
                 background=True,
             ),
-            # FIX: sparse=True alone does not exclude documents where hub_message_id
-            # is present but null — MongoDB only skips documents where the field is
-            # entirely absent. Multiple user_to_admin messages with hub_message_id=None
-            # all collide on the unique constraint.
-            # partialFilterExpression restricts the unique index to documents where
-            # hub_message_id is both present AND not null, which is the correct intent.
             IndexModel(
                 [("hub_message_id", ASCENDING), ("direction", ASCENDING)],
                 name="support_hub_msg_unique",
                 unique=True,
-                sparse=True,
-                partialFilterExpression={"hub_message_id": {"$exists": True, "$ne": None}},
+                # partialFilterExpression replaces sparse=True.
+                # Only documents where hub_message_id is a positive integer
+                # (i.e. an actual Telegram message ID) participate in the
+                # unique constraint. Null / missing values are excluded.
+                partialFilterExpression={"hub_message_id": {"$exists": True, "$gt": 0}},
             ),
         ])
 
-        # ── Moderation audit ───────────────────────────────────────────
+        # ── Moderation audit ───────────────────────────────────────────────────
         await _safe_create("moderation_audit", [
             IndexModel(
                 [("performed_by", ASCENDING), ("timestamp", DESCENDING)],
@@ -681,7 +632,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Consent records ────────────────────────────────────────────
+        # ── Consent records ────────────────────────────────────────────────────
         await _safe_create("consent_records", [
             IndexModel(
                 [("user_id", ASCENDING), ("record_type", ASCENDING), ("is_active", ASCENDING)],
@@ -690,7 +641,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── Creator profiles ───────────────────────────────────────────
+        # ── Creator profiles ───────────────────────────────────────────────────
         await _safe_create("creator_profiles", [
             IndexModel(
                 [("user_id", ASCENDING)],
@@ -704,7 +655,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: submissions ───────────────────────────────────────────
+        # ── Submissions ────────────────────────────────────────────────────────
         await _safe_create("submissions", [
             IndexModel(
                 [("status", ASCENDING), ("created_at", ASCENDING)],
@@ -714,7 +665,7 @@ class DatabaseManager:
             IndexModel([("user_id", ASCENDING)], name="submissions_user", background=True),
         ])
 
-        # ── M3: takedown_requests ─────────────────────────────────────
+        # ── Takedown requests ──────────────────────────────────────────────────
         await _safe_create("takedown_requests", [
             IndexModel(
                 [("content_id", ASCENDING), ("status", ASCENDING)],
@@ -730,7 +681,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: floodwait_tracking ────────────────────────────────────
+        # ── FloodWait tracking ────────────────────────────────────────────────
         await _safe_create("floodwait_tracking", [
             IndexModel(
                 [("target_id", ASCENDING), ("recorded_at", DESCENDING)],
@@ -745,7 +696,7 @@ class DatabaseManager:
             ),
         ])
 
-        # ── M3: distribution_jobs ─────────────────────────────────────
+        # ── Distribution jobs ─────────────────────────────────────────────────
         await _safe_create("distribution_jobs", [
             IndexModel([("content_id", ASCENDING)], name="distjob_content", background=True),
             IndexModel(
@@ -755,7 +706,7 @@ class DatabaseManager:
             ),
         ])
 
-        logger.info("mongodb_indexes_verified")
+        logger.info("All MongoDB indexes verified/created")
 
 
 async def get_database() -> AsyncIOMotorDatabase:

@@ -11,15 +11,23 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def calculate_image_hash(data: bytes) -> Optional[str]:
+def calculate_image_hash(data: bytes | BytesIO) -> Optional[str]:
     """
-    Calculates a perceptual hash (dhash) for an image.
-    High performance, resistant to resizing and minor edits.
+    Calculates a perceptual hash (phash) for an image.
+    Handles both raw bytes and BytesIO buffers (from Pyrogram in_memory=True).
     """
     try:
-        with Image.open(BytesIO(data)) as img:
-            # dhash is generally good for near-duplicate detection
-            h = imagehash.dhash(img)
+        # ── FIX: Handle BytesIO or bytes gracefully ──
+        if isinstance(data, bytes):
+            buffer = BytesIO(data)
+        else:
+            buffer = data
+            if hasattr(buffer, "seek"):
+                buffer.seek(0)
+
+        with Image.open(buffer) as img:
+            # ── FIX: Using phash as requested for better accuracy ──
+            h = imagehash.phash(img)
             return str(h)
     except Exception as e:
         logger.warning("image_hashing_failed", extra={"ctx_error": str(e)})
