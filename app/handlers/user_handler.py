@@ -427,9 +427,9 @@ async def _handle_referral_at_start(
         # The unique index on referred_user_id prevents double-credit even
         # if this code path is entered twice (idempotent).
         try:
-            await ref_repo.save_pending_referral(
-                referrer_user_id=referred_by,
-                referred_user_id=user_id,
+            await ref_repo.create_pending(
+                referrer_id=referred_by,
+                referred_id=user_id,
             )
         except Exception as save_err:
             # Likely a DuplicateKeyError — referral already recorded.
@@ -897,7 +897,7 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
             try:
                 from app.services.trust_service import TrustService
-                trust_service = TrustService(DatabaseManager.get_db())
+                trust_service = TrustService()
                 trust_metrics = await trust_service.get_user_metrics(user_id)
             except Exception:
                 trust_metrics = {"level": "🆕 NEW MEMBER", "fraud_score": 0.0}

@@ -1061,13 +1061,13 @@ class _redis_lock:
                 )
         except Exception as exc:
             logger.error(
-                "Redis lock acquisition error — proceeding without lock (risky)",
+                "Redis lock acquisition error — ABORTING critical section",
                 extra={"ctx_lock_key": self._key, "ctx_error": str(exc)},
                 exc_info=exc,
             )
-            # Fail open: if Redis is unavailable we still process the record
-            # to avoid silent data loss. Operators must fix Redis ASAP.
-            self._acquired = True
+            # Fail closed: if Redis is unavailable, we cannot guarantee safety,
+            # so the operation must be aborted.
+            self._acquired = False
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:

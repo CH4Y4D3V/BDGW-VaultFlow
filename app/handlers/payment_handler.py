@@ -964,10 +964,9 @@ async def _process_send_details_message(
         },
     )
 
-    # Per audit C-08, allow topic_router to process this message.
-    # The topic_router is expected to handle message de-duplication
-    # as this handler has already forwarded the message to the user.
-    raise ContinuePropagation
+    # Stop propagation — topic_router must NOT re-deliver this to the user,
+    # as this handler has already forwarded the message.
+    raise StopPropagation
 
 
 async def _process_custom_rejection_message(
