@@ -100,8 +100,8 @@ class FFmpegProcessor:
                 }
                 pos = positions[config.get("position", random.choice(list(positions.keys())))]
                 
-                # ── OPACITY 0.9 ──
-                opacity = 0.9
+                # ── OPACITY from config or settings ──
+                opacity = config.get("opacity", settings.WATERMARK_OPACITY)
                 # Apply opacity to logo
                 logo_with_opacity = logo.copy()
                 alpha = logo_with_opacity.getchannel('A')
@@ -124,9 +124,8 @@ class FFmpegProcessor:
         text1 = config.get("watermark_text", "BDGW")
         text2 = "VaultFlow" # Secondary text
 
-        # Randomize opacity (0.43 - 0.51)
-        opacity1 = round(random.uniform(0.43, 0.51), 2)
-        opacity2 = round(random.uniform(0.43, 0.51), 2)
+        opacity1 = config.get("opacity", settings.WATERMARK_OPACITY)
+        opacity2 = config.get("opacity", settings.WATERMARK_OPACITY)
 
         # Randomize start times (0 to 5 seconds)
         start1 = round(random.uniform(0, 5), 1)

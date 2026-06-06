@@ -55,6 +55,7 @@ from typing import Any, Optional
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.config import settings
 from app.core.database import DatabaseManager
 from app.core.redis_client import get_redis
 
@@ -295,7 +296,7 @@ class VaultPoolService:
             )
 
         try:
-            count = await self._db["queue_jobs"].count_documents(
+            count = await self._db[settings.QUEUE_COLLECTION].count_documents(
                 {"vault_type": vault_type, "status": "PENDING"},
                 limit=1,
             )
@@ -375,7 +376,7 @@ class VaultPoolService:
         ]
 
         try:
-            result = await self._db["vault_items"].aggregate(pipeline).to_list(
+            result = await self._db[settings.VAULT_COLLECTION].aggregate(pipeline).to_list(
                 length=1
             )
         except Exception as exc:
@@ -465,7 +466,7 @@ class VaultPoolService:
         }
 
         try:
-            cursor = self._db["vault_items"].find(
+            cursor = self._db[settings.VAULT_COLLECTION].find(
                 eligible_query,
                 projection={
                     "_id": 1,
@@ -559,7 +560,7 @@ class VaultPoolService:
         }
 
         try:
-            result = await self._db["queue_jobs"].insert_one(job_doc)
+            result = await self._db[settings.QUEUE_COLLECTION].insert_one(job_doc)
             job_id: ObjectId = result.inserted_id
         except Exception as exc:
             logger.exception(
@@ -592,7 +593,7 @@ class VaultPoolService:
         # This is acceptable — it will eventually self-correct.
         # -------------------------------------------------------------------
         try:
-            update_result = await self._db["vault_items"].update_one(
+            update_result = await self._db[settings.VAULT_COLLECTION].update_one(
                 {"_id": vault_id},
                 {
                     "$set": {"last_posted_at": now},

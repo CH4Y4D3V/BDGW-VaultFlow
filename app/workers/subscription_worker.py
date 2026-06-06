@@ -314,7 +314,7 @@ class SubscriptionWorker:
 
         # ── 7-day reminder ──────────────────────────────────────────────────
         subs_7d = await col.find({
-            "status": "ACTIVE",
+            "status": {"$in": ["ACTIVE", "active"]},
             "expires_at": {"$gte": now, "$lte": now + timedelta(days=7)},
             "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
             "reminder_7d_sent": {"$ne": True},
@@ -326,11 +326,12 @@ class SubscriptionWorker:
             expires_at: Optional[datetime] = sub_doc.get("expires_at")
             days_left = int((expires_at - now).total_seconds() // 86400) if expires_at else 7
             lock_key = f"reminder_7d:{user_id}"
-            async with _redis_lock(lock_key, ttl=60):
+            async with _redis_lock(lock_key, ttl=60) as lock_acquired:
+                if not lock_acquired:
+                    continue
                 # Re-check inside lock to prevent races
                 still_pending = await col.find_one({
-                    "user_id": user_id,
-                    "status": "ACTIVE",
+                    "_id": sub_doc["_id"],
                     "reminder_7d_sent": {"$ne": True},
                 })
                 if not still_pending:
@@ -346,7 +347,7 @@ class SubscriptionWorker:
                         "Renew early to keep your access. Contact an admin to resubscribe.",
                     )
                     await col.update_one(
-                        {"user_id": user_id, "status": "active"},
+                        {"_id": sub_doc["_id"]},
                         {"$set": {"reminder_7d_sent": True}},
                     )
                     logger.info(
@@ -363,7 +364,7 @@ class SubscriptionWorker:
 
         # ── 3-day reminder ──────────────────────────────────────────────────
         subs_3d = await col.find({
-            "status": "ACTIVE",
+            "status": {"$in": ["ACTIVE", "active"]},
             "expires_at": {
                 "$gte": now + timedelta(days=2, hours=12),
                 "$lte": now + timedelta(days=3, hours=12),
@@ -378,10 +379,11 @@ class SubscriptionWorker:
             expires_at = sub_doc.get("expires_at")
             days_left = int((expires_at - now).total_seconds() // 86400) if expires_at else 3
             lock_key = f"reminder_3d:{user_id}"
-            async with _redis_lock(lock_key, ttl=60):
+            async with _redis_lock(lock_key, ttl=60) as lock_acquired:
+                if not lock_acquired:
+                    continue
                 still_pending = await col.find_one({
-                    "user_id": user_id,
-                    "status": "active",
+                    "_id": sub_doc["_id"],
                     "reminder_3d_sent": {"$ne": True},
                 })
                 if not still_pending:
@@ -398,7 +400,7 @@ class SubscriptionWorker:
                         "Contact an admin to resubscribe.",
                     )
                     await col.update_one(
-                        {"user_id": user_id, "status": "ACTIVE"},
+                        {"_id": sub_doc["_id"]},
                         {"$set": {"reminder_3d_sent": True}},
                     )
                     logger.info(
@@ -412,11 +414,65 @@ class SubscriptionWorker:
                         extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
                         exc_info=exc,
                     )
+        
+        # ── 3-day reminder (second notice) ──────────────────────────────────────
+        subs_3d_2 = await col.find({
+            "status": {"$in": ["ACTIVE", "active"]},
+            "expires_at": {
+                "$gte": now + timedelta(days=1, hours=12),
+                "$lte": now + timedelta(days=2, hours=12),
+            },
+            "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
+            "reminder_3d_sent": True, # Must have received the first one
+            "reminder_3d_second_sent": {"$ne": True},
+        }).to_list(length=None)
 
-        if reminded_7d or reminded_3d:
+        reminded_3d_2 = 0
+        for sub_doc in subs_3d_2:
+            user_id = sub_doc["user_id"]
+            expires_at = sub_doc.get("expires_at")
+            days_left = int((expires_at - now).total_seconds() // 86400) if expires_at else 2
+            lock_key = f"reminder_3d_2:{user_id}"
+            async with _redis_lock(lock_key, ttl=60) as lock_acquired:
+                if not lock_acquired:
+                    continue
+                still_pending = await col.find_one({
+                    "_id": sub_doc["_id"],
+                    "reminder_3d_second_sent": {"$ne": True},
+                })
+                if not still_pending:
+                    continue
+                try:
+                    await self._notify(
+                        user_id,
+                        f"‼️ <b>FINAL REMINDER: Subscription expires in {days_left} day(s)</b>\n\n"
+                        f"Your premium access will be removed on "
+                        f"<b>"
+                        f"{expires_at.strftime('%Y-%m-%d') if expires_at else 'very soon'}"
+                        f"</b>.\n\n"
+                        "This is your last chance to renew without interruption. "
+                        "Contact an admin immediately.",
+                    )
+                    await col.update_one(
+                        {"_id": sub_doc["_id"]},
+                        {"$set": {"reminder_3d_second_sent": True}},
+                    )
+                    logger.info(
+                        "Second 3-day expiry reminder sent",
+                        extra={"ctx_user_id": user_id, "ctx_days_left": days_left},
+                    )
+                    reminded_3d_2 += 1
+                except Exception as exc:
+                    logger.error(
+                        "Failed to send second 3-day reminder",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
+                        exc_info=exc,
+                    )
+
+        if reminded_7d or reminded_3d or reminded_3d_2:
             logger.info(
                 "Expiry reminders sent",
-                extra={"ctx_7d": reminded_7d, "ctx_3d": reminded_3d},
+                extra={"ctx_7d": reminded_7d, "ctx_3d": reminded_3d, "ctx_3d_2": reminded_3d_2},
             )
 
     # ── Membership reconciliation loop (Section 26) ───────────────────────────
@@ -812,7 +868,7 @@ async def _get_all_premium_chat_ids() -> list[int]:
     hub_col = db["hub_config"]
 
     chat_ids: list[int] = []
-    for key in ("nsfw_group_id", "premium_group_id"):
+    for key in ("nsfw_group_id", "premium_group_id", "premium_vault_channel_id"):
         try:
             doc = await hub_col.find_one({"key": key})
             if doc and doc.get("value"):

@@ -72,6 +72,7 @@ from pyrogram.types import (
 
 from app.core.database import DatabaseManager
 from app.distribution.lock_service import DistributedLockService
+from app.distribution.rate_limiter import TokenBucket
 from app.repositories.admin_repository import AdminRepository
 from app.services.audit_service import AuditService
 
@@ -719,12 +720,18 @@ async def _run_broadcast_loop(
 
     sent = 0
     failed = 0
+    
+    # Use a token bucket for rate limiting to avoid flood waits
+    # Rate of 20 messages per second, with a capacity of 20.
+    bucket = TokenBucket(rate=20, capacity=20)
 
     # ── Main broadcast loop ──────────────────────────────────────────────────
     for idx, user_id in enumerate(all_user_ids):
         # Skip the broadcasting admin — they already see the content
         if user_id == admin_user_id:
             continue
+
+        await bucket.wait_and_consume()
 
         try:
             if is_album:
@@ -760,9 +767,6 @@ async def _run_broadcast_loop(
                 user_id, session_id, exc,
             )
             failed += 1
-
-        # Throttle to avoid flood
-        await asyncio.sleep(INTER_SEND_DELAY)
 
         # Periodic progress update
         if (idx + 1) % PROGRESS_UPDATE_INTERVAL == 0:

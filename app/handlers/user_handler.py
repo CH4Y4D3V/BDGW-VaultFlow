@@ -575,153 +575,81 @@ async def handle_start(client: Client, message: Message) -> None:
         from app.repositories.user_repository import UserRepository
         user_repo = UserRepository()
 
-        # ── Look up existing user ──────────────────────────────────────────
-        try:
-            user_doc = await user_repo.get_user(user_id)
-        except Exception as repo_err:
-            logger.error(
-                "start_repo_find_failed",
-                extra={"ctx_user_id": user_id, "ctx_error": str(repo_err)},
-            )
-            user_doc = None
+        user_doc = await user_repo.get_user(user_id)
 
-        # ── Parse referral payload ─────────────────────────────────────────
-        referred_by: Optional[int] = None
-        if len(message.command) > 1:
-            payload = message.command[1]
-            if payload.startswith("ref_"):
-                try:
-                    referred_by = int(payload.split("_")[1])
-                    if referred_by == user_id:
-                        referred_by = None  # Self-referral not allowed.
-                except (IndexError, ValueError):
-                    pass
-
-        # ── Text & keyboard ────────────────────────────────────────────────
-        main_menu_keyboard = _build_main_menu_keyboard()
-        onboarding_text = _build_onboarding_text()
-        main_menu_text = (
-            f"👋 <b>Welcome to BD Gone Wild, {first_name}!</b>\n\n"
-            "Use the menu below to navigate."
-        )
-
-        # ════════════════════════════════════════════════════════════════════
-        #  NEW USER
-        # ════════════════════════════════════════════════════════════════════
         if user_doc is None:
             logger.info("new_user_detected", extra={"ctx_user_id": user_id})
 
-            # ── DB write FIRST (restart-safe per spec Section 25) ──────────
-            # onboarded=True is written before any Telegram send so that a
-            # bot restart after DB write but before Telegram delivery does
-            # not show onboarding twice.
-            now = datetime.now(timezone.utc)
+            # ── Parse referral payload ─────────────────────────────────────────
+            referred_by: Optional[int] = None
+            if len(message.command) > 1:
+                payload = message.command[1]
+                if payload.startswith("ref_"):
+                    try:
+                        referred_by = int(payload.split("_")[1])
+                        if referred_by == user_id:
+                            referred_by = None  # Self-referral not allowed.
+                    except (IndexError, ValueError):
+                        pass
             
+            # ── DB write FIRST (restart-safe per spec Section 25) ──────────
             try:
-                new_user = await user_repo.upsert_user(
+                await user_repo.upsert_user(
                     user_id=user_id,
                     full_name=f"{first_name} {message.from_user.last_name or ''}".strip(),
                     username=message.from_user.username,
                     referred_by=referred_by,
                 )
-                # Mark as onboarded in the same flow
                 await user_repo.set_onboarded(user_id, True)
+
+                # ── Free subscription grant ────────────────────────────────────
+                try:
+                    sub_service = _get_sub_service()
+                    from app.models.subscription import Plan
+                    await sub_service.grant(
+                        user_id=user_id,
+                        plan=Plan.FREE,
+                        duration_days=None,
+                        granted_by=0,  # System
+                        notes="Auto-registered on /start"
+                    )
+                except Exception as sub_err:
+                    logger.warning(
+                        "new_user_sub_grant_failed",
+                        extra={"ctx_user_id": user_id, "ctx_error": str(sub_err)},
+                    )
+
+                # ── Referral processing (non-fatal; deferred per spec §16) ─────
+                if referred_by:
+                    asyncio.create_task(
+                        _handle_referral_at_start(client, user_id, referred_by)
+                    )
             except Exception as insert_err:
-                # DuplicateKey means race condition — another /start fired
-                # concurrently.  Load the existing doc and treat as returning.
-                logger.warning(
+                 logger.warning(
                     "new_user_insert_failed",
                     extra={
                         "ctx_user_id": user_id,
                         "ctx_error": str(insert_err),
                     },
                 )
-                try:
-                    user_doc = await user_repo.get_user(user_id)
-                except Exception:
-                    pass
-                if user_doc is not None:
-                    # Treat as returning user.
-                    await _reply_floodwait(
-                        message, main_menu_text,
-                        reply_markup=main_menu_keyboard,
-                    )
-                    return
 
-            # ── Free subscription grant ────────────────────────────────────
-            try:
-                sub_service = _get_sub_service()
-                from app.models.subscription import Plan
-                # Note: sub_service.grant(user_id, plan, duration, granted_by, notes)
-                await sub_service.grant(
-                    user_id=user_id,
-                    plan=Plan.FREE,
-                    duration_days=None,
-                    granted_by=0,  # System
-                    notes="Auto-registered on /start"
-                )
-            except Exception as sub_err:
-                logger.warning(
-                    "new_user_sub_grant_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(sub_err)},
-                )
-
-            # ── Telegram sends (after DB write) ───────────────────────────
-            await _reply_floodwait(message, onboarding_text)
-            await _reply_floodwait(
-                message, main_menu_text, reply_markup=main_menu_keyboard
-            )
-
-            # ── Referral processing (non-fatal; deferred per spec §16) ─────
-            # Fire-and-forget: channel membership check may involve a network
-            # call; we do not block the user's /start response on it.
-            if referred_by:
-                asyncio.create_task(
-                    _handle_referral_at_start(client, user_id, referred_by)
-                )
-
-        # ════════════════════════════════════════════════════════════════════
-        #  EDGE CASE: record exists but onboarding not completed
-        # ════════════════════════════════════════════════════════════════════
         elif not user_doc.get("onboarded", False):
             logger.info(
                 "resumed_onboarding",
                 extra={"ctx_user_id": user_id},
             )
-            # Mark onboarded BEFORE sending (restart-safe).
-            try:
-                await user_repo.update_one(
-                    {"user_id": user_id},
-                    {"$set": {
-                        "onboarded": True,
-                        "updated_at": datetime.now(timezone.utc),
-                    }},
-                )
-            except Exception as update_err:
-                logger.warning(
-                    "set_onboarded_failed",
-                    extra={
-                        "ctx_user_id": user_id,
-                        "ctx_error": str(update_err),
-                    },
-                )
-
-            await _reply_floodwait(message, onboarding_text)
-            await _reply_floodwait(
-                message, main_menu_text, reply_markup=main_menu_keyboard
-            )
-
-        # ════════════════════════════════════════════════════════════════════
-        #  RETURNING USER
-        # ════════════════════════════════════════════════════════════════════
-        else:
+            await user_repo.set_onboarded(user_id, True)
+        
+        else: # RETURNING USER
             logger.info(
                 "returning_user_menu",
                 extra={"ctx_user_id": user_id},
             )
-            await _reply_floodwait(
-                message, main_menu_text, reply_markup=main_menu_keyboard
-            )
+
+        # Common send logic for all cases
+        onboarding_service = _get_onboarding_service()
+        text, keyboard = await onboarding_service.render_start(user_id, first_name)
+        await _reply_floodwait(message, text, reply_markup=keyboard)
 
     except Exception as e:
         logger.exception(

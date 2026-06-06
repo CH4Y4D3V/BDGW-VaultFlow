@@ -27,7 +27,7 @@ WATERMARK_OPACITY note (spec §13):
 import json
 from typing import List
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -187,8 +187,8 @@ class Settings(BaseSettings):
     INVITE_EXPIRY_MINUTES: int = 30
 
     # ── Daily distribution caps ───────────────────────────────────────────────
-    DAILY_CAP_NSFW: int = 75
-    DAILY_CAP_PREMIUM: int = 140
+    DAILY_CAP_NSFW: int = Field(default=75, validation_alias=AliasChoices('DAILY_CAP_NSFW', 'NSFW_DAILY_COUNT'))
+    DAILY_CAP_PREMIUM: int = Field(default=140, validation_alias=AliasChoices('DAILY_CAP_PREMIUM', 'PREMIUM_DAILY_COUNT'))
 
     # ── Daily submission caps ─────────────────────────────────────────────────
     PREMIUM_DAILY_SUBMISSION_LIMIT: int = 20
