@@ -139,7 +139,7 @@ class TopicManager:
         lock_key = "topic_create:admin_logs"
         async with _redis_lock(lock_key, ttl=60):
             # Re-check inside lock — another instance may have just created it
-            existing_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOP_ID)
+            existing_topic_id = await _get_hub_config_int(_KEY_ADMIN_LOGS_TOPIC_ID)
             if existing_topic_id:
                 logger.info(
                     "Admin Logs topic was created by a concurrent startup — using it",

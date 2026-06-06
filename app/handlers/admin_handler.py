@@ -10,8 +10,7 @@ from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.core.permissions import require_role
-from app.models.subscription import Plan
+from app.core.permissions import Role, permission_required
 from app.services.support_service import send_admin_log_entry
 from app.utils.logger import get_logger
 
@@ -20,21 +19,14 @@ logger = get_logger(__name__)
 # ── Handlers (Section 9.5) ────────────────────────────────────────────────
 
 @Client.on_message(filters.command("accept") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_accept_command(client: Client, message: Message) -> None:
     """Handles the /accept command: Alias for clicking the Accept button."""
     # This usually requires tracking which session is in which thread
     await message.reply_text("ℹ️ Please use the <b>✅ Accept Support</b> button on the request card.", parse_mode=ParseMode.HTML)
 
-@Client.on_message(filters.command("close") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
-async def handle_close_redirect(client: Client, message: Message) -> None:
-    """Redirects to support_handler.handle_close_command."""
-    from app.handlers.support_handler import handle_close_command
-    await handle_close_command(client, message)
-
 @Client.on_message(filters.command("ban") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_ban(client: Client, message: Message) -> None:
     """Handles the /ban <user_id> <reason> command."""
     if len(message.command) < 3:
@@ -75,7 +67,7 @@ async def handle_ban(client: Client, message: Message) -> None:
     )
 
 @Client.on_message(filters.command("unban") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_unban(client: Client, message: Message) -> None:
     """Handles the /unban <user_id> command."""
     if len(message.command) < 2:
@@ -108,7 +100,7 @@ async def handle_unban(client: Client, message: Message) -> None:
     )
 
 @Client.on_message(filters.command("mute") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_mute(client: Client, message: Message) -> None:
     """Handles the /mute <user_id> <minutes> <reason> command."""
     if len(message.command) < 4:
@@ -134,14 +126,14 @@ async def handle_mute(client: Client, message: Message) -> None:
     # Audit...
 
 @Client.on_message(filters.command("paymentdone") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_paymentdone(client: Client, message: Message) -> None:
     """Handles the /paymentdone command: Alias for Approve."""
     # Logic to find the active payment session in this thread
     await message.reply_text("ℹ️ Please use the <b>✅ Approve Payment</b> button on the session card.", parse_mode=ParseMode.HTML)
 
 @Client.on_message(filters.command("profile") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_profile(client: Client, message: Message) -> None:
     """Shows user profile and stats."""
     if len(message.command) < 2:
@@ -151,7 +143,7 @@ async def handle_profile(client: Client, message: Message) -> None:
     await message.reply_text("Profile card coming soon.")
 
 @Client.on_message(filters.command("grant") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@require_role(Plan.ADMIN)
+@permission_required(Role.ADMIN)
 async def handle_grant(client: Client, message: Message) -> None:
     """Handles manual subscription grant."""
     if len(message.command) < 3:

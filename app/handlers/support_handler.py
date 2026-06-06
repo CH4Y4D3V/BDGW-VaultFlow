@@ -15,6 +15,7 @@ from pyrogram.types import (
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.core.permissions import Role, permission_required
 from app.services.support_service import get_support_service, build_accept_markup
 from app.services.topic_manager import get_topic_manager
 from app.utils.logger import get_logger
@@ -165,6 +166,7 @@ async def handle_accept_callback(client: Client, callback_query: CallbackQuery) 
     )
 
 @Client.on_message(filters.command("close") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
+@permission_required(Role.ADMIN)
 async def handle_close_command(client: Client, message: Message) -> None:
     """
     Admin-side: Close a support session.

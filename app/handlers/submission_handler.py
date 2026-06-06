@@ -123,8 +123,27 @@ async def _register_submission(client: Client, messages: List[Message]):
     asyncio.create_task(_delete_after(ack, 10))
 
     # Route to Verification Hub (Section 10.3)
-    from app.moderation.verification_hub import post_moderation_card
-    await post_moderation_card(client, user_id, messages)
+    from app.services.topic_manager import get_topic_manager
+    from app.moderation.verification_hub import post_user_info_card, forward_to_verification
+    
+    topic_mgr = get_topic_manager()
+    topic_id = await topic_mgr.get_or_create_user_topic(client, user_id)
+    
+    # 1. Post user info card (Section 10.3)
+    await post_user_info_card(
+        client=client,
+        user=lead_msg.from_user,
+        chat_id=settings.VERIFICATION_GROUP_ID,
+        topic_id=topic_id,
+    )
+    
+    # 2. Forward content with moderation buttons (Section 10.3)
+    await forward_to_verification(
+        client=client,
+        messages=messages,
+        submitter_user_id=user_id,
+        topic_id=topic_id,
+    )
 
 async def _delete_after(msg, delay):
     await asyncio.sleep(delay)

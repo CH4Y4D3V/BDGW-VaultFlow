@@ -476,11 +476,6 @@ class DatabaseManager:
         # ══════════════════════════════════════════════════════════════════
         await _safe_create("users", [
             IndexModel(
-                [("_id", ASCENDING)],
-                name="users_user_id_unique",
-                unique=True,
-            ),
-            IndexModel(
                 [("referral_code", ASCENDING)],
                 name="users_referral_code_unique",
                 unique=True,
@@ -511,7 +506,7 @@ class DatabaseManager:
         # ══════════════════════════════════════════════════════════════════
         await _safe_create("user_topics", [
             IndexModel(
-                [("_id", ASCENDING)],
+                [("user_id", ASCENDING)],
                 name="user_topics_user_id_unique",
                 unique=True,
             ),
@@ -524,14 +519,13 @@ class DatabaseManager:
 
         # ══════════════════════════════════════════════════════════════════
         # Section 25A.3 — subscriptions
-        # NOTE: user_id is NOT unique — a user may have a history of multiple
-        # subscription records (activated, expired, renewed).  The spec
-        # lists user_id as a regular index, not a unique one.
+        # NOTE: user_id is unique per spec Section 7.2.
         # ══════════════════════════════════════════════════════════════════
         await _safe_create("subscriptions", [
             IndexModel(
                 [("user_id", ASCENDING)],
-                name="sub_user_id",
+                name="sub_user_id_unique",
+                unique=True,
                 background=True,
             ),
             IndexModel(
