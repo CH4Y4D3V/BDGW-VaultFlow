@@ -255,13 +255,16 @@ class PaymentService:
         await self.repository.log_event(payment_id, f"status_changed_{status.value}", kwargs)
         return True
 
-    async def start_timeout(self, payment_id: str, remaining_seconds: Optional[int] = None) -> bool:
+    async def start_timeout(self, payment_id: str, confirmed_delivery: bool = False, remaining_seconds: Optional[int] = None) -> bool:
         """
         Start or resume the payment session timeout.
-        If remaining_seconds is provided, the timer starts from that remaining window.
-        Otherwise the full SESSION_TIMEOUT_MINUTES window is used.
-        Returns False if the session does not exist.
+        If confirmed_delivery is True (Section 7.3), the timer starts.
+        If remaining_seconds is provided, the timer starts from that window.
+        Returns False if session does not exist or delivery not confirmed.
         """
+        if not confirmed_delivery and remaining_seconds is None:
+            return False
+
         session = await self.repository.get_session(payment_id)
         if not session:
             return False
@@ -286,161 +289,137 @@ class PaymentService:
     async def approve_payment(self, client: Client, payment_id: str, admin_id: int) -> bool:
         """
         Atomic subscription activation flow (Spec Section 7.5).
-
-        Steps:
-          1. Acquire distributed processing lock (prevents concurrent approval).
-          2. Reload and validate session state.
-          3. Activate subscription via SubscriptionService.
-          4. Generate one-time premium invite link.
-          5. Persist payment history record.
-          6. Notify user via DM (FloodWait-safe).
-          7. Mark session APPROVED and clear timeout.
-          8. Route notification to user's Verification Hub topic.
-          9. Emit to Admin Logs topic.
-         10. Release lock in finally block.
-
-        Returns True on success, False if lock not acquired, session invalid, or
-        an unrecoverable error occurs (session rolled back to UNDER_REVIEW).
-
-        BUG FIX: session.currency replaced with getattr(session, 'currency', 'BDT')
-        to prevent AttributeError — PaymentSession has no currency field.
-        BUG FIX: Added FloodWait handling on user DM send.
-        BUG FIX: Lock is now released in a finally block.
+        F-08: Entire flow wrapped in a DistributedLockService Redis lock.
         """
-        lock_acquired = await self.repository.acquire_processing_lock(payment_id)
-        if not lock_acquired:
-            return False
+        from app.distribution.lock_service import DistributedLockService
+        lock_service = DistributedLockService()
+        lock_key = f"payment_approve:{payment_id}"
 
-        try:
-            session = await self.repository.get_session(payment_id)
-            if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):
-                return False
+        async with lock_service.acquire(lock_key, timeout=20):
+            try:
+                session = await self.repository.get_session(payment_id)
+                if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):
+                    return False
 
-            plan = PLANS[session.plan_id]
-            currency = getattr(session, "currency", "BDT")  # FIX: was session.currency → AttributeError
+                plan = PLANS[session.plan_id]
+                currency = getattr(session, "currency", "BDT")
 
-            # Activate subscription
-            subscription = await SubscriptionService().grant(
-                user_id=session.user_id,
-                plan=Plan.PREMIUM,
-                duration_days=plan["days"],
-                granted_by=admin_id,
-                notes=f"Payment approved: {payment_id}",
-            )
+                # Activate subscription
+                subscription = await SubscriptionService().grant(
+                    user_id=session.user_id,
+                    plan=Plan.PREMIUM,
+                    duration_days=plan["days"],
+                    granted_by=admin_id,
+                    notes=f"Payment approved: {payment_id}",
+                )
 
-            # Generate unique one-time invite link
-            from app.services.invite_service import InviteService
-            invite_service = InviteService()
+                # Generate unique one-time invite link
+                from app.services.invite_service import InviteService
+                invite_service = InviteService()
 
-            invite_link = None
-            premium_chat_id = getattr(settings, "PREMIUM_CHANNEL_ID", None) or getattr(
-                settings, "PREMIUM_GROUP_ID", None
-            )
+                invite_link = None
+                premium_chat_id = getattr(settings, "PREMIUM_CHANNEL_ID", None) or getattr(
+                    settings, "PREMIUM_GROUP_ID", None
+                )
 
-            if premium_chat_id:
+                if premium_chat_id:
+                    try:
+                        invite_obj = await invite_service.generate_premium_invite(
+                            client=client,
+                            user_id=session.user_id,
+                            chat_id=int(premium_chat_id),
+                            granted_by=admin_id,
+                            plan=session.plan_id
+                        )
+                        invite_link = invite_obj.telegram_link
+                    except Exception as e:
+                        logger.warning(
+                            "failed_to_generate_invite_during_activation",
+                            extra={"ctx_error": str(e)},
+                        )
+
+                # Persist payment history
+                await self.repository.record_subscription_history(
+                    payment_id,
+                    {
+                        "user_id": session.user_id,
+                        "plan_id": session.plan_id,
+                        "locked_amount": session.locked_amount,
+                        "subscription_expires_at": subscription.expires_at,
+                        "approved_by": admin_id,
+                        "invite_link": invite_link
+                    },
+                )
+
+                # Notify user via DM (FloodWait-safe)
+                message = "✅ <b>Payment Approved!</b>\n\nYour premium access has been activated."
+                if invite_link:
+                    message += (
+                        f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n"
+                        "<i>This link expires in 30 minutes and can only be used once.</i>"
+                    )
+
+                await _send_safe(client, session.user_id, message)
+
+                # Mark session APPROVED and clear timeout
+                session.status = PaymentStatus.APPROVED
+                session.approved_at = datetime.now(timezone.utc)
+                session.approved_by = admin_id
+                await self.repository.save_session(session)
+                await self.repository.clear_timeout(payment_id)
+                await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
+
+                # Route to user's Verification Hub topic
                 try:
-                    invite_obj = await invite_service.generate_premium_invite(
-                        client=client,
-                        user_id=session.user_id,
-                        chat_id=int(premium_chat_id),
-                        granted_by=admin_id,
-                        plan=session.plan_id
+                    from app.services.topic_manager import get_topic_manager
+                    topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
+                    await client.send_message(
+                        chat_id=settings.VERIFICATION_GROUP_ID,
+                        text=(
+                            f"✅ <b>PAYMENT APPROVED</b>\n\n"
+                            f"<b>Amount:</b> {session.locked_amount} {currency}\n"
+                            f"<b>Plan:</b> {plan['label']}\n"
+                            f"<b>Admin:</b> {admin_id}"
+                        ),
+                        message_thread_id=topic_id,
+                        parse_mode=ParseMode.HTML,
                     )
-                    invite_link = invite_obj.telegram_link
-                except Exception as e:
+                except Exception as exc:
                     logger.warning(
-                        "failed_to_generate_invite_during_activation",
-                        extra={"ctx_error": str(e)},
+                        "approve_payment_topic_routing_failed",
+                        extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
                     )
 
-            # Persist payment history
-            await self.repository.record_subscription_history(
-                payment_id,
-                {
-                    "user_id": session.user_id,
-                    "plan_id": session.plan_id,
-                    "locked_amount": session.locked_amount,
-                    "subscription_expires_at": subscription.expires_at,
-                    "approved_by": admin_id,
-                    "invite_link": invite_link
-                },
-            )
+                # Emit to Admin Logs topic
+                try:
+                    from app.services.admin_logger import get_admin_logger
+                    await get_admin_logger().log(
+                        client=client,
+                        action="PAYMENT APPROVED",
+                        admin_id=admin_id,
+                        admin_name=f"Admin {admin_id}",
+                        target_user_id=session.user_id,
+                        details=f"Plan: {plan['label']}\nAmount: {session.locked_amount} {currency}"
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "approve_payment_admin_log_failed",
+                        extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                    )
 
-            # Notify user via DM (FloodWait-safe)
-            message = "✅ <b>Payment Approved!</b>\n\nYour premium access has been activated."
-            if invite_link:
-                message += (
-                    f"\n\n🔗 <b>Your unique invite link:</b>\n{invite_link}\n\n"
-                    "<i>This link expires in 30 minutes and can only be used once.</i>"
+                return True
+
+            except Exception as e:
+                logger.exception(
+                    "Atomic approval failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
                 )
-
-            await _send_safe(client, session.user_id, message)
-
-            # Mark session APPROVED and clear timeout
-            session.status = PaymentStatus.APPROVED
-            session.approved_at = datetime.now(timezone.utc)
-            session.approved_by = admin_id
-            await self.repository.save_session(session)
-            await self.repository.clear_timeout(payment_id)
-            await self.repository.log_event(payment_id, "payment_approved", {"admin_id": admin_id})
-
-            # Route to user's Verification Hub topic
-            try:
-                from app.services.topic_manager import get_topic_manager
-                topic_id = await get_topic_manager().get_or_create_user_topic(client, session.user_id)
-                await client.send_message(
-                    chat_id=settings.VERIFICATION_GROUP_ID,
-                    text=(
-                        f"✅ <b>PAYMENT APPROVED</b>\n\n"
-                        f"<b>Amount:</b> {session.locked_amount} {currency}\n"
-                        f"<b>Plan:</b> {plan['label']}\n"
-                        f"<b>Admin:</b> {admin_id}"
-                    ),
-                    message_thread_id=topic_id,
-                    parse_mode=ParseMode.HTML,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "approve_payment_topic_routing_failed",
-                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
-                )
-
-            # Emit to Admin Logs topic
-            try:
-                from app.services.admin_logger import get_admin_logger
-                await get_admin_logger().log(
-                    client=client,
-                    action="PAYMENT APPROVED",
-                    admin_id=admin_id,
-                    admin_name=f"Admin {admin_id}",
-                    target_user_id=session.user_id,
-                    details=f"Plan: {plan['label']}\nAmount: {session.locked_amount} {currency}"
-                )
-            except Exception as exc:
-                logger.warning(
-                    "approve_payment_admin_log_failed",
-                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
-                )
-
-            return True
-
-        except Exception as e:
-            logger.exception(
-                "Atomic approval failed",
-                extra={"ctx_payment_id": payment_id, "ctx_error": str(e)},
-            )
-            await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
-            return False
-
-        finally:
-            # FIX: Always release the processing lock, whether approval succeeded or failed.
-            try:
-                await self.repository.release_processing_lock(payment_id)
-            except Exception as exc:
-                logger.warning(
-                    "approve_payment_lock_release_failed",
-                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
-                )
+                # Fail-safe: revert status if not already terminal
+                try:
+                    await self.update_status(payment_id, PaymentStatus.UNDER_REVIEW)
+                except Exception:
+                    pass
+                return False
 
     async def reject_payment(self, client: Client, payment_id: str, reason: str, admin_id: int) -> bool:
         """

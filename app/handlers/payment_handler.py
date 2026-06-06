@@ -468,6 +468,8 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
         return
 
     plan = PLANS[plan_id]
+    # B-10 FIX: NEVER auto-send payment numbers. Bot only confirms request.
+    # Manual admin action via request card is REQUIRED for detail delivery.
     await callback.message.edit_text(
         f"<b>Plan:</b> {plan['label']}\n"
         f"<b>Amount:</b> ৳{session.locked_amount:.2f}\n"
@@ -942,7 +944,8 @@ async def _process_send_details_message(
         PaymentStatus.WAITING_TXID,
         payment_method=session.payment_method,
     )
-    started = await service.start_timeout(session_id)
+    # B-18 FIX: Start timer ONLY after confirmed delivery
+    started = await service.start_timeout(session_id, confirmed_delivery=True)
     await _fsm_clear(admin_id)
 
     # Step 5: confirm to admin
