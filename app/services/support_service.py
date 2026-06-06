@@ -350,6 +350,17 @@ class SupportService:
         """
         user_id = message.from_user.id
         try:
+            # A-16 FIX: Enforce support session state machine
+            db = DatabaseManager.get_db()
+            session_doc = await db["support_sessions"].find_one({"user_id": user_id}, sort=[("created_at", -1)])
+
+            if session_doc and session_doc.get("status") == "CLOSED":
+                await message.reply_text(
+                    "Your previous support session is closed. "
+                    "To open a new one, please use the /help command again."
+                )
+                return True
+
             topic_id = await self.topic_manager.get_or_create_user_topic(
                 client, user_id
             )

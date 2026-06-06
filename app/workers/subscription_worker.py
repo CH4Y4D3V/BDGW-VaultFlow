@@ -255,7 +255,7 @@ class SubscriptionWorker:
                 except Exception as exc:
                     logger.error(
                         "Failed to process grace-expired subscription",
-                        extra={"ctx_user_id": sub.user_id, "ctx_error": str(exc)},
+                        extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
                         exc_info=exc,
                     )
 

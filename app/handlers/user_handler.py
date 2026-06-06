@@ -427,6 +427,7 @@ async def _handle_referral_at_start(
         # The unique index on referred_user_id prevents double-credit even
         # if this code path is entered twice (idempotent).
         try:
+            # A-10 FIX: correct method is create_pending with referrer_id and referred_id
             await ref_repo.create_pending(
                 referrer_id=referred_by,
                 referred_id=user_id,
@@ -896,6 +897,7 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 }
 
             try:
+                # A-11 FIX: TrustService does not accept any arguments
                 from app.services.trust_service import TrustService
                 trust_service = TrustService()
                 trust_metrics = await trust_service.get_user_metrics(user_id)
@@ -1070,8 +1072,9 @@ async def handle_mystatus(client: Client, message: Message) -> None:
             }
 
         try:
+            # A-11 FIX: TrustService does not accept any arguments
             from app.services.trust_service import TrustService
-            trust_service = TrustService(DatabaseManager.get_db())
+            trust_service = TrustService()
             trust_metrics = await trust_service.get_user_metrics(user_id)
         except Exception:
             trust_metrics = {"level": "🆕 NEW MEMBER", "fraud_score": 0.0}
