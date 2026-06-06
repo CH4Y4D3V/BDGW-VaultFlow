@@ -476,7 +476,7 @@ class VaultPoolService:
                     "vault_channel_id": 1,
                     "telegram_message_id": 1,
                     "media_hash": 1,
-                    "file_ids": 1,
+                    "file_id": 1,
                     "last_posted_at": 1,
                     "post_count": 1,
                     "submission_id": 1,
