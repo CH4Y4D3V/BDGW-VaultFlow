@@ -142,8 +142,9 @@ class SupportMonitor:
 
         Per Section 25A.8, the collection is support_sessions and the
         once-per-session guard field is notified_unattended (bool).
-        Per Section 25A.8, the session start timestamp field is opened_at.
         Per Section 25A.8, all statuses are uppercase strings.
+
+        FIX (B-05): Use 'created_at' instead of 'opened_at' to match SupportService.
 
         For each matching session:
           1. Mark notified_unattended = True in MongoDB FIRST (restart-safe).
@@ -160,7 +161,7 @@ class SupportMonitor:
             # correct field names, correct status casing.
             cursor = db["support_sessions"].find({
                 "status": "PENDING",                         # uppercase per spec
-                "opened_at": {"$lte": threshold},            # opened_at not created_at
+                "created_at": {"$lte": threshold},           # created_at (B-05 FIX)
                 "notified_unattended": {"$ne": True},        # notified_unattended not inactivity_warned
             })
         except Exception as exc:

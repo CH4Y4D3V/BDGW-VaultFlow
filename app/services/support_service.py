@@ -331,6 +331,38 @@ class SupportService:
         )
 
     # ------------------------------------------------------------------
+    # Session lifecycle
+    # ------------------------------------------------------------------
+
+    async def create_session(self, client: Client, user_id: int) -> str:
+        """
+        Initialize a new PENDING support session for a user.
+
+        Args:
+            client:  Active Pyrogram client.
+            user_id: Telegram user ID of the requester.
+
+        Returns:
+            The string ObjectId of the newly created session.
+        """
+        topic_id = await self.topic_manager.get_or_create_user_topic(client, user_id)
+        db = DatabaseManager.get_db()
+        
+        result = await db["support_sessions"].insert_one({
+            "user_id": user_id,
+            "topic_id": topic_id,
+            "status": "PENDING",
+            "created_at": datetime.now(timezone.utc),
+            "notified_unattended": False,
+        })
+        session_id = str(result.inserted_id)
+        logger.info(
+            "support_session_created",
+            extra={"ctx_user_id": user_id, "ctx_session_id": session_id},
+        )
+        return session_id
+
+    # ------------------------------------------------------------------
     # Message bridge — Section 15.4
     # ------------------------------------------------------------------
 

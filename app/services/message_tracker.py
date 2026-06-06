@@ -123,7 +123,7 @@ async def delete_user_messages(
     log.info(
         "[MSG TRACKER] user=%d context=%s: deleted %d/%d messages",
         user_id, context or "all", deleted_count, len(messages),
-        extra={"user_id": user_id, "context": context or "all"}
+        extra={"ctx_user_id": user_id, "ctx_context": context or "all"}
     )
     return deleted_count
 

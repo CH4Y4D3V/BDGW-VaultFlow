@@ -17,7 +17,7 @@ from app.core.database import DatabaseManager
 
 log = logging.getLogger("message_cleanup")
 
-_CHECK_INTERVAL = int(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", "900"))
+_CHECK_INTERVAL = int(os.getenv("MESSAGE_CLEANUP_INTERVAL_SECONDS", "300"))
 
 _raw_minutes = os.getenv("MESSAGE_CLEANUP_MINUTES", "").strip()
 _raw_hours = os.getenv("MESSAGE_CLEANUP_HOURS", "").strip()

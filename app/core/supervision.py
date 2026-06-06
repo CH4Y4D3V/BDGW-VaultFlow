@@ -77,12 +77,10 @@ class SystemSupervisor:
         logger.info(
             "System Heartbeat",
             extra={
-                "ctx_metrics": {
-                    "uptime_seconds": round(uptime_sec, 2),
-                    "event_loop_lag_ms": round(lag_ms, 2),
-                    "async_task_count": task_count,
-                    "memory_usage_kb": round(memory_kb, 2),
-                    "tasks_by_name": task_names,
-                }
+                "ctx_uptime_seconds": round(uptime_sec, 2),
+                "ctx_event_loop_lag_ms": round(lag_ms, 2),
+                "ctx_async_task_count": task_count,
+                "ctx_memory_usage_kb": round(memory_kb, 2),
+                "ctx_tasks_by_name": task_names,
             }
         )

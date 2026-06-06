@@ -133,9 +133,29 @@ class InviteRepository(BaseRepository):
 
         return revoked_links
 
+    async def reactivate_invite_by_link(self, chat_id: int, telegram_link: str) -> bool:
+        """
+        D-10 FIX: Roll back a REVOKED mark in the DB if the Telegram revocation
+        call failed. Re-marks the invite as ACTIVE.
+        """
+        count = await self.update_one(
+            {
+                "chat_id": chat_id,
+                "telegram_link": telegram_link,
+                "status": InviteStatus.REVOKED.value,
+            },
+            {
+                "$set": {
+                    "status": InviteStatus.ACTIVE.value,
+                    "revoked_at": None,
+                }
+            },
+        )
+        return count > 0
+
     async def get_active_invite_for_user_chat(
         self, user_id: int, chat_id: int
-    ) -> Optional[Invite]:
+    ) -> Optional[Invite] :
         """
         B-02 Step 1 helper: find an ACTIVE invite intended for this specific
         user in this specific chat.

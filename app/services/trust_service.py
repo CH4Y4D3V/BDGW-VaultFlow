@@ -27,7 +27,7 @@ class TrustService:
         score = 0.0
         
         # 1. Approved content (+10 per item)
-        approved_count = await self._activity.count_user_actions(user_id, ActivityAction.UPLOAD) # Simplified
+        approved_count = await self._activity.count_user_actions(user_id, ActivityAction.APPROVE)
         score += approved_count * 10
         
         # 2. Account age (+5 per month)

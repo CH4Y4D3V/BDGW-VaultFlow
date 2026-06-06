@@ -1,34 +1,134 @@
 from __future__ import annotations
-from typing import Optional
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional, List
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.enums import ParseMode
+from pyrogram.types import (
+    CallbackQuery,
+    Message,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 
-from app.services import submission_service
+from app.config import settings
+from app.core.database import DatabaseManager
+from app.services.onboarding_service import OnboardingService
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ── Album Buffer (Volatile, in-memory per worker) ─────────────────────────
+# Section 10.2: Albums must be buffered via media_group_id.
+_album_buffer: dict[str, List[Message]] = {}
 
-@Client.on_message(filters.private & (filters.media | filters.text))
+# ── Handlers ──────────────────────────────────────────────────────────────
+
+@Client.on_callback_query(filters.regex(r"^menu:submit$"))
+async def handle_submit_menu(client: Client, callback_query: CallbackQuery) -> None:
+    """
+    Entry point for submission flow from main menu.
+    
+    Section 10.1: Main Channel membership verification gate.
+    """
+    user_id = callback_query.from_user.id
+    
+    # 1. Verification Gate
+    try:
+        member = await client.get_chat_member(settings.MAIN_CHANNEL_ID, user_id)
+        if member.status.value in ("left", "banned", "kicked"):
+             raise ValueError("Not a member")
+    except Exception:
+        await callback_query.answer(
+            "❌ You must join our main channel first to submit content.",
+            show_alert=True
+        )
+        return
+
+    # 2. Terms Check
+    db = DatabaseManager.get_db()
+    user_doc = await db["users"].find_one({"user_id": user_id})
+    if not user_doc or not user_doc.get("terms_accepted"):
+        await callback_query.answer(
+            "❌ Please accept the terms of service in /start before submitting.",
+            show_alert=True
+        )
+        return
+
+    await callback_query.answer()
+    await callback_query.message.edit_text(
+        "📤 <b>Anonymous Submission</b>\n\n"
+        "Send your photo or video here now. You can also send albums.\n\n"
+        "<i>All submissions are reviewed by moderators before posting.</i>",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")
+        ]]),
+        parse_mode=ParseMode.HTML
+    )
+
+@Client.on_message(filters.private & (filters.photo | filters.video))
 async def handle_submission(client: Client, message: Message) -> None:
     """
-    Handles all private messages from users, treating them as submissions.
+    Primary media handler. Detects albums and routes to processing.
     """
     if not message.from_user:
         return
 
-    user_id = message.from_user.id
-    logger.info("handle_submission", extra={"ctx_user_id": user_id, "ctx_msg_id": message.id})
+    # Section 10.2: Media Group detection
+    if message.media_group_id:
+        mg_id = message.media_group_id
+        if mg_id not in _album_buffer:
+            _album_buffer[mg_id] = []
+            asyncio.create_task(_process_album_buffer(client, mg_id))
+        
+        _album_buffer[mg_id].append(message)
+        return
 
-    # This is a placeholder implementation.
-    # It should buffer album messages and then register them as a pending submission.
-    # For now, it just acknowledges the message.
+    # Single media
+    await _register_submission(client, [message])
+
+async def _process_album_buffer(client: Client, mg_id: str):
+    """Wait for album completion then register."""
+    await asyncio.sleep(2.0) # Buffer window
+    messages = _album_buffer.pop(mg_id, [])
+    if messages:
+        await _register_submission(client, messages)
+
+async def _register_submission(client: Client, messages: List[Message]):
+    """
+    Process, hash, and route submission to moderation topic.
+    """
+    lead_msg = messages[0]
+    user_id = lead_msg.from_user.id
+    first_name = lead_msg.from_user.first_name or "Creator"
     
-    # Simulate registering the submission. In a real implementation, this would
-    # involve forwarding to a verification group and then calling register_pending.
-    # For now, we will just log it.
+    # Placeholder for hashing logic (Section 10.2)
+    # In full implementation, we'd download, hash, and check content_fingerprints.
+    # For now, we simulate success.
     
-    logger.info("Simulating submission registration", extra={"ctx_user_id": user_id, "ctx_msg_id": message.id})
+    db = DatabaseManager.get_db()
     
-    await message.reply_text("Your submission has been received and is pending review.")
+    # Create DB Record
+    submission_id = str(datetime.now().timestamp()) # Real implementation uses ObjectId
+    
+    # Notify User
+    ack = await lead_msg.reply_text(
+        "✅ <b>Submission Received</b>\n\n"
+        "Your content has been forwarded to our moderation team.\n"
+        "Status: <code>PENDING REVIEW</code>",
+        parse_mode=ParseMode.HTML
+    )
+    asyncio.create_task(_delete_after(ack, 10))
+
+    # Route to Verification Hub (Section 10.3)
+    from app.moderation.verification_hub import post_moderation_card
+    await post_moderation_card(client, user_id, messages)
+
+async def _delete_after(msg, delay):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass

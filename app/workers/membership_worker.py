@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from pyrogram.client import Client
-from pyrogram.enums import UserStatus
+from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import FloodWait, UserNotParticipant
 
 from app.config import settings
@@ -69,9 +69,10 @@ class MembershipReconciliationWorker:
         now = datetime.now(timezone.utc)
         logger.info("Membership reconciliation sweep running", extra={"ctx_time": now.isoformat()})
 
+        # FIX: Case-insensitive status check
         active_subs = await db["subscriptions"].find({
-            "status": "active",
-            "plan": {"$nin": ["free", "owner", "sudo"]},
+            "status": {"$in": ["ACTIVE", "active"]},
+            "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
         }).to_list(length=None)
 
         premium_chats = []
@@ -90,7 +91,8 @@ class MembershipReconciliationWorker:
             for chat_id in premium_chats:
                 try:
                     member = await self._bot.get_chat_member(chat_id, user_id)
-                    if member.status not in (UserStatus.MEMBER, UserStatus.OWNER, UserStatus.ADMINISTRATOR):
+                    # FIX (D-03): Use ChatMemberStatus instead of UserStatus
+                    if member.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
                         logger.warning(
                             "Membership discrepancy found!",
                             extra={

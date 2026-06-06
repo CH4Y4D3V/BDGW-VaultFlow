@@ -16,6 +16,7 @@ class ActivityAction(str, Enum):
 
     # Content
     UPLOAD = "upload"
+    APPROVE = "approve"
     REJECT = "reject"
     INTERACTION = "interaction"
 

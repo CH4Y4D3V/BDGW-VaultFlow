@@ -546,7 +546,7 @@ class AppLifecycle:
                 self._referral_scheduler = ReferralScheduler(
                     service=ref_service,
                     scheduler=raw_scheduler,
-                    channel_id=int(settings.VAULT_CHANNEL_ID),
+                    channel_id=int(settings.MAIN_CHANNEL_ID),
                 )
                 self._referral_scheduler.register_jobs()
                 logger.info("lifecycle_referral_jobs_registered")

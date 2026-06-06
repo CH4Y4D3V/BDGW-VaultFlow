@@ -72,8 +72,24 @@ async def antispam_handler(client: Client, message: Message) -> None:
         
         if strikes >= strike_limit_ban:
             await db["users"].update_one({"_id": user_id}, {"$set": {"is_banned": True}})
-            await message.reply_text("🚫 <b>You have been permanently banned for spamming.</b>")
             logger.warning(f"User {user_id} banned for spam", extra={"user_id": user_id})
+            
+            # Dual Audit Log (B-17 / §9.5 / §22)
+            try:
+                from app.services.support_service import send_admin_log_entry
+                await send_admin_log_entry(
+                    client=client,
+                    action_type="AUTO BAN (SPAM)",
+                    admin_user_id=0, # System
+                    admin_name="System",
+                    target_user_id=user_id,
+                    target_name=user.full_name,
+                    target_username=user.username,
+                    detail=f"Auto-banned after {strikes} spam strikes."
+                )
+            except Exception:
+                pass
+
             message.stop_propagation()
             return
             
@@ -81,10 +97,24 @@ async def antispam_handler(client: Client, message: Message) -> None:
             mute_mins = getattr(settings, "MUTE_DURATION_MINUTES", 30)
             mute_until = datetime.now(timezone.utc) + timedelta(minutes=mute_mins)
             await db["users"].update_one({"_id": user_id}, {"$set": {"mute_until": mute_until}})
-            await message.reply_text(
-                f"⚠️ <b>You have been muted for {mute_mins} minutes due to spamming.</b>\n"
-                f"Strike {strikes}/{strike_limit_ban}"
-            )
+            logger.warning(f"User {user_id} muted for spam", extra={"user_id": user_id})
+
+            # Dual Audit Log (B-17 / §9.5 / §22)
+            try:
+                from app.services.support_service import send_admin_log_entry
+                await send_admin_log_entry(
+                    client=client,
+                    action_type="AUTO MUTE (SPAM)",
+                    admin_user_id=0, # System
+                    admin_name="System",
+                    target_user_id=user_id,
+                    target_name=user.full_name,
+                    target_username=user.username,
+                    detail=f"Auto-muted for {mute_mins}m after {strikes} spam strikes."
+                )
+            except Exception:
+                pass
+
             message.stop_propagation()
             return
             
