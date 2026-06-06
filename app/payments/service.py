@@ -131,60 +131,72 @@ class PaymentService:
         raised, points were permanently lost with no recovery record. Fixed by
         reversing the order.
         """
-        if plan_id not in PLANS:
-            raise ValueError(f"Invalid plan: {plan_id}")
+        from app.distribution.lock_service import DistributedLockService
+        
+        lock_service = DistributedLockService()
+        lock_key = f"payment_session_create:{user_id}"
 
-        plan = PLANS[plan_id]
-        base_price = plan["price"]
+        async with lock_service.acquire(lock_key, timeout=10):
+            # Check for existing session inside the lock to prevent race conditions
+            existing_session = await self.get_active_session(user_id)
+            if existing_session:
+                logger.warning("Attempted to create duplicate payment session", extra={"ctx_user_id": user_id})
+                raise ValueError("User already has an active payment session.")
 
-        # Snapshot referral balance — read only, no mutation yet
-        wallet = await self.referral_repo.get_wallet(user_id)
-        points = wallet.get("points_balance", 0) if wallet else 0
+            if plan_id not in PLANS:
+                raise ValueError(f"Invalid plan: {plan_id}")
 
-        base_payable = max(0, base_price - points)
+            plan = PLANS[plan_id]
+            base_price = plan["price"]
 
-        # Unique identifying offset: ৳0.01 to ৳0.50
-        offset = round(random.uniform(0.01, 0.50), 2)
-        locked_amount = float(base_payable) + offset
+            # Snapshot referral balance — read only, no mutation yet
+            wallet = await self.referral_repo.get_wallet(user_id)
+            points = wallet.get("points_balance", 0) if wallet else 0
 
-        session = PaymentSession(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            plan_id=plan_id,
-            locked_amount=locked_amount,
-            points_used=points,
-            payment_method=method,
-        )
+            base_payable = max(0, base_price - points)
 
-        # FIX: Persist the session BEFORE deducting points (restart-safety)
-        await self.repository.save_session(session)
-        await self.repository.log_event(session.id, "session_created", {
-            "base_price": base_price,
-            "points_used": points,
-            "locked_amount": locked_amount
-        })
+            # Unique identifying offset: ৳0.01 to ৳0.50
+            offset = round(random.uniform(0.01, 0.50), 2)
+            locked_amount = float(base_payable) + offset
 
-        # Deduct points after session is safely persisted
-        if points > 0:
-            try:
-                await self.referral_repo.deduct_points(user_id, points)
-                logger.info(
-                    "points_locked_for_session",
-                    extra={"ctx_user_id": user_id, "ctx_points": points},
-                )
-            except Exception as exc:
-                # Session exists with points_used > 0 — recovery job must reconcile.
-                logger.error(
-                    "points_deduction_failed_after_session_created",
-                    extra={
-                        "ctx_user_id": user_id,
-                        "ctx_points": points,
-                        "ctx_session_id": session.id,
-                        "ctx_error": str(exc),
-                    },
-                )
+            session = PaymentSession(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                plan_id=plan_id,
+                locked_amount=locked_amount,
+                points_used=points,
+                payment_method=method,
+            )
 
-        return session
+            # FIX: Persist the session BEFORE deducting points (restart-safety)
+            await self.repository.save_session(session)
+            await self.repository.log_event(session.id, "session_created", {
+                "base_price": base_price,
+                "points_used": points,
+                "locked_amount": locked_amount
+            })
+
+            # Deduct points after session is safely persisted
+            if points > 0:
+                try:
+                    await self.referral_repo.deduct_points(user_id, points)
+                    logger.info(
+                        "points_locked_for_session",
+                        extra={"ctx_user_id": user_id, "ctx_points": points},
+                    )
+                except Exception as exc:
+                    # Session exists with points_used > 0 — recovery job must reconcile.
+                    logger.error(
+                        "points_deduction_failed_after_session_created",
+                        extra={
+                            "ctx_user_id": user_id,
+                            "ctx_points": points,
+                            "ctx_session_id": session.id,
+                            "ctx_error": str(exc),
+                        },
+                    )
+
+            return session
 
     async def get_session(self, payment_id: str) -> Optional[PaymentSession]:
         """Fetch a payment session by its ID. Returns None if not found."""
@@ -462,6 +474,18 @@ class PaymentService:
                 rejected_at=datetime.now(timezone.utc),
                 rejected_by=admin_id,
             )
+
+            # Clear Redis cache
+            try:
+                from app.core.redis_client import get_redis
+                redis = await get_redis()
+                await redis.delete(f"pay_session:{session.user_id}")
+                logger.info("Cleared payment session cache on rejection", extra={"ctx_user_id": session.user_id})
+            except Exception as exc:
+                logger.warning(
+                    "reject_payment_cache_clear_failed",
+                    extra={"ctx_payment_id": payment_id, "ctx_error": str(exc)},
+                )
 
             # FIX: Notify user of rejection (was missing entirely)
             rejection_msg = (

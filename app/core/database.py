@@ -1177,6 +1177,22 @@ class DatabaseManager:
             ),
         ])
 
+        # ══════════════════════════════════════════════════════════════════
+        # Distributed Lock Service collection
+        # ══════════════════════════════════════════════════════════════════
+        await _safe_create("locks", [
+            IndexModel(
+                [("lock_key", ASCENDING)],
+                name="lock_key_unique",
+                unique=True,
+            ),
+            IndexModel(
+                [("expires_at", ASCENDING)],
+                name="locks_expiry_ttl",
+                expireAfterSeconds=0,
+            ),
+        ])
+
         logger.info("_ensure_indexes: all collections processed.")
 
 

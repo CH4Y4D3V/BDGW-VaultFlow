@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -88,11 +89,9 @@ class SubscriptionService:
             expires_at = exp
             grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
-        # Build the merged metadata dict first, then construct Subscription.
-        # granted_by and notes are intentionally kept in metadata rather than
-        # as top-level kwargs so callers that query metadata can always find
-        # full grant provenance, and the constructor call stays compatible with
-        # the Subscription dataclass field list.
+        subscription_id = existing.subscription_id if existing else str(uuid.uuid4())
+        package_id = plan.value
+
         merged_metadata = {
             **(existing.metadata if existing and existing.metadata else {}),
             "granted_by": granted_by,
@@ -100,7 +99,9 @@ class SubscriptionService:
         }
 
         sub = Subscription(
+            subscription_id=subscription_id,
             user_id=user_id,
+            package_id=package_id,
             plan=plan,
             status=SubscriptionStatus.ACTIVE,
             started_at=now,
