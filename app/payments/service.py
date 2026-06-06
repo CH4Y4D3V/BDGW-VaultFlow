@@ -132,11 +132,11 @@ class PaymentService:
         reversing the order.
         """
         from app.distribution.lock_service import DistributedLockService
-        
-        lock_service = DistributedLockService()
+        db = DatabaseManager.get_db()
+        lock_service = DistributedLockService(db, worker_id="payment_service")
         lock_key = f"payment_session_create:{user_id}"
 
-        async with lock_service.acquire(lock_key, timeout=10):
+        async with lock_service.lock(lock_key, ttl_seconds=30):
             # Check for existing session inside the lock to prevent race conditions
             existing_session = await self.get_active_session(user_id)
             if existing_session:
@@ -292,10 +292,11 @@ class PaymentService:
         F-08: Entire flow wrapped in a DistributedLockService Redis lock.
         """
         from app.distribution.lock_service import DistributedLockService
-        lock_service = DistributedLockService()
+        db = DatabaseManager.get_db()
+        lock_service = DistributedLockService(db, worker_id="payment_approval")
         lock_key = f"payment_approve:{payment_id}"
 
-        async with lock_service.acquire(lock_key, timeout=20):
+        async with lock_service.lock(lock_key, ttl_seconds=60):
             try:
                 session = await self.repository.get_session(payment_id)
                 if not session or session.status in (PaymentStatus.APPROVED, PaymentStatus.REJECTED):

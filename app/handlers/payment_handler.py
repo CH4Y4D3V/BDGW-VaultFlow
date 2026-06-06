@@ -459,12 +459,19 @@ async def handle_payment_method(client: Client, callback: CallbackQuery) -> None
 
     try:
         session = await service.create_session(user_id, plan_id, method)
-    except Exception as exc:
-        logger.exception(
-            "Failed to create payment session",
+    except ValueError as exc:
+        logger.warning(
+            "Duplicate payment session attempt prevented",
             extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
         )
-        await callback.answer("Could not initiate payment. Please try again.", show_alert=True)
+        await callback.answer(str(exc), show_alert=True)
+        return
+    except Exception as exc:
+        logger.exception(
+            "Fatal failure creating payment session",
+            extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
+        )
+        await callback.answer("System error. Please contact support via /help.", show_alert=True)
         return
 
     plan = PLANS[plan_id]

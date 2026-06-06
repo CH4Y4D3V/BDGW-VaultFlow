@@ -618,8 +618,9 @@ async def _execute_broadcast(
 
     # ── Step 2: Acquire global broadcast lock ─────────────────────────────────
     try:
-        lock_service = DistributedLockService()
-        async with lock_service.acquire(BROADCAST_LOCK_KEY, timeout=BROADCAST_LOCK_TTL_SECONDS):
+        db = DatabaseManager.get_db()
+        lock_service = DistributedLockService(db, worker_id="broadcast_worker")
+        async with lock_service.lock(BROADCAST_LOCK_KEY, ttl_seconds=BROADCAST_LOCK_TTL_SECONDS):
             await _run_broadcast_loop(
                 client, admin_user_id, admin_name, session_id, session
             )
