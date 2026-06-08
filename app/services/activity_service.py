@@ -1,23 +1,19 @@
+# app/services/activity_service.py — COMPLETE FIXED FILE
 from __future__ import annotations
 
 from typing import Optional
-
-from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.activity import ActivityAction
 from app.repositories.activity_repository import ActivityRepository
 
 
 class ActivityService:
-    """
-    Service layer for logging user and system activities.
+    """Service layer for logging user and system activities."""
 
-    This provides a semantic layer on top of the generic ActivityRepository
-    to ensure consistent logging of specific, business-critical events.
-    """
-
-    def __init__(self, db: AsyncIOMotorDatabase) -> None:
-        self._repo = ActivityRepository(db)
+    def __init__(self, db=None) -> None:
+        # db param kept for call-site compatibility but ActivityRepository
+        # uses lazy DB access via BaseRepository — do not pass db
+        self._repo = ActivityRepository()
 
     async def log_support_session_start(self, user_id: int, session_id: str) -> None:
         """Log the initiation of a new support session."""
@@ -56,8 +52,11 @@ class ActivityService:
         moderator_id: int,
         verdict: str,
     ) -> None:
-        """Log a moderation verdict (approve, reject, queue)."""
-        action = ActivityAction(verdict.upper())
+        """Log a moderation verdict."""
+        try:
+            action = ActivityAction(verdict.lower())
+        except ValueError:
+            action = ActivityAction.AUDIT
         await self._repo.log_activity(
             user_id=user_id,
             action=action,

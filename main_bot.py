@@ -1,3 +1,4 @@
+# main_bot.py — COMPLETE FIXED FILE
 import asyncio
 import signal
 
@@ -23,19 +24,11 @@ async def async_main() -> None:
         try:
             loop.add_signal_handler(sig, _signal_handler)
         except NotImplementedError:
-            pass  # Windows compatibility fallback
+            pass
 
     try:
-        # NOTE: AppLifecycle.start() already starts the health server internally
-        # on the PORT env var (default 8080). Do NOT call start_health_server()
-        # here — doing so binds the same port twice and raises OSError: [Errno 98]
-        # Address already in use.
         await lifecycle.start()
-
-        # FIX: was logger.info("boot_stage", stage="idle_entered") — bare kwarg
-        # crashes stdlib logging with TypeError. Must use extra={}.
-        logger.info("boot_stage", extra={"ctx_stage": "idle_entered"})
-        logger.info("VaultFlow idle — waiting for shutdown signal.")
+        logger.info("VaultFlow idle — waiting for shutdown signal.", extra={"ctx_stage": "idle_entered"})
         await stop_event.wait()
     except asyncio.CancelledError:
         logger.info("Main loop cancelled via async propagation")

@@ -22,11 +22,24 @@ class PaymentRepository:
         self._timeouts_collection = db["payment_timeouts"]
         self._history_collection = db["subscription_history"]
 
+    async def release_processing_lock(self, payment_id: str) -> None:
+        """Release a PROCESSING lock, reverting back to UNDER_REVIEW."""
+        await self._collection.update_one(
+            {"_id": payment_id, "status": "processing"},
+            {
+                "$set": {
+                    "status": "under_review",
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$unset": {"locked_at": ""},
+            },
+        )
+
     async def save_session(self, session: PaymentSession) -> None:
         await self._collection.replace_one(
             {"_id": session.id},
             session.to_dict(),
-            upsert=True
+            upsert=True,
         )
 
     async def get_session(self, payment_id: str) -> Optional[PaymentSession]:
@@ -44,10 +57,10 @@ class PaymentRepository:
                     PaymentStatus.WAITING_SCREENSHOT.value,
                     PaymentStatus.SUBMITTED.value,
                     PaymentStatus.UNDER_REVIEW.value,
-                    PaymentStatus.PROCESSING.value
-                ]}
+                    PaymentStatus.PROCESSING.value,
+                ]},
             },
-            sort=[("created_at", -1)]
+            sort=[("created_at", -1)],
         )
         return PaymentSession.from_dict(doc) if doc else None
 
@@ -56,15 +69,15 @@ class PaymentRepository:
         result = await self._collection.find_one_and_update(
             {
                 "_id": payment_id,
-                "status": PaymentStatus.UNDER_REVIEW.value
+                "status": PaymentStatus.UNDER_REVIEW.value,
             },
             {
                 "$set": {
                     "status": PaymentStatus.PROCESSING.value,
-                    "locked_at": datetime.now(timezone.utc)
+                    "locked_at": datetime.now(timezone.utc),
                 }
             },
-            return_document=ReturnDocument.AFTER
+            return_document=ReturnDocument.AFTER,
         )
         return result is not None
 
@@ -99,14 +112,14 @@ class PaymentRepository:
             "payment_id": payment_id,
             "event": event,
             "metadata": metadata,
-            "timestamp": datetime.now(timezone.utc)
+            "timestamp": datetime.now(timezone.utc),
         })
 
     async def map_topic(self, topic_id: int, payment_id: str) -> None:
         await self._topics_collection.update_one(
             {"_id": topic_id},
             {"$set": {"payment_id": payment_id}},
-            upsert=True
+            upsert=True,
         )
 
     async def get_payment_by_topic(self, topic_id: int) -> Optional[str]:
@@ -119,12 +132,10 @@ class PaymentRepository:
         docs = await self._collection.find(
             {"status": {"$in": status_values}}
         ).to_list(length=None)
-        from app.payments.models import PaymentSession
         return [PaymentSession.from_dict(d) for d in docs]
 
     async def reset_stuck_processing(self) -> int:
         """Reset sessions stuck in PROCESSING back to UNDER_REVIEW (crash recovery)."""
-        from datetime import datetime, timezone
         result = await self._collection.update_many(
             {"status": "processing"},
             {
@@ -155,7 +166,7 @@ class PaymentRepository:
                     "keys": [("txid", ASCENDING)],
                     "name": "payments_txid_unique",
                     "unique": True,
-                    "sparse": True,   # NULL txid allowed (session not yet submitted)
+                    "sparse": True,  # NULL txid allowed (session not yet submitted)
                 },
             ]),
             # audit collection
@@ -190,16 +201,15 @@ class PaymentRepository:
         """
         from pymongo import IndexModel
 
+        # Copy specs to avoid mutating the originals across retry attempts.
+        specs_copy = [dict(s) for s in specs]
         index_models = [
-            IndexModel(
-                spec.pop("keys"),
-                **spec
-            )
-            for spec in [dict(s) for s in specs]   # copy to avoid mutating originals
+            IndexModel(spec.pop("keys"), **spec)
+            for spec in specs_copy
         ]
 
         try:
-            # Check for mismatches before attempting creation to be proactive
+            # Proactively detect option mismatches before attempting creation.
             existing = await collection.list_indexes().to_list(length=100)
             for spec in specs:
                 name = spec.get("name")
@@ -207,15 +217,17 @@ class PaymentRepository:
                     continue
                 found = next((idx for idx in existing if idx["name"] == name), None)
                 if found:
-                    # Check if options match (simplified check for unique/sparse)
-                    if (spec.get("unique", False) != found.get("unique", False) or
-                        spec.get("sparse", False) != found.get("sparse", False)):
+                    if (
+                        spec.get("unique", False) != found.get("unique", False)
+                        or spec.get("sparse", False) != found.get("sparse", False)
+                    ):
                         logger.warning(
                             f"Index options mismatch for {label}:{name}. Dropping for recreation.",
                         )
                         await collection.drop_index(name)
 
             await collection.create_indexes(index_models)
+
         except OperationFailure as e:
             if e.code == 85:  # IndexOptionsConflict
                 logger.warning(
@@ -224,9 +236,12 @@ class PaymentRepository:
                 )
                 try:
                     await collection.drop_indexes()
-                    # Rebuild index models (originals were consumed above)
+                    # Rebuild index models from original (unmodified) specs.
                     index_models_retry = [
-                        IndexModel(s["keys"], **{k: v for k, v in s.items() if k != "keys"})
+                        IndexModel(
+                            s["keys"],
+                            **{k: v for k, v in s.items() if k != "keys"},
+                        )
                         for s in specs
                     ]
                     await collection.create_indexes(index_models_retry)

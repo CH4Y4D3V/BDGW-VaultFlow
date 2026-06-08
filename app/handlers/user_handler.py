@@ -109,7 +109,7 @@ async def _get_hub_config_value(key: str) -> Optional[int]:
     Look up a key in the hub_config collection (Section 25A.19).
 
     Falls back to an identically-named attribute on settings if the DB
-    lookup fails or the key is absent.  Returns None if neither source
+    lookup fails or the key is absent. Returns None if neither source
     has the value.
 
     Never raises.
@@ -238,7 +238,7 @@ async def _reply_floodwait(
 
 async def _cleanup_messages(*messages: Optional[Message], delay: float = 10.0) -> None:
     """
-    Delete one or more messages after `delay` seconds.  Ignores failures
+    Delete one or more messages after `delay` seconds. Ignores failures
     silently (message may already be deleted).
     """
     await asyncio.sleep(delay)
@@ -252,7 +252,7 @@ async def _cleanup_messages(*messages: Optional[Message], delay: float = 10.0) -
 
 
 async def _delete_after(message: Message, delay: float = 10.0) -> None:
-    """Delete a single message after `delay` seconds.  Ignores failures."""
+    """Delete a single message after `delay` seconds. Ignores failures."""
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -300,7 +300,7 @@ async def _check_spam_guard(key: str, ttl_seconds: int) -> bool:
     Rate-limit guard backed by Redis.
 
     Returns True if the caller is within the cooldown window (should be
-    blocked).  Returns False (allow) if Redis is unavailable — the guard
+    blocked). Returns False (allow) if Redis is unavailable — the guard
     is fault-tolerant so a Redis outage never blocks legitimate users.
     """
     try:
@@ -329,7 +329,7 @@ async def _get_rules_text() -> str:
     Fetch community rules text from bot_config collection.
 
     Falls back to a hard-coded default if the DB is unavailable or the
-    document does not exist.  Never raises.
+    document does not exist. Never raises.
     """
     try:
         db = DatabaseManager.get_db()
@@ -359,7 +359,7 @@ async def _is_channel_member(client: Client, user_id: int, channel_id: int) -> b
     """
     Check whether `user_id` is an active member of `channel_id`.
 
-    Uses Pyrogram get_chat_member().  Returns False on any error so that
+    Uses Pyrogram get_chat_member(). Returns False on any error so that
     a channel check failure never blocks the /start flow.
     """
     try:
@@ -423,11 +423,10 @@ async def _handle_referral_at_start(
         ref_service = ReferralService(ref_repo, get_bot())
 
         # ── Step 1: persist the referral pair (restart-safe, duplicate-safe)
-        # This is written to MongoDB BEFORE any Telegram action.
+        # Written to MongoDB BEFORE any Telegram action.
         # The unique index on referred_user_id prevents double-credit even
         # if this code path is entered twice (idempotent).
         try:
-            # A-10 FIX: correct method is create_pending with referrer_id and referred_id
             await ref_repo.create_pending(
                 referrer_id=referred_by,
                 referred_id=user_id,
@@ -505,13 +504,13 @@ def _build_main_menu_keyboard() -> InlineKeyboardMarkup:
     Row 4: [ 🆘 Need Help ]
     """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Premium Access",               callback_data="menu:premium")],
-        [InlineKeyboardButton("📤 Submit Content Anonymously",   callback_data="menu:submit")],
+        [InlineKeyboardButton("💎 Premium Access",              callback_data="menu:premium")],
+        [InlineKeyboardButton("📤 Submit Content Anonymously",  callback_data="menu:submit")],
         [
-            InlineKeyboardButton("🎁 Referral Program",          callback_data="menu:referrals"),
-            InlineKeyboardButton("📊 My Status",                 callback_data="menu:mystatus"),
+            InlineKeyboardButton("🎁 Referral Program",         callback_data="menu:referrals"),
+            InlineKeyboardButton("📊 My Status",                callback_data="menu:mystatus"),
         ],
-        [InlineKeyboardButton("🆘 Need Help",                    callback_data="menu:support")],
+        [InlineKeyboardButton("🆘 Need Help",                   callback_data="menu:support")],
     ])
 
 
@@ -581,7 +580,7 @@ async def handle_start(client: Client, message: Message) -> None:
         if user_doc is None:
             logger.info("new_user_detected", extra={"ctx_user_id": user_id})
 
-            # ── Parse referral payload ─────────────────────────────────────────
+            # ── Parse referral payload ─────────────────────────────────────
             referred_by: Optional[int] = None
             if len(message.command) > 1:
                 payload = message.command[1]
@@ -592,7 +591,7 @@ async def handle_start(client: Client, message: Message) -> None:
                             referred_by = None  # Self-referral not allowed.
                     except (IndexError, ValueError):
                         pass
-            
+
             # ── DB write FIRST (restart-safe per spec Section 25) ──────────
             try:
                 await user_repo.upsert_user(
@@ -603,7 +602,7 @@ async def handle_start(client: Client, message: Message) -> None:
                 )
                 await user_repo.set_onboarded(user_id, True)
 
-                # ── Free subscription grant ────────────────────────────────────
+                # ── Free subscription grant ────────────────────────────────
                 try:
                     sub_service = _get_sub_service()
                     from app.models.subscription import Plan
@@ -612,7 +611,7 @@ async def handle_start(client: Client, message: Message) -> None:
                         plan=Plan.FREE,
                         duration_days=None,
                         granted_by=0,  # System
-                        notes="Auto-registered on /start"
+                        notes="Auto-registered on /start",
                     )
                 except Exception as sub_err:
                     logger.warning(
@@ -620,13 +619,13 @@ async def handle_start(client: Client, message: Message) -> None:
                         extra={"ctx_user_id": user_id, "ctx_error": str(sub_err)},
                     )
 
-                # ── Referral processing (non-fatal; deferred per spec §16) ─────
+                # ── Referral processing (non-fatal; deferred per spec §16) ─
                 if referred_by:
                     asyncio.create_task(
                         _handle_referral_at_start(client, user_id, referred_by)
                     )
             except Exception as insert_err:
-                 logger.warning(
+                logger.warning(
                     "new_user_insert_failed",
                     extra={
                         "ctx_user_id": user_id,
@@ -640,8 +639,8 @@ async def handle_start(client: Client, message: Message) -> None:
                 extra={"ctx_user_id": user_id},
             )
             await user_repo.set_onboarded(user_id, True)
-        
-        else: # RETURNING USER
+
+        else:
             logger.info(
                 "returning_user_menu",
                 extra={"ctx_user_id": user_id},
@@ -724,7 +723,6 @@ async def handle_accept_terms(client: Client, callback_query: CallbackQuery) -> 
         )
         # Fallback: build menu manually.
         try:
-            from app.services.onboarding_service import UserState
             text = f"👋 <b>Welcome to BD Gone Wild, {first_name}!</b>\n\nUse the menu below to navigate."
             keyboard = _build_main_menu_keyboard()
             await callback_query.message.edit_text(
@@ -738,8 +736,10 @@ async def handle_accept_terms(client: Client, callback_query: CallbackQuery) -> 
 #  Main menu callbacks
 # ═══════════════════════════════════════════════════════════════════════════
 
+# BUG FIX: "premium" was missing from the regex — clicking 💎 Premium Access
+# silently did nothing because no handler matched "menu:premium".
 @Client.on_callback_query(
-    filters.regex(r"^menu:(mystatus|rules|home|queue|referrals|support|submit)$")
+    filters.regex(r"^menu:(mystatus|rules|home|queue|referrals|support|submit|premium)$")
 )
 async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -> None:
     """
@@ -747,12 +747,13 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
     Actions handled:
       home      → Main menu (re-render)
+      premium   → Premium access info / payment entry
       referrals → Referral program dashboard
       queue     → User's active content queue (jobs in flight)
       submit    → Content submission entry (routes to submission flow)
       rules     → Community rules
       mystatus  → User account status card
-      support   → Need Help (triggers support session flow)
+      support   → Need Help / support session entry
     """
     action = callback_query.data.split(":")[1]
     user_id = callback_query.from_user.id
@@ -788,6 +789,27 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                     "Use the menu below to navigate."
                 )
                 keyboard = _build_main_menu_keyboard()
+
+        elif action == "premium":
+            # Route to the payment / premium-access flow.
+            try:
+                from app.handlers.payment_handler import handle_premium_menu
+                await handle_premium_menu(client, callback_query)
+                return
+            except Exception as e:
+                logger.exception(
+                    "premium_entry_failed",
+                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                )
+                # Graceful fallback: show a static info card.
+                text = (
+                    "💎 <b>Premium Access</b>\n\n"
+                    "Upgrade to unlock exclusive content and features.\n\n"
+                    "Use /premium to start your subscription."
+                )
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+                ]])
 
         elif action == "referrals":
             try:
@@ -848,8 +870,6 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
         elif action == "submit":
             # Entry point for the content submission flow (Section 10).
-            # The full multi-step FSM is handled by the submission handler
-            # module.  Here we forward to the submission entry callback.
             try:
                 from app.handlers.submission_handler import handle_submit_menu
                 await handle_submit_menu(client, callback_query)
@@ -896,7 +916,6 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
                 }
 
             try:
-                # A-11 FIX: TrustService does not accept any arguments
                 from app.services.trust_service import TrustService
                 trust_service = TrustService()
                 trust_metrics = await trust_service.get_user_metrics(user_id)
@@ -924,27 +943,20 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
             )
 
         elif action == "support":
-            # Entry point for the support system (spec Section 15).
-            # Delegated to the support handler module.
-            try:
-                from app.handlers.support_handler import handle_support_entry
-                await handle_support_entry(client, callback_query)
-                return
-            except ImportError:
-                text = (
-                    "🆘 <b>Support</b>\n\n"
-                    "Type your message and an admin will respond shortly."
-                )
-                keyboard = InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
-                ]])
-            except Exception as e:
-                logger.exception(
-                    "support_entry_failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
-                )
-                await callback_query.answer("Support system unavailable.", show_alert=True)
-                return
+            # Inform the user to send a message directly — the catch-all
+            # private message handler in support_handler.py will create their
+            # topic. Passing callback_query.message (a group or bot-side
+            # message) to route_to_support_topic() would forward the wrong
+            # sender context, so we show a prompt instead.
+            text = (
+                "🆘 <b>Need Help?</b>\n\n"
+                "Just type your message and send it here. "
+                "Our support team will be connected shortly.\n\n"
+                "<i>You can also use /help to open a ticket.</i>"
+            )
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+            ]])
 
         else:
             logger.warning(
@@ -1003,7 +1015,7 @@ async def handle_rules(client: Client, message: Message) -> None:
     Send community rules to the user's DMs.
 
     If triggered from a group, post a brief acknowledgement with a 10-second
-    auto-delete.  If the bot is blocked, show an inline link to start the bot.
+    auto-delete. If the bot is blocked, show an inline link to start the bot.
     """
     if not message.from_user:
         return
@@ -1034,7 +1046,7 @@ async def handle_mystatus(client: Client, message: Message) -> None:
     Display the user's full account status card (spec Section 17).
 
     Shows subscription status, referral points, trust / fraud scores, and
-    recent queue jobs.  Handles all sub-system failures gracefully so that
+    recent queue jobs. Handles all sub-system failures gracefully so that
     one unavailable service never prevents the dashboard from loading.
     """
     if not message.from_user:
@@ -1071,7 +1083,6 @@ async def handle_mystatus(client: Client, message: Message) -> None:
             }
 
         try:
-            # A-11 FIX: TrustService does not accept any arguments
             from app.services.trust_service import TrustService
             trust_service = TrustService()
             trust_metrics = await trust_service.get_user_metrics(user_id)
@@ -1119,5 +1130,5 @@ async def handle_mystatus(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.command("ping") & filters.private)
 async def handle_ping_test(client: Client, message: Message) -> None:
-    """Minimal liveness probe.  Responds 'pong'."""
+    """Minimal liveness probe. Responds 'pong'."""
     await message.reply_text("pong")
