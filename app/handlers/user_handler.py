@@ -683,8 +683,7 @@ async def handle_accept_terms(client: Client, callback_query: CallbackQuery) -> 
     # ── Persist acceptance to DB first ───────────────────────────────────
     try:
         from app.repositories.user_repository import UserRepository
-        db = DatabaseManager.get_db()
-        user_repo = UserRepository(db)
+        user_repo = UserRepository()
         await user_repo.update_one(
             {"user_id": user_id},
             {"$set": {

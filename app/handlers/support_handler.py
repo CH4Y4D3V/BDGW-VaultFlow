@@ -1,259 +1,193 @@
+"""
+app/handlers/support_handler.py
+-------------------------------
+Handles the user-facing support system, including /help, direct messages,
+and the admin-side /close command.
+"""
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import datetime, timezone
-from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import (
-    CallbackQuery,
-    Message,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from pyrogram.errors import FloodWait, RPCError
+from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
 from app.core.permissions import Role, permission_required
-from app.services.support_service import get_support_service, build_accept_markup
-from app.services.topic_manager import get_topic_manager
+from app.services.activity_service import ActivityService
+from app.services.support_service import SupportService
+from app.ui.support_cards import (
+    format_admin_closed_ticket_card,
+    format_new_support_request_card,
+    format_user_closed_ticket_card,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Helpers ───────────────────────────────────────────────────────────────
 
-async def _send_to_user_topic(client: Client, user_id: int, text: str, reply_markup=None):
-    """Utility to post a message to the user's permanent hub topic."""
-    try:
-        topic_mgr = get_topic_manager()
-        topic_id = await topic_mgr.get_or_create_user_topic(client, user_id)
-        await client.send_message(
-            chat_id=settings.VERIFICATION_GROUP_ID,
-            text=text,
-            message_thread_id=topic_id,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as exc:
-        logger.error(
-            "support_handler_topic_post_failed",
-            extra={"ctx_user_id": user_id, "ctx_error": str(exc)},
-        )
-
-# ── Handlers ──────────────────────────────────────────────────────────────
+# ─── User-Facing Handlers ───────────────────────────────────────────────────
 
 @Client.on_message(filters.command("help") & filters.private)
 async def handle_help_command(client: Client, message: Message) -> None:
-    """
-    User-side entry point: /help in private chat.
-    
-    Section 15.1: Opens a new support session or re-activates an existing topic.
-    """
-    user_id = message.from_user.id
-    first_name = message.from_user.first_name or "Creator"
-    
-    logger.info("handle_help_command", extra={"ctx_user_id": user_id})
+    """Entry point for /help command. Routes to the main support handler."""
+    logger.info("help_command_received", extra={"ctx_user_id": message.from_user.id})
+    await route_to_support_topic(client, message)
 
-    service = get_support_service()
-    db = DatabaseManager.get_db()
-    
-    # Check for existing non-closed session
-    existing = await db["support_sessions"].find_one(
-        {"user_id": user_id, "status": {"$in": ["PENDING", "ACTIVE"]}}
-    )
-    
-    if existing:
-        await message.reply_text(
-            "⏳ You already have an open support request.\n"
-            "An admin will be with you shortly. "
-            "You can type your message here now."
-        )
-        return
 
-    # Create new PENDING session
-    session_id = await service.create_session(client, user_id)
-    
-    # Notify User
-    await message.reply_text(
-        "🆘 <b>Support Request Opened</b>\n\n"
-        "Your request has been sent to our moderators. "
-        "Please describe your issue below.\n\n"
-        "<i>An admin will join this chat shortly.</i>",
-        parse_mode=ParseMode.HTML
-    )
-    
-    # Send Request Card to Hub Topic (Section 15.2)
-    card_text = await service.build_user_support_card(db, user_id, message.from_user, message)
-    markup = build_accept_markup(user_id)
-    
-    await _send_to_user_topic(client, user_id, card_text, reply_markup=markup)
+@Client.on_message(
+    filters.private
+    & ~filters.command(["start", "rules", "mystatus", "ping", "help"])
+    & ~filters.bot
+)
+async def handle_private_message(client: Client, message: Message) -> None:
+    """Handles any private message that is not another command."""
+    # This acts as the main entry point for users initiating a support chat.
+    await route_to_support_topic(client, message)
 
-@Client.on_callback_query(filters.regex(r"^support_accept:(\d+)$"))
-async def handle_accept_callback(client: Client, callback_query: CallbackQuery) -> None:
-    """
-    Admin-side: Accept a support request.
-    
-    Section 15.3: Implements ownership lock (A-04/B-04).
-    """
-    user_id = int(callback_query.matches[0].group(1))
-    admin_id = callback_query.from_user.id
-    admin_name = callback_query.from_user.first_name or "Admin"
-    
-    db = DatabaseManager.get_db()
-    
-    # Atomic Ownership Lock Check
-    # We use find_one_and_update to ensure only one admin can claim 'PENDING'
-    result = await db["support_sessions"].find_one_and_update(
-        {"user_id": user_id, "status": "PENDING"},
-        {
-            "$set": {
-                "status": "ACTIVE",
-                "accepted_by": admin_id,
-                "accepted_at": datetime.now(timezone.utc),
-            }
-        },
-        return_document=True
-    )
-    
-    if not result:
-        # Check if it was already accepted by someone else
-        current = await db["support_sessions"].find_one({"user_id": user_id})
-        if current and current.get("status") == "ACTIVE":
-            other_admin = current.get("accepted_by", "Another admin")
-            await callback_query.answer(f"❌ This request was already accepted by ID: {other_admin}", show_alert=True)
-            # Update the card to reflect it's taken
-            try:
-                await callback_query.message.edit_text(
-                    callback_query.message.text + f"\n\n✅ <b>Accepted by Admin {other_admin}</b>",
-                    reply_markup=None, # Remove button
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-        else:
-            await callback_query.answer("❌ This request is no longer valid.", show_alert=True)
-        return
 
-    # Success: Notify Admin
-    await callback_query.answer("✅ Support Request Accepted!")
-    await callback_query.message.edit_text(
-        callback_query.message.text.html + f"\n\n✅ <b>Accepted by {admin_name} ({admin_id})</b>",
-        reply_markup=None,
-        parse_mode=ParseMode.HTML
-    )
+# ─── Admin-Facing Handlers ──────────────────────────────────────────────────
 
-    # Notify User in DM
-    await client.send_message(
-        chat_id=user_id,
-        text=f"✅ <b>Admin {admin_name}</b> has joined the support session.\n"
-             "How can we help you today?",
-        parse_mode=ParseMode.HTML
-    )
-    
-    # Dual Audit Log (A-15/B-03/Section 9.4)
-    from app.services.support_service import send_admin_log_entry
-    await send_admin_log_entry(
-        client=client,
-        action_type="SUPPORT ACCEPTED",
-        admin_user_id=admin_id,
-        admin_name=admin_name,
-        target_user_id=user_id,
-        target_name=None, # Will fetch in service
-        target_username=None,
-        detail=f"Admin claimed support session for user {user_id}"
-    )
-
-@Client.on_message(filters.command("close") & filters.group & filters.chat(settings.VERIFICATION_GROUP_ID))
-@permission_required(Role.ADMIN)
+@Client.on_message(
+    filters.command("close")
+    & filters.group
+    & filters.chat(settings.VERIFICATION_GROUP_ID)
+)
+@permission_required(Role.MODERATOR)
 async def handle_close_command(client: Client, message: Message) -> None:
-    """
-    Admin-side: Close a support session.
-    
-    Section 15.5: Terminates bridge and triggers user-side message deletion (Section 20).
-    """
+    """Handles the /close command from an admin in the verification hub."""
     if not message.reply_to_message:
-        # In a forum, we can also check the thread_id
-        pass
-    
-    # In this implementation, we rely on the thread (topic_id)
-    topic_id = message.message_thread_id
-    if not topic_id:
+        await message.reply_text("Please reply to a message in the support thread to close it.")
         return
 
     db = DatabaseManager.get_db()
-    session = await db["support_sessions"].find_one({"topic_id": topic_id, "status": "ACTIVE"})
-    
-    if not session:
-        await message.reply_text("❌ No active support session found in this topic.")
+    support_service = SupportService(db)
+
+    user_id = await support_service.get_user_id_from_topic(message.chat.id, message.reply_to_message.message_thread_id)
+    if not user_id:
+        await message.reply_text("This does not appear to be a support thread.")
         return
 
-    user_id = session["user_id"]
-    admin_id = message.from_user.id
-    
-    # Update DB
-    await db["support_sessions"].update_one(
-        {"_id": session["_id"]},
-        {
-            "$set": {
-                "status": "CLOSED",
-                "closed_at": datetime.now(timezone.utc),
-                "closed_by": admin_id
-            }
-        }
+    logger.info(
+        "close_command_received",
+        extra={
+            "ctx_admin_id": message.from_user.id,
+            "ctx_user_id": user_id,
+            "ctx_topic_id": message.reply_to_message.message_thread_id,
+        },
     )
 
-    # Notify Admin topic
-    await message.reply_text("🔒 <b>Support session closed.</b>\nUser messages will be deleted shortly.", parse_mode=ParseMode.HTML)
-
-    # Notify User
-    await client.send_message(
-        chat_id=user_id,
-        text="🔒 <b>Support Session Closed</b>\n\n"
-             "Thank you for contacting support. This chat history will be cleared.",
-        parse_mode=ParseMode.HTML
+    closed_by_name = message.from_user.first_name or "Admin"
+    success = await support_service.close_session_by_topic(
+        message.reply_to_message.message_thread_id,
+        closed_by_name,
+        closed_by_id=message.from_user.id,
     )
 
-    # Trigger User-side cleanup (Section 20)
+    if not success:
+        await message.reply_text("Could not close support session. It may already be closed.")
+        return
+
+    # User-facing notification
     try:
-        from app.services.cleanup_service import get_cleanup_service
-        cleanup = get_cleanup_service()
-        await cleanup.trigger_user_cleanup(user_id)
-    except Exception as exc:
-        logger.warning("support_cleanup_trigger_failed", extra={"ctx_user_id": user_id, "ctx_error": str(exc)})
+        user_card = format_user_closed_ticket_card(closed_by_name)
+        await client.send_message(user_id, user_card, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning(
+            "failed_to_send_close_notice_to_user",
+            extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+        )
 
-    # Audit
-    from app.services.support_service import send_admin_log_entry
-    await send_admin_log_entry(
-        client=client,
-        action_type="SUPPORT CLOSED",
-        admin_user_id=admin_id,
-        admin_name=message.from_user.first_name,
-        target_user_id=user_id,
-        target_name=None,
-        target_username=None,
-        detail=f"Session closed by admin"
+    # Admin-facing notification
+    admin_card = format_admin_closed_ticket_card(
+        user_id,
+        (await client.get_users(user_id)).first_name,
+        closed_by_name,
     )
+    await message.reply_text(admin_card, parse_mode=ParseMode.HTML)
 
-async def handle_support_entry(client: Client, callback_query: CallbackQuery) -> None:
-    """Handles the 'menu:support' callback from user dashboard."""
-    # Mimic /help behavior
-    # We create a fake message object to reuse handle_help_command
-    class FakeMessage:
-        def __init__(self, query: CallbackQuery):
-            self.from_user = query.from_user
-            self.chat = query.message.chat
-        async def reply_text(self, text, **kwargs):
-            return await client.send_message(self.from_user.id, text, **kwargs)
 
-    await handle_help_command(client, FakeMessage(callback_query))
-    await callback_query.answer()
+# ─── Core Routing Logic ─────────────────────────────────────────────────────
 
-async def route_support_message(client: Client, message: Message) -> None:
+async def route_to_support_topic(client: Client, message: Message) -> None:
     """
-    Entry point for topic_router to handle support messages.
+    Routes a user's message to their dedicated support topic in the hub.
+
+    1.  Retrieves or creates a support session and its corresponding topic.
+    2.  Forwards the user's message to the topic.
+    3.  If it's a new session, posts a "New Request" card to the topic.
     """
-    # This is handled by SupportService.handle_user_message
-    # which is called from user_handler / generic message handler
-    pass
+    user = message.from_user
+    if not user:
+        return
+
+    db = DatabaseManager.get_db()
+    support_service = SupportService(db)
+
+    # REG-05 (D-02) FIX: Retry on unique index violation race condition
+    for attempt in range(3):
+        try:
+            session, is_new = await support_service.get_or_create_session(user.id, user.full_name)
+            break
+        except Exception as e:
+            if "duplicate key error" in str(e).lower() and attempt < 2:
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                continue
+            logger.exception(
+                "failed_to_get_or_create_support_session",
+                extra={"ctx_user_id": user.id},
+            )
+            return
+    else: # This block runs if the loop completes without breaking
+        logger.error("failed_to_get_or_create_support_session_after_retries", extra={"ctx_user_id": user.id})
+        return
+
+    # Forward the user's message to their topic
+    try:
+        await client.forward_messages(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            from_chat_id=user.id,
+            message_ids=message.id,
+            message_thread_id=session.topic_id,
+        )
+    except Exception as e:
+        logger.error(
+            "failed_to_forward_support_message",
+            extra={
+                "ctx_user_id": user.id,
+                "ctx_topic_id": session.topic_id,
+                "ctx_error": str(e),
+            },
+        )
+        await message.reply_text("Sorry, there was an error processing your message. Please try again.")
+        return
+
+    # If it's a brand new session, post the "New Request" card for admins.
+    if is_new:
+        card = format_new_support_request_card(user.id, user.full_name, user.username)
+        try:
+            await client.send_message(
+                chat_id=settings.VERIFICATION_GROUP_ID,
+                text=card,
+                message_thread_id=session.topic_id,
+                parse_mode=ParseMode.HTML,
+            )
+            activity_service = ActivityService(db)
+            await activity_service.log_support_session_start(user.id, session.id)
+
+        except Exception as e:
+            logger.error(
+                "failed_to_post_new_support_request_card",
+                extra={
+                    "ctx_user_id": user.id,
+                    "ctx_topic_id": session.topic_id,
+                    "ctx_error": str(e),
+                },
+            )
+
+    # Respond to the user so they know their message was received.
+    await message.reply_text("✅ Your message has been sent to the support team. They will reply here.")

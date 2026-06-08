@@ -101,3 +101,26 @@ def build_admin_rejection_reasons(session_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❗ Screenshot Unclear", callback_data=f"pay:admin:rej_rsn:unclear:{session_id}")],
         [InlineKeyboardButton("← Back", callback_data=f"pay:admin:back:{session_id}")]
     ])
+
+def format_user_profile_card(user_doc: dict, sub: Optional[dict], metrics: dict) -> str:
+    """Formats the user profile card for the /profile command."""
+    user_id = user_doc.get("user_id")
+    plan_label = "None"
+    expiry = "N/A"
+    if sub:
+        plan_label = sub.plan.value.upper()
+        expiry = sub.expires_at.strftime("%Y-%m-%d %H:%M") if sub.expires_at else "Lifetime"
+
+    text = (
+        f"👤 <b>User Profile:</b> <code>{user_id}</code>\n"
+        f"📛 Name: {user_doc.get('full_name', 'N/A')}\n"
+        f"🔗 Username: @{user_doc.get('username', 'N/A')}\n\n"
+        f"💎 <b>Plan:</b> {plan_label}\n"
+        f"⏰ Expiry: {expiry}\n\n"
+        f"🛡 <b>Trust Level:</b> {metrics.get('level', 'NEW')}\n"
+        f"📊 Trust Score: {metrics.get('trust_score', 0)}\n"
+        f"🚩 Fraud Score: {metrics.get('fraud_score', 0)}\n\n"
+        f"🚫 Banned: {'Yes' if user_doc.get('is_banned') else 'No'}\n"
+        f"🔇 Muted: {'Yes' if user_doc.get('is_muted') else 'No'}"
+    )
+    return text

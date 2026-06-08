@@ -947,7 +947,7 @@ async def execute_approve(
         activity_repo = ActivityRepository()
         await activity_repo.log_activity(
             user_id=submitter_user_id,
-            action=ActivityAction.APPROVE,
+            action=ActivityAction.QUEUE, # NEW-09 FIX
             metadata={"content_id": last_content_id},
         )
     except Exception as e:
@@ -1129,7 +1129,7 @@ async def execute_queue(
         activity_repo = ActivityRepository()
         await activity_repo.log_activity(
             user_id=submitter_user_id,
-            action=ActivityAction.APPROVE,
+            action=ActivityAction.QUEUE, # NEW-09 FIX
             metadata={"content_id": last_content_id},
         )
     except Exception as e:

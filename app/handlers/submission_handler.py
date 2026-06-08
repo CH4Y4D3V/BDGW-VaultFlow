@@ -1,153 +1,144 @@
+"""
+app/handlers/submission_handler.py
+----------------------------------
+Handles all user-submitted content (images, videos, text) in private chat.
+"""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
-from typing import Optional, List
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import (
-    CallbackQuery,
-    Message,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
-from app.services.onboarding_service import OnboardingService
+from app.services.submission_service import SubmissionService
+from app.services.topic_manager import get_topic_manager
+from app.storage import get_submission_cache
+from app.ui.submission_cards import format_submission_card
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ── Album Buffer (Volatile, in-memory per worker) ─────────────────────────
-# Section 10.2: Albums must be buffered via media_group_id.
-_album_buffer: dict[str, List[Message]] = {}
 
-# ── Handlers ──────────────────────────────────────────────────────────────
-
-@Client.on_callback_query(filters.regex(r"^menu:submit$"))
-async def handle_submit_menu(client: Client, callback_query: CallbackQuery) -> None:
-    """
-    Entry point for submission flow from main menu.
-    
-    Section 10.1: Main Channel membership verification gate.
-    """
-    user_id = callback_query.from_user.id
-    
-    # 1. Verification Gate
-    try:
-        member = await client.get_chat_member(settings.MAIN_CHANNEL_ID, user_id)
-        if member.status.value in ("left", "banned", "kicked"):
-             raise ValueError("Not a member")
-    except Exception:
-        await callback_query.answer(
-            "❌ You must join our main channel first to submit content.",
-            show_alert=True
-        )
-        return
-
-    # 2. Terms Check
-    db = DatabaseManager.get_db()
-    user_doc = await db["users"].find_one({"user_id": user_id})
-    if not user_doc or not user_doc.get("terms_accepted"):
-        await callback_query.answer(
-            "❌ Please accept the terms of service in /start before submitting.",
-            show_alert=True
-        )
-        return
-
-    await callback_query.answer()
-    await callback_query.message.edit_text(
-        "📤 <b>Anonymous Submission</b>\n\n"
-        "Send your photo or video here now. You can also send albums.\n\n"
-        "<i>All submissions are reviewed by moderators before posting.</i>",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu:home")
-        ]]),
-        parse_mode=ParseMode.HTML
-    )
-
-@Client.on_message(filters.private & (filters.photo | filters.video))
+@Client.on_message(
+    (filters.media | filters.text)
+    & filters.private
+    & ~filters.command(["start", "rules", "mystatus", "ping", "help"])
+    & ~filters.bot
+)
 async def handle_submission(client: Client, message: Message) -> None:
     """
-    Primary media handler. Detects albums and routes to processing.
-    """
-    if not message.from_user:
-        return
+    Main entry point for all user submissions.
 
-    # Section 10.2: Media Group detection
+    This handler collects messages into an album if they arrive in a burst,
+    then forwards them to the user's dedicated topic in the verification hub
+    and posts a moderation card.
+    """
+    user_id = message.from_user.id
+    cache = get_submission_cache()
+
+    # Collect media group items
     if message.media_group_id:
-        mg_id = message.media_group_id
-        if mg_id not in _album_buffer:
-            _album_buffer[mg_id] = []
-            asyncio.create_task(_process_album_buffer(client, mg_id))
-        
-        _album_buffer[mg_id].append(message)
+        is_new = cache.add_to_group(message)
+        if is_new:
+            # First message in group; wait for more
+            await asyncio.sleep(settings.ALBUM_COLLECTION_SECONDS)
+            messages = cache.pop_group(message.media_group_id)
+            if messages:
+                await _process_submission(client, user_id, messages)
+        return  # Subsequent messages in group are ignored
+
+    # Handle single message
+    await _process_submission(client, user_id, [message])
+
+
+async def _process_submission(client: Client, user_id: int, messages: list[Message]) -> None:
+    """
+    Core submission processing logic.
+
+    1. Checks for consent.
+    2. Routes to user's hub topic.
+    3. Posts moderation card.
+    4. Creates pending submission record in DB.
+    """
+    db = DatabaseManager.get_db()
+    service = SubmissionService(db)
+
+    # 1. Check consent
+    if not await service.has_consent(user_id):
+        await messages[0].reply_text(
+            "You must accept the Creator Terms of Service before submitting content. "
+            "Please use the /start command to review and accept the terms."
+        )
         return
 
-    # Single media
-    await _register_submission(client, [message])
+    # 2. Get user's hub topic
+    topic_manager = get_topic_manager()
+    topic_id = await topic_manager.get_or_create_user_topic(client, user_id)
+    
+    # NEW-07 (REG-03) FIX: Handle topic creation failure
+    if not topic_id:
+        logger.error("submission_aborted_no_topic", extra={"ctx_user_id": user_id})
+        await messages[0].reply_text(
+            "Sorry, there was an issue preparing your submission. Please try again in a moment."
+        )
+        return
 
-async def _process_album_buffer(client: Client, mg_id: str):
-    """Wait for album completion then register."""
-    await asyncio.sleep(2.0) # Buffer window
-    messages = _album_buffer.pop(mg_id, [])
-    if messages:
-        await _register_submission(client, messages)
-
-async def _register_submission(client: Client, messages: List[Message]):
-    """
-    Process, hash, and route submission to moderation topic.
-    """
-    lead_msg = messages[0]
-    user_id = lead_msg.from_user.id
-    first_name = lead_msg.from_user.first_name or "Creator"
-    
-    # Placeholder for hashing logic (Section 10.2)
-    # In full implementation, we'd download, hash, and check content_fingerprints.
-    # For now, we simulate success.
-    
-    db = DatabaseManager.get_db()
-    
-    # Create DB Record
-    submission_id = str(datetime.now().timestamp()) # Real implementation uses ObjectId
-    
-    # Notify User
-    ack = await lead_msg.reply_text(
-        "✅ <b>Submission Received</b>\n\n"
-        "Your content has been forwarded to our moderation team.\n"
-        "Status: <code>PENDING REVIEW</code>",
-        parse_mode=ParseMode.HTML
-    )
-    asyncio.create_task(_delete_after(ack, 10))
-
-    # Route to Verification Hub (Section 10.3)
-    from app.services.topic_manager import get_topic_manager
-    from app.moderation.verification_hub import post_user_info_card, forward_to_verification
-    
-    topic_mgr = get_topic_manager()
-    topic_id = await topic_mgr.get_or_create_user_topic(client, user_id)
-    
-    # 1. Post user info card (Section 10.3)
-    await post_user_info_card(
-        client=client,
-        user=lead_msg.from_user,
-        chat_id=settings.VERIFICATION_GROUP_ID,
-        topic_id=topic_id,
-    )
-    
-    # 2. Forward content with moderation buttons (Section 10.3)
-    await forward_to_verification(
-        client=client,
-        messages=messages,
-        submitter_user_id=user_id,
-        topic_id=topic_id,
-    )
-
-async def _delete_after(msg, delay):
-    await asyncio.sleep(delay)
+    # 3. Forward to hub
     try:
-        await msg.delete()
-    except Exception:
-        pass
+        hub_messages = await client.forward_messages(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            from_chat_id=user_id,
+            message_ids=[m.id for m in messages],
+            message_thread_id=topic_id,
+        )
+    except Exception as e:
+        logger.error(
+            "submission_forward_failed",
+            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id, "ctx_error": str(e)},
+        )
+        await messages[0].reply_text("Your submission could not be processed. Please try again.")
+        return
+
+    # 4. Post moderation card
+    user = messages[0].from_user
+    card = format_submission_card(
+        user.id,
+        user.full_name,
+        user.username,
+        len(messages),
+        messages[0].media.value if messages[0].media else "text",
+    )
+    try:
+        card_message = await client.send_message(
+            chat_id=settings.VERIFICATION_GROUP_ID,
+            text=card,
+            message_thread_id=topic_id,
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error(
+            "submission_card_post_failed",
+            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id, "ctx_error": str(e)},
+        )
+        # Attempt to clean up the forwarded messages if the card fails
+        try:
+            await client.delete_messages(
+                settings.VERIFICATION_GROUP_ID, [m.id for m in hub_messages]
+            )
+        except Exception:
+            pass
+        await messages[0].reply_text("Your submission could not be processed. Please try again.")
+        return
+
+    # 5. Create pending submission record
+    await service.create_pending_submission(
+        user_id=user_id,
+        messages=messages,
+        hub_topic_id=topic_id,
+        hub_card_message_id=card_message.id,
+    )
+
+    await messages[-1].reply_text("✅ Your submission has been received and is pending review.")

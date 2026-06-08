@@ -90,7 +90,6 @@ class SubscriptionService:
             grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
         subscription_id = existing.subscription_id if existing else str(uuid.uuid4())
-        package_id = plan.value
 
         merged_metadata = {
             **(existing.metadata if existing and existing.metadata else {}),
@@ -101,8 +100,8 @@ class SubscriptionService:
         sub = Subscription(
             subscription_id=subscription_id,
             user_id=user_id,
-            package_id=package_id,
             plan=plan,
+            package_id=plan.value, # A-08 FIX: Ensure package_id is still set
             status=SubscriptionStatus.ACTIVE,
             started_at=now,
             expires_at=expires_at,
