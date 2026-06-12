@@ -1,0 +1,33 @@
+From 5ef5b4cc030446cc5193fbf2e6fc6a0abd3be971 Mon Sep 17 00:00:00 2001
+From: VaultFlow Fix <fix@vaultflow.local>
+Date: Fri, 12 Jun 2026 20:02:05 +0000
+Subject: [PATCH] fix: align referrals unique index name (unique_referral_user)
+ between core/database.py and ReferralRepository to resolve
+ IndexOptionsConflict/reconcile failure
+
+---
+ app/core/database.py | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/app/core/database.py b/app/core/database.py
+index 8eadf3a..c4810ac 100644
+--- a/app/core/database.py
++++ b/app/core/database.py
+@@ -891,7 +891,13 @@ class DatabaseManager:
+             ),
+             IndexModel(
+                 [("referred_user_id", ASCENDING)],
+-                name="ref_referred_user_id_unique",
++                # NOTE: name must match app/referral/repository.py's
++                # ReferralRepository.create_indexes() index name
++                # ("unique_referral_user"). Same key pattern with a
++                # different index name causes IndexOptionsConflict (code 85)
++                # at runtime, and the reconciliation drop in
++                # ReferralRepository looks for this exact name.
++                name="unique_referral_user",
+                 unique=True,
+             ),
+             IndexModel(
+-- 
+2.43.0
+

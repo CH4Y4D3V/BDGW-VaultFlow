@@ -870,10 +870,79 @@ async def handle_menu_callbacks(client: Client, callback_query: CallbackQuery) -
 
         elif action == "submit":
             # Entry point for the content submission flow (Section 10).
+            # NOTE: previously imported a non-existent
+            # `app.handlers.submission_handler.handle_submit_menu`, which
+            # raised ImportError on every press (logged as
+            # "submission_entry_failed") and showed a generic
+            # "Submission system unavailable." alert to the user.
+            #
+            # Actual content submission is handled by the catch-all private
+            # message handler in submission_handler.py
+            # (`handle_submission`), gated by `check_and_gate_creator` /
+            # ConsentService. This menu entry just needs to show the user
+            # the right prompt for their current consent state.
             try:
-                from app.handlers.submission_handler import handle_submit_menu
-                await handle_submit_menu(client, callback_query)
-                return
+                from app.services.consent_service import (
+                    ConsentService,
+                    ATTESTATION_TEXT,
+                    ATTESTATION_VERSION,
+                    CREATOR_STATUS_SUSPENDED,
+                    CREATOR_STATUS_BANNED,
+                )
+
+                consent_service = ConsentService()
+                profile = await consent_service.get_creator_profile(user_id)
+
+                if profile and profile.get("status") == CREATOR_STATUS_SUSPENDED:
+                    text = (
+                        "🚫 Your creator account is currently <b>suspended</b>.\n\n"
+                        "Contact an admin for assistance."
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+                    ]])
+                elif profile and profile.get("status") == CREATOR_STATUS_BANNED:
+                    text = (
+                        "🚫 Your account has been <b>permanently banned</b> "
+                        "from content submission."
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+                    ]])
+                elif await consent_service.is_verified_creator(user_id):
+                    text = (
+                        "📤 <b>Submit Content</b>\n\n"
+                        "You're all set! Just send your photo, video, or text "
+                        "directly here in this chat — albums are supported too.\n\n"
+                        "Your submission will be sent for review automatically."
+                    )
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("⬅️ Back", callback_data="menu:home")
+                    ]])
+                else:
+                    text = (
+                        "📋 <b>Creator Consent Attestation Required</b>\n\n"
+                        "Before you can submit content, you must read and agree "
+                        "to the following declaration. This is a "
+                        "<b>legal attestation</b> — please read carefully.\n\n"
+                        f"<blockquote>{ATTESTATION_TEXT}</blockquote>\n\n"
+                        f"<i>Attestation version: {ATTESTATION_VERSION}</i>\n\n"
+                        "By clicking <b>✅ I Agree & Confirm</b>, you are making "
+                        "a legally binding declaration. Your Telegram identity "
+                        "will be permanently logged.\n\n"
+                        "⚠️ <b>Submitting content that violates the above is "
+                        "grounds for permanent ban and potential legal action.</b>"
+                    )
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(
+                            "✅ I Agree & Confirm",
+                            callback_data=f"consent:agree:{user_id}",
+                        )],
+                        [InlineKeyboardButton(
+                            "❌ I Do Not Agree",
+                            callback_data="consent:decline",
+                        )],
+                    ])
             except Exception as e:
                 logger.exception(
                     "submission_entry_failed",
