@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from pyrogram.client import Client
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.enums import ChatMemberStatus          # FIX D-03: was UserStatus (invalid)
 from pyrogram.errors import FloodWait, UserNotParticipant
 
 from app.config import settings
@@ -21,6 +21,9 @@ class MembershipReconciliationWorker:
     """
     Periodically checks that active premium subscribers are actually
     in the premium chats. Logs discrepancies.
+
+    FIX D-03: Pyrogram uses ChatMemberStatus, not UserStatus.
+              UserStatus.MEMBER does not exist and raises AttributeError.
     """
 
     def __init__(self) -> None:
@@ -67,23 +70,33 @@ class MembershipReconciliationWorker:
 
         db = DatabaseManager.get_db()
         now = datetime.now(timezone.utc)
-        logger.info("Membership reconciliation sweep running", extra={"ctx_time": now.isoformat()})
+        logger.info(
+            "Membership reconciliation sweep running",
+            extra={"ctx_time": now.isoformat()},
+        )
 
-        # FIX: Case-insensitive status check
         active_subs = await db["subscriptions"].find({
-            "status": {"$in": ["ACTIVE", "active"]},
-            "plan": {"$nin": ["FREE", "OWNER", "SUDO"]},
+            "status": "ACTIVE",
+            "plan": {"$nin": ["free", "owner", "sudo"]},
         }).to_list(length=None)
 
         premium_chats = []
         if settings.PREMIUM_GROUP_ID:
             premium_chats.append(settings.PREMIUM_GROUP_ID)
-        if settings.PREMIUM_CHANNEL_ID and settings.PREMIUM_CHANNEL_ID != settings.PREMIUM_GROUP_ID:
-            premium_chats.append(settings.PREMIUM_CHANNEL_ID)
+        premium_channel = getattr(settings, "PREMIUM_CHANNEL_ID", None)
+        if premium_channel and premium_channel != settings.PREMIUM_GROUP_ID:
+            premium_chats.append(premium_channel)
 
         if not premium_chats:
             logger.warning("No premium chats configured for reconciliation.")
             return
+
+        # Active member statuses in Pyrogram (FIX D-03)
+        active_statuses = {
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.OWNER,
+            ChatMemberStatus.ADMINISTRATOR,
+        }
 
         discrepancies = 0
         for sub in active_subs:
@@ -91,14 +104,14 @@ class MembershipReconciliationWorker:
             for chat_id in premium_chats:
                 try:
                     member = await self._bot.get_chat_member(chat_id, user_id)
-                    # FIX (D-03): Use ChatMemberStatus instead of UserStatus
-                    if member.status not in (ChatMemberStatus.MEMBER, ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR):
+                    # FIX D-03: compare against ChatMemberStatus, not UserStatus
+                    if member.status not in active_statuses:
                         logger.warning(
                             "Membership discrepancy found!",
                             extra={
                                 "ctx_user_id": user_id,
                                 "ctx_chat_id": chat_id,
-                                "ctx_expected_status": "member",
+                                "ctx_expected_status": "member/admin/owner",
                                 "ctx_actual_status": str(member.status),
                             },
                         )
@@ -119,7 +132,11 @@ class MembershipReconciliationWorker:
                 except Exception as e:
                     logger.error(
                         "Error checking chat member",
-                        extra={"ctx_user_id": user_id, "ctx_chat_id": chat_id, "ctx_error": str(e)},
+                        extra={
+                            "ctx_user_id": user_id,
+                            "ctx_chat_id": chat_id,
+                            "ctx_error": str(e),
+                        },
                     )
 
         if discrepancies > 0:

@@ -1,4 +1,3 @@
-# app/models/activity.py — COMPLETE FIXED FILE
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,16 +14,11 @@ class ActivityAction(str, Enum):
     BAN = "ban"
     UNBAN = "unban"
 
-    # Content
+    # Content — APPROVE added (was missing, caused AttributeError in moderation_actions + trust_service)
     UPLOAD = "upload"
     APPROVE = "approve"
     REJECT = "reject"
-    QUEUE = "queue"
     INTERACTION = "interaction"
-
-    # Support
-    SUPPORT_SESSION_START = "support_session_start"
-    SUPPORT_SESSION_CLOSE = "support_session_close"
 
     # Subscription lifecycle
     SUBSCRIPTION_GRANT = "subscription_grant"

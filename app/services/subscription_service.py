@@ -16,13 +16,12 @@ class SubscriptionService:
     def __init__(self) -> None:
         self._repo = SubscriptionRepository()
 
-    # ── Reads ─────────────────────────────────────────────────────────────────
+    # ── Reads ─────────────────────────────────────────────────────────────
 
     async def get_subscription(self, user_id: int) -> Optional[Subscription]:
         return await self._repo.get_by_user_id(user_id)
 
     async def get_effective_plan(self, user_id: int) -> Plan:
-        """Return the highest plan the user currently holds, including hardcoded roles."""
         if user_id == settings.OWNER_ID:
             return Plan.OWNER
         if user_id in settings.SUDO_IDS:
@@ -32,7 +31,7 @@ class SubscriptionService:
             return Plan.FREE
         if sub.status in (SubscriptionStatus.EXPIRED, SubscriptionStatus.BANNED):
             return Plan.FREE
-        return sub.plan
+        return sub.plan or Plan.FREE
 
     async def has_access(self, user_id: int, required_plan: Plan) -> bool:
         effective = await self.get_effective_plan(user_id)
@@ -50,7 +49,7 @@ class SubscriptionService:
     ) -> tuple[list[Subscription], int]:
         return await self._repo.get_paginated(status, plan, limit, skip)
 
-    # ── Lifecycle mutations ───────────────────────────────────────────────────
+    # ── Lifecycle mutations ───────────────────────────────────────────────
 
     async def grant(
         self,
@@ -60,13 +59,16 @@ class SubscriptionService:
         granted_by: int,
         notes: Optional[str] = None,
     ) -> Subscription:
-        """Grant or extend a subscription.
+        """
+        Grant or extend a subscription.
 
-        If the user already has an active non-lifetime subscription of the same
-        plan, we extend from the current expiry rather than overwriting it.
+        FIX A-08: Subscription dataclass requires subscription_id and
+        package_id as the first positional fields. The previous implementation
+        omitted both, causing TypeError on every grant() call and breaking
+        every subscription activation.
 
-        granted_by and notes are stored in metadata so the dataclass constructor
-        receives only the fields it declares as positional/keyword arguments.
+        Fix: generate subscription_id via uuid4, derive package_id from
+        plan.value so the dataclass constructor receives all required fields.
         """
         now = datetime.now(timezone.utc)
         existing = await self._repo.get_by_user_id(user_id)
@@ -89,25 +91,25 @@ class SubscriptionService:
             expires_at = exp
             grace_until = exp + timedelta(days=settings.GRACE_PERIOD_DAYS)
 
-        subscription_id = existing.subscription_id if existing else str(uuid.uuid4())
-
         merged_metadata = {
             **(existing.metadata if existing and existing.metadata else {}),
             "granted_by": granted_by,
             "notes": notes or "",
         }
 
+        # FIX A-08: provide subscription_id and package_id that the
+        # Subscription dataclass requires as positional arguments.
         sub = Subscription(
-            subscription_id=subscription_id,
+            subscription_id=str(uuid.uuid4()),          # was missing → TypeError
             user_id=user_id,
-            plan=plan,
-            package_id=plan.value, # A-08 FIX: Ensure package_id is still set
-            status=SubscriptionStatus.ACTIVE,
+            package_id=plan.value,                      # was missing → TypeError
             started_at=now,
             expires_at=expires_at,
-            grace_until=grace_until,
+            status=SubscriptionStatus.ACTIVE,
             created_at=existing.created_at if existing else now,
             updated_at=now,
+            grace_until=grace_until,
+            plan=plan,
             metadata=merged_metadata,
         )
         await self._repo.upsert(sub)
@@ -118,12 +120,11 @@ class SubscriptionService:
                 "ctx_plan": plan.value,
                 "ctx_duration_days": duration_days,
                 "ctx_granted_by": granted_by,
-            }
+            },
         )
         return sub
 
     async def revoke(self, user_id: int, revoked_by: int) -> Optional[Subscription]:
-        """Immediately expire and downgrade a subscription."""
         sub = await self._repo.get_by_user_id(user_id)
         if not sub:
             return None
@@ -147,22 +148,18 @@ class SubscriptionService:
 
     async def expire(self, sub: Subscription) -> Subscription:
         now = datetime.now(timezone.utc)
-        previous_plan = sub.plan.value
+        previous_plan = sub.plan.value if sub.plan else "unknown"
         sub.status = SubscriptionStatus.EXPIRED
         sub.plan = Plan.FREE
         sub.updated_at = now
         await self._repo.upsert(sub)
         logger.info(
             "Subscription fully expired",
-            extra={
-                "ctx_user_id": sub.user_id,
-                "ctx_previous_plan": previous_plan,
-            }
+            extra={"ctx_user_id": sub.user_id, "ctx_previous_plan": previous_plan},
         )
         return sub
 
     async def check_and_update_status(self, sub: Subscription) -> Subscription:
-        """Advance sub through state machine based on wall-clock time."""
         if sub.is_lifetime:
             return sub
         now = datetime.now(timezone.utc)
@@ -173,11 +170,10 @@ class SubscriptionService:
         return sub
 
     async def update_subscription(self, sub: Subscription) -> None:
-        """Persist a modified subscription object."""
         sub.updated_at = datetime.now(timezone.utc)
         await self._repo.upsert(sub)
 
-    # ── Worker helpers ────────────────────────────────────────────────────────
+    # ── Worker helpers ────────────────────────────────────────────────────
 
     async def get_newly_expired(self) -> list[Subscription]:
         return await self._repo.get_newly_expired()

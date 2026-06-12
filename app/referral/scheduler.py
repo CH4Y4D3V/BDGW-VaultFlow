@@ -10,28 +10,47 @@ logger = get_logger(__name__)
 
 
 class ReferralScheduler:
-    def __init__(self, service: ReferralService, scheduler: AsyncIOScheduler, channel_id: int) -> None:
+    def __init__(
+        self,
+        service: ReferralService,
+        scheduler: AsyncIOScheduler,
+        channel_id: int,
+    ) -> None:
         self._service = service
         self._scheduler = scheduler
+        # FIX C-06: channel_id must be MAIN_CHANNEL_ID, not VAULT_CHANNEL_ID.
+        # Referral qualification requires the referred user to join the main
+        # community channel (§16), not the vault archive channel.
+        # The caller (lifecycle.py) must pass settings.MAIN_CHANNEL_ID here.
         self._channel_id = channel_id
 
     def register_jobs(self) -> None:
         self._scheduler.add_job(
             self._qualification_job,
             trigger=IntervalTrigger(hours=1),
-            id='referral_qualification_sweep',
+            id="referral_qualification_sweep",
             misfire_grace_time=300,
             max_instances=1,
             replace_existing=True,
         )
-        logger.info('Referral qualification sweep job registered')
+        logger.info(
+            "Referral qualification sweep job registered",
+            extra={"ctx_channel_id": self._channel_id},
+        )
 
     async def _qualification_job(self) -> None:
         try:
             count = await self._service.qualify_pending_referrals(self._channel_id)
-            logger.info('referral_qualification_sweep', extra={'ctx_qualified_count': count})
+            logger.info(
+                "referral_qualification_sweep",
+                extra={"ctx_qualified_count": count, "ctx_channel_id": self._channel_id},
+            )
         except Exception as e:
-            logger.error('referral_qualification_sweep failed', extra={'ctx_error': str(e)}, exc_info=True)
+            logger.error(
+                "referral_qualification_sweep failed",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )
 
     async def stop(self) -> None:
-        logger.info('ReferralScheduler stop called')
+        logger.info("ReferralScheduler stop called")
