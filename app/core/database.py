@@ -891,7 +891,13 @@ class DatabaseManager:
             ),
             IndexModel(
                 [("referred_user_id", ASCENDING)],
-                name="ref_referred_user_id_unique",
+                # NOTE: name must match app/referral/repository.py's
+                # ReferralRepository.create_indexes() index name
+                # ("unique_referral_user"). Same key pattern with a
+                # different index name causes IndexOptionsConflict (code 85)
+                # at runtime, and the reconciliation drop in
+                # ReferralRepository looks for this exact name.
+                name="unique_referral_user",
                 unique=True,
             ),
             IndexModel(
