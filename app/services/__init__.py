@@ -1,4 +1,4 @@
-# Intentionally empty — import directly from submodules to avoid circular imports.
+# Intentionally empty â€” import directly from submodules to avoid circular imports.
 # Previously re-exported SubscriptionService and ChannelService here, but that
 # caused a circular chain:
 # callback_handler -> moderation_actions -> audit_service ->
