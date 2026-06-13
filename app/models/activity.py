@@ -35,6 +35,11 @@ class ActivityAction(str, Enum):
     # Permission
     PERMISSION_DENIED = "permission_denied"
 
+    # Support — referenced by ActivityService.log_support_session_start/close
+    # but missing here, caused AttributeError -> "support_activity_log_failed"
+    SUPPORT_SESSION_START = "support_session_start"
+    SUPPORT_SESSION_CLOSE = "support_session_close"
+
     # System
     AUDIT = "audit"
     RECONCILE = "reconcile"

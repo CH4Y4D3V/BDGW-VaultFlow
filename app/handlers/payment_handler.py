@@ -955,6 +955,28 @@ async def _process_send_details_message(
     started = await service.start_timeout(session_id, confirmed_delivery=True)
     await _fsm_clear(admin_id)
 
+    # FIX: previously the user received the raw payment-details message
+    # (via copy_message above) with no follow-up — they had no indication
+    # they were now expected to reply with their TXID to submit proof.
+    # Send the explicit "submit proof" instruction now that the session is
+    # in WAITING_TXID; handle_payment_inputs() picks up the next text
+    # message from this user as the TXID.
+    await _tg_send(
+        client.send_message(
+            chat_id=session.user_id,
+            text=(
+                "👆 <b>Payment details received above.</b>\n\n"
+                "Once you've sent the payment, reply here with your "
+                "<b>Transaction ID (TXID)</b> as a text message to submit "
+                "your proof for review."
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"pay:cancel:{session_id}"),
+            ]]),
+        )
+    )
+
     # Step 5: confirm to admin
     timeout_note = "20-minute timer started." if started else "⚠️ Timer could not start — check session."
     await _tg_send(

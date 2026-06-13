@@ -255,7 +255,6 @@ async def handle_support_accept(client, callback_query) -> None:
     result = await db["support_sessions"].update_one(
         {"user_id": user_id, "status": "PENDING"},
         {"$set": {"status": "ACTIVE", "accepted_by": admin_id, "accepted_at": datetime.now(timezone.utc)}},
-        sort=[("created_at", -1)],
     )
 
     if result.modified_count == 0:
