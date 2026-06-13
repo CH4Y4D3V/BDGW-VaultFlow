@@ -79,7 +79,6 @@ async def handle_close_command(client: Client, message: Message) -> None:
     result = await db["support_sessions"].update_one(
         {"user_id": user_id, "status": {"$in": ["PENDING", "ACTIVE"]}},
         {"$set": {"status": "CLOSED", "closed_at": now, "closed_by": message.from_user.id if message.from_user else 0}},
-        sort=[("created_at", -1)],
     )
 
     if result.modified_count == 0:

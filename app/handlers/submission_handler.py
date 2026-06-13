@@ -8,14 +8,13 @@ import asyncio
 from collections import defaultdict
 
 from pyrogram import Client, filters
-from pyrogram.enums import ParseMode
 from pyrogram.types import Message
 
 from app.config import settings
 from app.core.database import DatabaseManager
+from app.moderation.verification_hub import forward_to_verification
 from app.services.submission_service import SubmissionService
 from app.services.topic_manager import get_topic_manager
-from app.ui.submission_cards import format_submission_card
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -103,9 +102,10 @@ async def _process_submission(client: Client, user_id: int, messages: list[Messa
     """
     Core submission processing:
     1. Get/create user hub topic
-    2. Forward content to hub
-    3. Post moderation card
-    4. Create pending submission record
+    2. Forward content to hub + post moderation card (Approve NSFW /
+       Approve Premium / Reject) via verification_hub.forward_to_verification
+    3. Register pending submission (in-memory registry consumed by
+       callback_handler.handle_moderation_callback, + DB persistence)
     """
     db = DatabaseManager.get_db()
     service = SubmissionService(db)
@@ -132,18 +132,17 @@ async def _process_submission(client: Client, user_id: int, messages: list[Messa
             pass
         return
 
-    # ── Forward to hub ────────────────────────────────────────────────────────
-    try:
-        await client.forward_messages(
-            chat_id=settings.VERIFICATION_GROUP_ID,
-            from_chat_id=user_id,
-            message_ids=[m.id for m in messages],
-            message_thread_id=topic_id,
-        )
-    except Exception as e:
+    # ── Forward to hub + post moderation card (with Approve/Reject buttons) ───
+    # NOTE: previously this did its own ad-hoc client.forward_messages() +
+    # plain client.send_message(card) with NO reply_markup -- admins had no
+    # way to approve/reject. forward_to_verification() is the complete,
+    # already-built pipeline that posts the card with mod_app_nsfw /
+    # mod_app_prem / mod_reject buttons wired to handle_moderation_callback.
+    delivered = await forward_to_verification(client, messages, user_id, topic_id)
+    if not delivered:
         logger.error(
             "submission_forward_failed",
-            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id, "ctx_error": str(e)},
+            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id},
         )
         try:
             await first.reply_text("Your submission could not be processed. Please try again.")
@@ -151,40 +150,13 @@ async def _process_submission(client: Client, user_id: int, messages: list[Messa
             pass
         return
 
-    # ── Post moderation card ──────────────────────────────────────────────────
-    try:
-        media_type = first.media.value if first.media else "text"
-        card = format_submission_card(
-            user_id,
-            user.full_name if user else str(user_id),
-            user.username if user else None,
-            len(messages),
-            media_type,
-        )
-        card_message = await client.send_message(
-            chat_id=settings.VERIFICATION_GROUP_ID,
-            text=card,
-            message_thread_id=topic_id,
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logger.error(
-            "submission_card_post_failed",
-            extra={"ctx_user_id": user_id, "ctx_topic_id": topic_id, "ctx_error": str(e)},
-        )
-        try:
-            await first.reply_text("Your submission could not be processed. Please try again.")
-        except Exception:
-            pass
-        return
-
-    # ── Persist pending record ────────────────────────────────────────────────
+    # ── Persist pending record (in-memory registry + DB for restart recovery) ─
     try:
         await service.create_pending_submission(
             user_id=user_id,
             messages=messages,
             hub_topic_id=topic_id,
-            hub_card_message_id=card_message.id,
+            hub_card_message_id=0,
         )
     except Exception as e:
         logger.error(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.types import CallbackQuery, ForceReply, Message
 
@@ -36,7 +36,7 @@ async def _recover_pending_from_db(
     try:
         from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
-        pending_doc = await db[settings.PENDING_COLLECTION].find_one({"key": msg_id})
+        pending_doc = await db[settings.PENDING_COLLECTION].find_one({"first_msg_id": msg_id})
     except Exception as e:
         logger.warning(
             "_recover_pending_from_db: DB lookup failed",
@@ -47,9 +47,10 @@ async def _recover_pending_from_db(
     if not pending_doc:
         return None
 
-    chat_id = pending_doc.get("chat_id", 0)
+    submitter_user_id = pending_doc.get("user_id", 0)
+    # Private chats: chat_id == user_id (no separate chat_id field is stored)
+    chat_id = submitter_user_id
     message_ids = pending_doc.get("message_ids", [])
-    submitter_user_id = pending_doc.get("submitter_user_id", 0)
 
     if not message_ids:
         return None
@@ -225,26 +226,34 @@ async def handle_mod_reject_reason_reply(
     """
     Catches moderator's typed rejection reason and executes the reject flow.
     Section 14.5: Rejection reason is mandatory — cannot be skipped.
+
+    NOTE: this filter matches ANY reply in the hub chat, not just rejection
+    reason replies. A plain `return` here STOPS Pyrogram's dispatch chain
+    entirely (only `raise ContinuePropagation` continues to the next
+    handler), which silently swallowed admin replies meant for
+    topic_router.route_admin_reply_to_user (e.g. an admin using "Reply" to
+    respond to a user in their support topic). Every early-exit below must
+    raise ContinuePropagation, not return.
     """
     if not message.from_user or not await is_moderator(message.from_user.id):
-        return
+        raise ContinuePropagation
 
     replied_to = message.reply_to_message
     if not replied_to:
-        return
+        raise ContinuePropagation
 
     # Check if the replied-to message is our rejection reason prompt
     # (from the bot, containing "Rejection Reason Required")
     if not replied_to.from_user or not replied_to.from_user.is_bot:
-        return
+        raise ContinuePropagation
 
     if "Rejection Reason Required" not in (replied_to.text or ""):
-        return
+        raise ContinuePropagation
 
     # Find the original moderation card (the message the bot replied to)
     card_message = replied_to.reply_to_message
     if not card_message:
-        return
+        raise ContinuePropagation
 
     redis = get_redis()
     ctx_key = f"mod_reject_ctx:{card_message.chat.id}:{card_message.id}"
