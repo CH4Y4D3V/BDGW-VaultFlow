@@ -40,6 +40,20 @@ async def handle_private_message(client: Client, message: Message) -> None:
     """Catch-all for private messages — routes to support topic."""
     if not message.from_user:
         return
+
+    # FIX: route_to_support_topic() never raises ContinuePropagation, so it
+    # always consumes the dispatch (break). support_handler.py registers
+    # before takedown_handler.py (alphabetical plugin load order), so
+    # handle_takedown_fsm would never run for a user mid-takedown-flow
+    # (STATE_AWAITING_ID/REASON/LINK) -- their reply would be forwarded to
+    # the support topic instead of being processed by the takedown FSM.
+    from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
+    from pyrogram import ContinuePropagation
+
+    state, _ = await _get_fsm(message.from_user.id)
+    if state != STATE_IDLE:
+        raise ContinuePropagation
+
     await route_to_support_topic(client, message)
 
 

@@ -42,6 +42,15 @@ async def handle_submission(client: Client, message: Message) -> None:
 
     user_id = message.from_user.id
 
+    # FIX: if the user is mid-takedown-flow (STATE_AWAITING_ID/REASON/LINK),
+    # let handle_takedown_fsm process this message instead of treating it as
+    # a content submission (relevant for verified creators using /takedown).
+    from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
+    state, _ = await _get_fsm(user_id)
+    if state != STATE_IDLE:
+        from pyrogram import ContinuePropagation
+        raise ContinuePropagation
+
     # ── Check consent first ───────────────────────────────────────────────────
     db = DatabaseManager.get_db()
     service = SubmissionService(db)
