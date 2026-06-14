@@ -13,6 +13,11 @@ replaced with the finalized design. This is the source of truth
 for building, maintaining, scaling, auditing, and recreating the
 entire platform.
 
+**"MUST FETCH REPO : https://github.com/CH4Y4D3V/BDGW-VaultFlow BEFORE EVERY AUDIT AND FIX.
+THIS IS A PUBLIC REPO UNTIL HANDOVER.
+
+CLIENT HANDOVER DEADLINE IS: MAY 31, 2026"**
+**AFTER COMPLETE THE PROJECT MUST DELETE AL AI OR TEMP OR ANY UNNESSESARY FILES FROM REPO AND REPO MUST BE CLEAN TO ZIP AND SEND TO CLIENT**
 ====================================================================
 SECTION 1 — CORE PRINCIPLES
 ====================================================================
