@@ -25,7 +25,7 @@ class SubmissionService:
     """
 
     def __init__(self, db: Optional[AsyncIOMotorDatabase] = None) -> None:
-        self._db = db or DatabaseManager.get_db()
+        self._db = db if db is not None else DatabaseManager.get_db()
         self._consent = ConsentService()
         self._pipeline = MediaIngestionPipeline()
 
