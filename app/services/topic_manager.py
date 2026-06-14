@@ -522,8 +522,40 @@ async def _create_forum_topic(
     """
     for attempt in range(2):
         try:
-            topic = await bot.create_forum_topic(chat_id=chat_id, title=name)
-            return topic.id
+            from pyrogram import raw
+
+            peer = await bot.resolve_peer(chat_id)
+            r = await bot.invoke(
+                raw.functions.messages.CreateForumTopic(
+                    peer=peer,
+                    title=name,
+                    random_id=bot.rnd_id(),
+                )
+            )
+
+            # FIX: pyrofork's Client.create_forum_topic() does
+            # `types.ForumTopicCreated._parse(r.updates[1].message)` --
+            # a hardcoded index into the raw response's `updates` list.
+            # Under some server response shapes that index doesn't hold
+            # the message update, raising IndexError -- a generic
+            # Exception (NOT RPCError), which is why this hit the
+            # "Unexpected error creating forum topic" branch on EVERY
+            # call. The topic_id is the message_id of the "topic
+            # created" service message; find it by type instead.
+            topic_id: Optional[int] = None
+            for upd in getattr(r, "updates", None) or []:
+                msg = getattr(upd, "message", None)
+                msg_id = getattr(msg, "id", None)
+                if msg_id:
+                    topic_id = msg_id
+                    break
+
+            if topic_id is None:
+                raise RuntimeError(
+                    f"CreateForumTopic response contained no message update: {r!r}"
+                )
+
+            return topic_id
         except FloodWait as exc:
             wait = int(exc.value) + getattr(settings, "FLOODWAIT_EXTRA_BUFFER", 2)
             logger.warning(
