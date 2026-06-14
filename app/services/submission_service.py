@@ -119,3 +119,12 @@ def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
     if entry:
         asyncio.create_task(SubmissionService()._db[settings.PENDING_COLLECTION].delete_one({"first_msg_id": msg_id}))
     return entry
+
+async def reject_pending(msg_id: int) -> None:
+    """
+    Discard a pending submission without forwarding (called by
+    group_handler when forward_to_verification fails). Was missing
+    entirely -- group_handler's except-path raised AttributeError,
+    masking the original forward failure in logs.
+    """
+    pop_pending(msg_id)
