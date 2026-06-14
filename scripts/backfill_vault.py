@@ -196,7 +196,7 @@ async def main() -> None:
     logger.info("=" * 60)
     logger.info(f"  Destination(s)  : {DEST}")
     logger.info(f"  NSFW channel    : {settings.VAULT_CHANNEL_ID}  (VAULT_CHANNEL_ID)")
-    logger.info(f"  Premium channel : {settings.PREMIUM_CHANNEL_ID}  (PREMIUM_CHANNEL_ID)")
+    logger.info(f"  Premium channel : {getattr(settings, 'PREMIUM_CHANNEL_ID', settings.PREMIUM_GROUP_ID)}  (PREMIUM_CHANNEL_ID)")  # FIX L5-010
     logger.info(f"  MongoDB         : {settings.MONGO_URI.split('@')[-1]}")
     logger.info("=" * 60)
 
@@ -236,7 +236,7 @@ async def main() -> None:
             return
 
     if DEST in ("premium", "both"):
-        premium_id = await _resolve_channel(client, settings.PREMIUM_CHANNEL_ID, "PREMIUM_CHANNEL_ID")
+        premium_id = await _resolve_channel(client, getattr(settings, "PREMIUM_CHANNEL_ID", settings.PREMIUM_GROUP_ID), "PREMIUM_CHANNEL_ID")  # FIX L5-010
         if premium_id is None:
             await client.stop()
             await DatabaseManager.disconnect()

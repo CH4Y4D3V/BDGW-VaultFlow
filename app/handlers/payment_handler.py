@@ -632,7 +632,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     # Expiry check — delegate to service to ensure full cleanup
     if session.expires_at and datetime.now(timezone.utc) > session.expires_at:
         try:
-            from app.services.payment_timeouts import PaymentTimeoutMonitor
+            from app.payments.timeouts import PaymentTimeoutMonitor  # FIX L5-002: was wrong path
             monitor = PaymentTimeoutMonitor(service.repository)
             await monitor.expire_session(client, session.id)
         except Exception as exc:

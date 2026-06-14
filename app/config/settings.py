@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     PREMIUM_VAULT_CHANNEL_ID: int = 0
     NSFW_GROUP_ID: int = 0
     PREMIUM_GROUP_ID: int = 0
+    # FIX L5-010: PREMIUM_CHANNEL_ID referenced in 7 files via getattr but not defined.
+    # Aliased to PREMIUM_GROUP_ID as the canonical group/channel for premium members.
+    PREMIUM_CHANNEL_ID: int = Field(
+        default=0,
+        validation_alias=AliasChoices("PREMIUM_CHANNEL_ID", "PREMIUM_GROUP_ID"),
+    )
     LOG_CHANNEL_ID: int = 0
     MAIN_CHANNEL_ID: int = 0
 
