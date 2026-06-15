@@ -41,16 +41,35 @@ async def handle_private_message(client: Client, message: Message) -> None:
     if not message.from_user:
         return
 
-    # FIX: route_to_support_topic() never raises ContinuePropagation, so it
-    # always consumes the dispatch (break). support_handler.py registers
-    # before takedown_handler.py (alphabetical plugin load order), so
-    # handle_takedown_fsm would never run for a user mid-takedown-flow
-    # (STATE_AWAITING_ID/REASON/LINK) -- their reply would be forwarded to
-    # the support topic instead of being processed by the takedown FSM.
+    user_id = message.from_user.id
+
+    # BUG-2 FIX: Yield to payment handler when user is actively submitting
+    # TXID or screenshot.  Without this check the support bridge always runs
+    # first (alphabetical load order puts support_handler before payment_handler)
+    # and the TXID text gets forwarded to the hub as a support message instead
+    # of being captured as payment proof.  payment_handler.handle_payment_inputs
+    # raises ContinuePropagation when there is no matching session, so we only
+    # need to skip here; that handler takes it from there.
+    try:
+        from app.payments import get_payment_service
+        from app.payments.models import PaymentStatus
+        ps = get_payment_service()
+        active_session = await ps.get_active_session(user_id)
+        if active_session and active_session.status in (
+            PaymentStatus.WAITING_TXID,
+            PaymentStatus.WAITING_SCREENSHOT,
+        ):
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception:
+        pass  # If lookup fails, fall through to support (safe default)
+
+    # Yield to takedown FSM if user is mid-flow
     from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
     from pyrogram import ContinuePropagation
 
-    state, _ = await _get_fsm(message.from_user.id)
+    state, _ = await _get_fsm(user_id)
     if state != STATE_IDLE:
         raise ContinuePropagation
 

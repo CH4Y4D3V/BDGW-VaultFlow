@@ -111,33 +111,42 @@ class PaymentTimeoutMonitor:
                         },
                     )
 
-            # 2. Progressive warnings — in order of increasing urgency
+            # 2. Progressive warnings for the 20-minute session window.
+            #
+            # BUG-4 FIX: Previous code used cutoff = now + timedelta(minutes=25/20)
+            # which was ALWAYS true for a 20-minute session because:
+            #   expires_at = created_at + 20min
+            #   now + 25min > expires_at  →  true from the moment of creation
+            # Both the "25 min" and "20 min" reminders fired simultaneously on the
+            # very first scheduler tick after session creation.
+            #
+            # Fix: Use a TWO-SIDED range on expires_at (remaining time window):
+            #   lower_bound = now + timedelta(minutes=X - grace)   (not yet fired earlier reminder)
+            #   upper_bound = now + timedelta(minutes=X)            (at most X minutes remaining)
+            # This ensures only one warning fires per window.
+            #
+            # Schedule for 20-min sessions:
+            #   ≤10 min remaining  (10 min elapsed):  "10 minutes remaining" warning
+            #   ≤5  min remaining  (15 min elapsed):  "5 minutes remaining" URGENT
 
-            # Fires when ~25 minutes remain (5 min elapsed of 30-min window)
+            # Fires when 10 minutes or fewer remain (not already sent)
             await self._send_warnings(
                 client,
                 col,
-                cutoff=now + timedelta(minutes=25),
-                flag="warning_25min_remaining_sent",
-                text="⚠️ <b>Payment reminder:</b> Your session will expire in 25 minutes.",
-            )
-
-            # Fires when ~20 minutes remain (10 min elapsed)
-            await self._send_warnings(
-                client,
-                col,
-                cutoff=now + timedelta(minutes=20),
-                flag="warning_20min_remaining_sent",
-                text="⚠️ <b>Payment reminder:</b> Your session will expire in 20 minutes.",
-            )
-
-            # Fires when ~10 minutes remain (20 min elapsed)
-            await self._send_warnings(
-                client,
-                col,
-                cutoff=now + timedelta(minutes=10),
+                lower_cutoff=now,                           # session not yet expired
+                upper_cutoff=now + timedelta(minutes=10),   # ≤10 min remaining
                 flag="warning_10min_remaining_sent",
-                text="⚠️ <b>URGENT:</b> Your payment session will expire in 10 minutes!",
+                text="⚠️ <b>Payment reminder:</b> Your session will expire in 10 minutes.",
+            )
+
+            # Fires when 5 minutes or fewer remain (URGENT, not already sent)
+            await self._send_warnings(
+                client,
+                col,
+                lower_cutoff=now,                           # session not yet expired
+                upper_cutoff=now + timedelta(minutes=5),    # ≤5 min remaining
+                flag="warning_5min_remaining_sent",
+                text="🚨 <b>URGENT:</b> Your payment session will expire in 5 minutes!",
             )
 
         except Exception as exc:
@@ -154,26 +163,31 @@ class PaymentTimeoutMonitor:
         self,
         client: Client,
         col,
-        cutoff: datetime,
+        lower_cutoff: datetime,
+        upper_cutoff: datetime,
         flag: str,
         text: str,
     ) -> None:
         """
-        Query sessions where ``expires_at <= cutoff`` and the given flag is not yet
-        set, send the warning message, and atomically mark the flag.
+        Send a timed warning to sessions with remaining time in (lower, upper].
 
-        Per-document failures are logged but do not abort the loop — other
-        users' warnings will still be sent.
+        BUG-4 FIX: Replaced single `cutoff` with a two-sided range.
+        `lower_cutoff` excludes expired sessions and earlier warning windows.
+        `upper_cutoff` matches only sessions close enough to expiry.
 
         Args:
-            client:  Pyrogram Client instance.
-            col:     Motor collection reference for ``payment_timeouts``.
-            cutoff:  Only documents expiring at or before this datetime qualify.
-            flag:    The boolean field to check and set (idempotency guard).
-            text:    HTML-formatted warning message to send.
+            client:        Pyrogram Client instance.
+            col:           Motor collection reference for ``payment_timeouts``.
+            lower_cutoff:  Sessions expiring AFTER this datetime qualify.
+            upper_cutoff:  Sessions expiring AT OR BEFORE this datetime qualify.
+            flag:          Boolean field used as an idempotency guard.
+            text:          HTML-formatted warning message to send.
         """
         cursor = col.find({
-            "expires_at": {"$lte": cutoff},
+            "expires_at": {
+                "$gt": lower_cutoff,
+                "$lte": upper_cutoff,
+            },
             flag: {"$ne": True},
         })
         async for doc in cursor:

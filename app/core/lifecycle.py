@@ -531,6 +531,67 @@ class AppLifecycle:
             except Exception as e:
                 logger.warning("lifecycle_admin_index_failed", extra={"ctx_error": str(e)})
 
+            # ── BUG-1 FIX: Seed admins collection from ADMIN_IDS + OWNER_ID ──
+            # The admins collection starts empty on every fresh deployment.
+            # has_role() only bypasses DB for OWNER_ID; everyone else queries
+            # the collection.  Without seeding, every user in ADMIN_IDS gets
+            # "Unauthorized" on ALL button clicks.  We upsert here on every
+            # boot so that adding/removing IDs from .env takes effect on restart.
+            try:
+                from datetime import datetime, timezone as _tz
+                db = DatabaseManager.get_db()
+                now = datetime.now(_tz.utc)
+                owner_id = int(settings.OWNER_ID)
+                admin_ids = list(settings.ADMIN_IDS) if hasattr(settings, "ADMIN_IDS") else []
+
+                # Upsert OWNER record
+                await db["admins"].update_one(
+                    {"user_id": owner_id},
+                    {
+                        "$set": {
+                            "user_id": owner_id,
+                            "role": "owner",
+                            "is_active": True,
+                            "assigned_by": owner_id,
+                        },
+                        "$setOnInsert": {"assigned_at": now},
+                    },
+                    upsert=True,
+                )
+
+                # Upsert ADMIN records for every user in ADMIN_IDS
+                for admin_uid in admin_ids:
+                    uid = int(admin_uid)
+                    if uid == owner_id:
+                        continue  # already upserted as OWNER above
+                    await db["admins"].update_one(
+                        {"user_id": uid},
+                        {
+                            "$set": {
+                                "user_id": uid,
+                                "role": "admin",
+                                "is_active": True,
+                                "assigned_by": owner_id,
+                            },
+                            "$setOnInsert": {"assigned_at": now},
+                        },
+                        upsert=True,
+                    )
+
+                logger.info(
+                    "lifecycle_admins_seeded",
+                    extra={
+                        "ctx_owner_id": owner_id,
+                        "ctx_admin_count": len(admin_ids),
+                    },
+                )
+            except Exception as seed_exc:
+                logger.error(
+                    "lifecycle_admin_seeding_failed",
+                    extra={"ctx_error": str(seed_exc)},
+                )
+            # ── END BUG-1 FIX ────────────────────────────────────────────────
+
             try:
                 await ref_repo.create_indexes()
             except Exception as idx_err:

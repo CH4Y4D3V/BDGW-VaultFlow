@@ -89,36 +89,51 @@ async def _post_takedown_card_to_hub(
     reason: str,
     content_link: str,
 ) -> None:
-    topic_id: Optional[int] = getattr(settings, "HUB_TOPIC_TAKEDOWN", 0) or None
-    if not topic_id: return
+    """
+    BUG-3 FIX: Route the takedown card to the user's PERMANENT TOPIC in the
+    Verification Hub (spec §14.3), not to the legacy HUB_TOPIC_TAKEDOWN.
 
+    Previous code used `getattr(settings, "HUB_TOPIC_TAKEDOWN", 0)` which
+    is a legacy multi-topic ID from the old architecture.  Per spec §9.3,
+    every takedown request is routed into the user's permanent topic.
+    """
     user_id: int = getattr(user, "id", 0)
     full_name = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip() or "Unknown"
     username_str = f"@{user.username}" if getattr(user, "username", None) else "N/A"
-    
+
+    # Resolve user's permanent topic (creates it if missing)
+    topic_manager = get_topic_manager()
+    topic_id: Optional[int] = await topic_manager.get_or_create_user_topic(
+        client=client,
+        user_id=user_id,
+        full_name=full_name,
+    )
+
     card_text = (
         "🗑 <b>TAKEDOWN REQUEST</b>\n\n"
         f"👤 <b>User:</b> {full_name} ({username_str})\n"
         f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
         f"📝 <b>Reason:</b> {reason}\n"
         f"🔗 <b>Link:</b> {content_link}\n"
-        f"🆔 <b>Record:</b> <code>{record_id}</code>"
+        f"🕐 <b>Record ID:</b> <code>{record_id}</code>"
     )
 
-    # FIX (B-06): Change button to 'Accept' (manual delete confirmation)
     buttons = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Accept", callback_data=f"takedown:accept:{record_id}"),
+            InlineKeyboardButton("✅ Approve & Delete", callback_data=f"takedown:accept:{record_id}"),
             InlineKeyboardButton("❌ Reject", callback_data=f"takedown:reject:{record_id}"),
         ]
     ])
+
+    kwargs: dict = {"reply_markup": buttons}
+    if topic_id:
+        kwargs["message_thread_id"] = topic_id
 
     await _send_with_retry(
         client,
         chat_id=settings.VERIFICATION_GROUP_ID,
         text=card_text,
-        reply_markup=buttons,
-        message_thread_id=topic_id
+        **kwargs,
     )
 
 async def _resolve_content_id_or_link(text: str) -> Optional[str]:
@@ -148,31 +163,35 @@ async def _delete_after(msg: Message, delay: int = 10):
 
 @Client.on_message(filters.command("takedown") & filters.private)
 async def handle_takedown_start(client: Client, message: Message) -> None:
+    """
+    BUG-3 FIX: Reordered to match spec §14.2 exactly.
+
+    Spec order:
+      Step 1: "What is your reason for removal?" (free text, mandatory)
+      Step 2: "Send the link or reference to the content." (any URL, mandatory)
+
+    Previous code asked for Content ID/DB lookup first, which (a) violated the
+    spec order and (b) rejected any valid t.me link not already in the vault DB,
+    meaning users could never successfully submit a takedown.
+    """
     user_id = message.from_user.id
     redis = get_redis()
     if await redis.exists(f"pay_session:{user_id}"):
         await message.reply_text("Active payment session detected. Please complete it first.")
         return
 
-    parts = message.text.split(None, 1)
-    if len(parts) > 1:
-        content_id = await _resolve_content_id_or_link(parts[1])
-        if not content_id:
-            await message.reply_text("❌ Invalid Content ID or Link.")
-            return
+    # Clear any stale state before starting fresh
+    await _set_fsm(user_id, STATE_IDLE, {})
 
-        db = DatabaseManager.get_db()
-        reported = await db["takedown_requests"].find_one({"content_id": content_id, "reported_by": user_id, "status": "pending"})
-        if reported:
-            await message.reply_text("⏳ Already Under Review.")
-            return
-
-        await _set_fsm(user_id, STATE_AWAITING_REASON, {"content_id": content_id})
-        await message.reply_text(f"📝 Reporting: <code>{content_id}</code>. Please send reason.", parse_mode=ParseMode.HTML)
-        return
-
-    await _set_fsm(user_id, STATE_AWAITING_ID, {})
-    await message.reply_text("⚖️ <b>Takedown Request</b>\n\nProvide Content ID or Link.", parse_mode=ParseMode.HTML)
+    # Step 1: Ask for REASON first (spec §14.2 Step 1)
+    await _set_fsm(user_id, STATE_AWAITING_REASON, {})
+    await message.reply_text(
+        "⚖️ <b>Takedown Request</b>\n\n"
+        "📝 <b>Step 1 of 2</b>\n"
+        "What is your reason for removal? Please describe why this content should be taken down.\n\n"
+        "<i>Send /cancel to abort at any time.</i>",
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @Client.on_message(filters.command("cancel") & filters.private)
@@ -186,37 +205,94 @@ async def handle_takedown_cancel(client: Client, message: Message) -> None:
 
 @Client.on_message(filters.private & ~filters.command(["takedown", "cancel", "start", "help"]))
 async def handle_takedown_fsm(client: Client, message: Message) -> None:
-    if not message.from_user: return
+    """
+    BUG-3 FIX: FSM now follows spec §14.2 exactly:
+      STATE_AWAITING_REASON → collect free-text reason
+      STATE_AWAITING_LINK   → collect any URL or reference (no DB lookup required)
+
+    Previous code had STATE_AWAITING_ID (DB vault lookup) which rejected any
+    valid t.me link not already in the vault, making takedowns impossible.
+    Link validation now accepts any non-empty text — the admin reviews it.
+    """
+    if not message.from_user:
+        return
     user_id = message.from_user.id
     redis = get_redis()
-    if await redis.exists(f"pay_session:{user_id}"): return
+    if await redis.exists(f"pay_session:{user_id}"):
+        return
     state, data = await _get_fsm(user_id)
-    if state == STATE_IDLE: raise ContinuePropagation
+    if state == STATE_IDLE:
+        raise ContinuePropagation
 
-    if state == STATE_AWAITING_ID:
-        content_id = await _resolve_content_id_or_link(message.text or "")
-        if not content_id:
-            await message.reply_text("❌ Invalid Content ID or Link.")
-            return
-        data["content_id"] = content_id
-        await _set_fsm(user_id, STATE_AWAITING_REASON, data)
-        await message.reply_text("📝 Please send reason.")
-        return
-
+    # ── Step 1: Collect REASON (spec §14.2 Step 1) ───────────────────────────
     if state == STATE_AWAITING_REASON:
-        data["reason"] = (message.text or "").strip()
+        reason = (message.text or "").strip()
+        if not reason:
+            await message.reply_text("❌ Please provide a reason as text.")
+            return
+
+        data["reason"] = reason
         await _set_fsm(user_id, STATE_AWAITING_LINK, data)
-        await message.reply_text("🔗 Please send proof link.")
+        await message.reply_text(
+            "🔗 <b>Step 2 of 2</b>\n\n"
+            "Send the link or reference to the content you want removed.\n"
+            "(e.g. <code>https://t.me/c/...</code> or any message link)\n\n"
+            "<i>Send /cancel to abort.</i>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
+    # ── Step 2: Collect LINK (spec §14.2 Step 2) ─────────────────────────────
     if state == STATE_AWAITING_LINK:
-        data["link"] = (message.text or "").strip()
+        # BUG-3 FIX: Accept any non-empty text as the link/reference.
+        # The previous code did a DB vault lookup and rejected valid URLs that
+        # hadn't been archived yet (e.g. t.me/c/2908207184/2356 → "Invalid").
+        # Admins review the link manually, so no DB validation is needed here.
+        content_link = (message.text or "").strip()
+        if not content_link:
+            await message.reply_text("❌ Please send the content link or reference.")
+            return
+
         await _set_fsm(user_id, STATE_IDLE, {})
-        full_reason = f"Reason: {data['reason']}\nProof: {data['link']}"
-        record_id = await _takedown_service.submit_report(content_id=data["content_id"], reported_by=user_id, reason=full_reason, report_type="takedown")
-        await message.reply_text("✅ Request Submitted.")
-        asyncio.create_task(_post_takedown_card_to_hub(client, message.from_user, record_id, data["reason"], data["link"]))
+
+        # Save to DB
+        db = DatabaseManager.get_db()
+        from datetime import datetime, timezone
+        record = {
+            "user_id": user_id,
+            "reason": data.get("reason", ""),
+            "content_link": content_link,
+            "status": "PENDING",
+            "submitted_at": datetime.now(timezone.utc),
+            "reviewed_at": None,
+            "reviewed_by": None,
+            "rejection_reason": None,
+        }
+        result = await db["takedown_requests"].insert_one(record)
+        record_id = str(result.inserted_id)
+
+        await message.reply_text(
+            "✅ <b>Your takedown request has been submitted.</b>\n\n"
+            "Our team will review it shortly and notify you of the outcome.",
+            parse_mode=ParseMode.HTML,
+        )
+
+        # Route card to user's permanent topic in the hub (spec §14.3)
+        asyncio.create_task(
+            _post_takedown_card_to_hub(
+                client,
+                message.from_user,
+                record_id,
+                data.get("reason", ""),
+                content_link,
+            )
+        )
         return
+
+    # Stale STATE_AWAITING_ID from old code — clear it
+    if state == STATE_AWAITING_ID:
+        await _set_fsm(user_id, STATE_IDLE, {})
+        raise ContinuePropagation
 
 
 # ── Admin: Accept ─────────────────────────────────────────────────────────────
