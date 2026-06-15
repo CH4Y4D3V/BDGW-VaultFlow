@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, StopPropagation, filters
 from pyrogram.types import Message
 
 from app.config import settings
@@ -48,25 +48,39 @@ async def handle_submission(client: Client, message: Message) -> None:
     from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
     state, _ = await _get_fsm(user_id)
     if state != STATE_IDLE:
-        from pyrogram import ContinuePropagation
         raise ContinuePropagation
 
     # ── Check consent first ───────────────────────────────────────────────────
     db = DatabaseManager.get_db()
     service = SubmissionService(db)
 
-    if not await service.has_consent(user_id):
-        # Consent gate handled by creator_onboarding.py — raise to propagate
-        from pyrogram import ContinuePropagation
+    try:
+        user_has_consent = await service.has_consent(user_id)
+    except Exception as consent_err:
+        # Any DB/network error during consent check must NOT silently route to
+        # support. Log it and tell the user to try again.
+        logger.error(
+            "submission_consent_check_failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(consent_err)},
+        )
+        await message.reply_text(
+            "⚠️ There was a temporary error checking your creator status. "
+            "Please try again in a moment."
+        )
+        raise StopPropagation
+
+    if not user_has_consent:
+        # Consent gate handled by creator_onboarding.py — pass to next handler
         raise ContinuePropagation
 
     # ── Media group (album) buffering ─────────────────────────────────────────
     if message.media_group_id:
         await _handle_album_message(client, message, user_id)
-        return
+        raise StopPropagation  # prevent support handler from also firing
 
     # ── Single message ────────────────────────────────────────────────────────
     await _process_submission(client, user_id, [message])
+    raise StopPropagation  # prevent support handler from also firing
 
 
 async def _handle_album_message(client: Client, message: Message, user_id: int) -> None:

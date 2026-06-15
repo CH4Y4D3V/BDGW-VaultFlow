@@ -8,7 +8,7 @@ import asyncio
 import random
 from datetime import datetime, timezone
 
-from pyrogram import Client, filters
+from pyrogram import Client, ContinuePropagation, StopPropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import Message
@@ -43,13 +43,12 @@ async def handle_private_message(client: Client, message: Message) -> None:
 
     user_id = message.from_user.id
 
-    # BUG-2 FIX: Yield to payment handler when user is actively submitting
-    # TXID or screenshot.  Without this check the support bridge always runs
-    # first (alphabetical load order puts support_handler before payment_handler)
-    # and the TXID text gets forwarded to the hub as a support message instead
-    # of being captured as payment proof.  payment_handler.handle_payment_inputs
-    # raises ContinuePropagation when there is no matching session, so we only
-    # need to skip here; that handler takes it from there.
+    # ── Gate 1: yield to payment handler when user is actively submitting
+    # TXID or screenshot.
+    # NOTE: ContinuePropagation MUST be imported at module level (not inside
+    # the function). The previous fix had it imported on line 70 but used on
+    # line 62 — Python raised NameError which was silently swallowed by the
+    # bare `except Exception: pass`, making the gate completely non-functional.
     try:
         from app.payments import get_payment_service
         from app.payments.models import PaymentStatus
@@ -63,17 +62,31 @@ async def handle_private_message(client: Client, message: Message) -> None:
     except ContinuePropagation:
         raise
     except Exception:
-        pass  # If lookup fails, fall through to support (safe default)
+        pass  # DB hiccup — fall through to support (safe default)
 
-    # Yield to takedown FSM if user is mid-flow
-    from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
-    from pyrogram import ContinuePropagation
+    # ── Gate 2: yield to takedown FSM if user is mid-flow
+    try:
+        from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
+        state, _ = await _get_fsm(user_id)
+        if state != STATE_IDLE:
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception:
+        pass  # FSM lookup failure — fall through to support
 
-    state, _ = await _get_fsm(user_id)
-    if state != STATE_IDLE:
-        raise ContinuePropagation
+    # ── Gate 3: yield to submission handler for media/content
+    # submission_handler registers at the same group (0) but BEFORE
+    # support_handler alphabetically, so it runs first. If it raised
+    # ContinuePropagation (no consent), we still catch here. If it handled
+    # the message successfully, Pyrogram breaks the group loop and we
+    # never run. This gate is a safety net for text-only messages that slip
+    # through submission (which filters on media|text).
 
     await route_to_support_topic(client, message)
+    # Raise StopPropagation to prevent takedown_handler or any later handler
+    # in the same group from also processing this message.
+    raise StopPropagation
 
 
 # ─── Admin-Facing Handlers ──────────────────────────────────────────────────

@@ -220,7 +220,18 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                     extra={"ctx_user_id": user_id, "ctx_error": str(e)},
                 )
 
-            # 6b. Payment auto-advance: PENDING_DETAILS → AWAITING_PAYMENT (non-fatal)
+            # 6b. Payment auto-advance: when admin sends payment details directly
+            # in the topic (not via the FSM button), advance the session from
+            # WAITING_PAYMENT_DETAILS → WAITING_TXID and start the 20-min timer.
+            #
+            # BUG FIX: previous code checked PaymentStatus.PENDING_DETAILS and
+            # advanced to PaymentStatus.AWAITING_PAYMENT. Neither of these is
+            # the status actually used by the payment service:
+            #   - Sessions are created with status WAITING_PAYMENT_DETAILS
+            #   - handle_payment_inputs expects WAITING_TXID or WAITING_SCREENSHOT
+            # The wrong status meant the auto-advance never triggered, the session
+            # stayed in WAITING_PAYMENT_DETAILS, and when the user sent their TXID
+            # the payment handler raised ContinuePropagation → support caught it.
             try:
                 from app.payments import get_payment_service
                 from app.payments.models import PaymentStatus
@@ -228,18 +239,32 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                 payment_service = get_payment_service()
                 session = await payment_service.get_active_session(user_id)
 
-                if session and session.status == PaymentStatus.PENDING_DETAILS:
-                    await payment_service.update_status(
-                        session.id, PaymentStatus.AWAITING_PAYMENT
+                if session and session.status == PaymentStatus.WAITING_PAYMENT_DETAILS:
+                    advanced = await payment_service.update_status(
+                        session.id, PaymentStatus.WAITING_TXID
                     )
-                    await payment_service.start_timeout(session.id)
-                    await _send_to_hub(
-                        client=client,
-                        chat_id=message.chat.id,
-                        text="✅ <b>Payment session activated</b>. User has 20 minutes to pay.",
-                        thread_id=thread_id,
-                        reply_to=message.id,
-                    )
+                    if advanced:
+                        await payment_service.start_timeout(
+                            session.id, confirmed_delivery=True
+                        )
+                        # Send user the "submit your TXID" prompt
+                        await client.send_message(
+                            chat_id=user_id,
+                            text=(
+                                "👆 <b>Payment details received above.</b>\n\n"
+                                "Once you've sent the payment, reply here with your "
+                                "<b>Transaction ID (TXID)</b> as a text message to "
+                                "submit your proof for review."
+                            ),
+                            parse_mode="html",
+                        )
+                        await _send_to_hub(
+                            client=client,
+                            chat_id=message.chat.id,
+                            text="✅ <b>Payment session activated.</b> User has 20 minutes to submit TXID.",
+                            thread_id=thread_id,
+                            reply_to=message.id,
+                        )
             except Exception as e:
                 logger.warning(
                     "route_admin_reply: payment auto-advance failed",
