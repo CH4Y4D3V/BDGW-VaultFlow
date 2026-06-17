@@ -946,11 +946,37 @@ async def _process_send_details_message(
         return
 
     # Steps 2–4: advance state (all DB writes before any more Telegram calls)
-    await service.update_status(
+    #
+    # FIX (defensive hardening, post root-cause fix to ALLOWED_TRANSITIONS):
+    # update_status() can legitimately return False if the transition table
+    # ever rejects this move again in the future (e.g. a future edit
+    # reintroduces a gap). Previously this return value was discarded
+    # entirely — the code proceeded to start the timer and tell the user to
+    # submit a TXID even when the underlying status never actually changed,
+    # producing a session permanently stuck while lying to the user about
+    # what to do next. Now we abort loudly and visibly to the admin instead.
+    advanced = await service.update_status(
         session_id,
         PaymentStatus.WAITING_TXID,
         payment_method=session.payment_method,
     )
+    if not advanced:
+        await _fsm_clear(admin_id)
+        await _tg_send(
+            message.reply(
+                f"❌ <b>Internal error:</b> could not advance payment session "
+                f"<code>{session_id}</code> to WAITING_TXID. The session status "
+                f"transition was rejected. Payment details were already sent to "
+                f"the user, but they will NOT be prompted for a TXID. "
+                f"Please escalate to the developer — this should never happen.",
+                parse_mode=ParseMode.HTML,
+            )
+        )
+        logger.error(
+            "payment_status_advance_failed_after_delivery",
+            extra={"ctx_session": session_id, "ctx_user": session.user_id, "ctx_admin": admin_id},
+        )
+        raise StopPropagation
     # B-18 FIX: Start timer ONLY after confirmed delivery
     started = await service.start_timeout(session_id, confirmed_delivery=True)
     await _fsm_clear(admin_id)

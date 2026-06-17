@@ -50,6 +50,35 @@ _MAX_RETRIES = 3
 _consent_service = ConsentService()
 
 
+def _resolve_vault_channel_id(dest: str) -> int:
+    """
+    Resolve the correct vault CHANNEL ID for a given moderation destination.
+
+    ROOT CAUSE FIX (spec Section 11 — "Content must NEVER cross between
+    vaults... There is no shared or generic vault"): archive_to_vault()
+    previously hardcoded settings.VAULT_CHANNEL_ID for every single copy
+    operation regardless of dest, meaning ALL approved content — NSFW and
+    Premium alike — was always copied into the same legacy generic channel,
+    in direct violation of the spec's strict separation rule. Premium-vault
+    content was never actually reaching PREMIUM_VAULT_CHANNEL_ID at all.
+
+    Args:
+        dest: ``ModerationDestination.NSFW.value`` ("nsfw") or
+              ``ModerationDestination.PREMIUM.value`` ("premium").
+
+    Returns:
+        The configured NSFW or Premium vault channel ID. Falls back to the
+        legacy ``VAULT_CHANNEL_ID`` only if the destination-specific channel
+        is not configured (0), preserving backward compatibility for
+        deployments that haven't set the dedicated IDs yet.
+    """
+    if dest == ModerationDestination.NSFW.value:
+        return settings.NSFW_VAULT_CHANNEL_ID or settings.VAULT_CHANNEL_ID
+    if dest == ModerationDestination.PREMIUM.value:
+        return settings.PREMIUM_VAULT_CHANNEL_ID or settings.VAULT_CHANNEL_ID
+    return settings.VAULT_CHANNEL_ID
+
+
 # ── Destination helpers ───────────────────────────────────────────────────────
 
 def _destination_group_id(dest: str) -> int:
@@ -411,6 +440,11 @@ async def archive_to_vault(
     vault_col = db[settings.VAULT_COLLECTION]
     now = datetime.now(timezone.utc)
 
+    # ROOT CAUSE FIX (spec Section 11): resolve the destination-specific
+    # vault channel ONCE here, instead of hardcoding settings.VAULT_CHANNEL_ID
+    # at every copy_message/copy_media_group call site below.
+    target_vault_channel_id = _resolve_vault_channel_id(dest)
+
     logger.info(
         "vault_insert_started",
         extra={
@@ -430,7 +464,7 @@ async def archive_to_vault(
             for attempt in range(_MAX_RETRIES):
                 try:
                     copied_messages = await client.copy_media_group(
-                        chat_id=settings.VAULT_CHANNEL_ID,
+                        chat_id=target_vault_channel_id,
                         from_chat_id=messages[0].chat.id,
                         message_id=messages[0].id,
                     )
@@ -467,10 +501,10 @@ async def archive_to_vault(
 
     # Individual copy (non-album or album fallback)
     if not copied_messages:
-        if not settings.VAULT_CHANNEL_ID:
+        if not target_vault_channel_id:
             logger.error(
-                "VAULT_CHANNEL_ID not configured — cannot archive to vault",
-                extra={"ctx_submitter": submitter_user_id},
+                "vault channel not configured for destination — cannot archive to vault",
+                extra={"ctx_submitter": submitter_user_id, "ctx_dest": dest},
             )
             return []
 
@@ -479,7 +513,7 @@ async def archive_to_vault(
             for attempt in range(_MAX_RETRIES):
                 try:
                     copied_msg = await client.copy_message(
-                        chat_id=settings.VAULT_CHANNEL_ID,
+                        chat_id=target_vault_channel_id,
                         from_chat_id=msg.chat.id,
                         message_id=msg.id,
                     )
@@ -574,7 +608,7 @@ async def archive_to_vault(
                 "source_chat_id": str(msg.chat.id),
                 "source_message_id": msg.id,
                 "vault_message_id": vault_msg_id if vault_msg_id else None,
-                "vault_channel_id": str(settings.VAULT_CHANNEL_ID) if vault_msg_id else None,
+                "vault_channel_id": str(target_vault_channel_id) if vault_msg_id else None,
                 "media_group_id": msg.media_group_id,
                 "album_sequence_index": i if msg.media_group_id else None,
                 "media_type": media_type_str,
@@ -684,6 +718,19 @@ async def enqueue_for_distribution(
     watermark_config = _get_watermark_config(dest)
     watermark_required = watermark_config is not None
 
+    # ROOT CAUSE FIX (spec Section 11 / distribution-side counterpart to the
+    # archive_to_vault fix above): this previously hardcoded
+    # settings.VAULT_CHANNEL_ID into every QueueJob's vault_chat_id field,
+    # regardless of dest. After the archive_to_vault fix, Premium-destination
+    # content is correctly copied into PREMIUM_VAULT_CHANNEL_ID, but the
+    # delivery worker reads `vault_chat_id` from THIS job document to know
+    # which channel to copy the message FROM when distributing to the target
+    # group. A mismatched vault_chat_id means the worker looks for
+    # vault_message_id inside the WRONG channel — the message simply isn't
+    # there, the copy fails, and approved content never reaches its target
+    # group even though it sits correctly archived in the vault.
+    resolved_vault_chat_id = _resolve_vault_channel_id(dest)
+
     now = datetime.now(timezone.utc)
     effective_execute_after = execute_after if execute_after is not None else now
     deadline = now + timedelta(hours=settings.QUEUE_DEADLINE_HOURS)
@@ -710,7 +757,7 @@ async def enqueue_for_distribution(
             content_id=content_id,
             source_channel_id=source_channel_id,
             source_message_id=msg.id,
-            vault_chat_id=settings.VAULT_CHANNEL_ID,
+            vault_chat_id=resolved_vault_chat_id,
             vault_message_id=vault_msg_id,
             media_group_id=group_id,
             target_channel_ids=[str(target_group_id)],

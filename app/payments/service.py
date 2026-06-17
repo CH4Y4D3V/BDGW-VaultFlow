@@ -31,31 +31,44 @@ SESSION_TIMEOUT_MINUTES = 20
 
 _MAX_FLOOD_WAIT_SECONDS = 60
 
-# --- GAP 1 FIX: Correct FSM transitions ---
+# --- ROOT CAUSE FIX (confirmed via log cross-reference + code trace): ---
+# This table previously modeled a DIFFERENT, abandoned payment lifecycle
+# (REQUESTED -> PENDING_DETAILS -> AWAITING_PAYMENT -> WAITING_SCREENSHOT ->
+# SUBMITTED -> UNDER_REVIEW) while every actual handler in this codebase
+# (_process_send_details_message, handle_payment_inputs, get_active_session)
+# uses a DIFFERENT lifecycle:
+#   WAITING_PAYMENT_DETAILS -> WAITING_TXID -> WAITING_SCREENSHOT -> UNDER_REVIEW
+#
+# REQUESTED, PENDING_DETAILS, AWAITING_PAYMENT are never set by ANY code path
+# outside this table (confirmed via grep across the entire codebase) — they
+# are dead legacy enum values.  WAITING_TXID was a key state used everywhere
+# else but was completely ABSENT from this table, meaning
+# WAITING_PAYMENT_DETAILS -> WAITING_TXID was always rejected:
+# update_status() returned False, logged "payment_state_transition_rejected",
+# and every caller ignored that return value, so the user was told to send
+# their TXID while the session silently stayed stuck at WAITING_PAYMENT_DETAILS
+# forever. When the user then sent their TXID, handle_payment_inputs found the
+# session not in (WAITING_TXID, WAITING_SCREENSHOT) and yielded — which is why
+# every TXID ended up routed to support instead of being captured.
+#
+# This table now reflects the REAL lifecycle. Legacy states are kept as valid
+# transitions defensively (in case any old session document still exists with
+# one of those statuses), but are no longer load-bearing for new sessions.
 ALLOWED_TRANSITIONS = {
+    # ── Real, active lifecycle ───────────────────────────────────────────────
     PaymentStatus.WAITING_PAYMENT_DETAILS: {
-        PaymentStatus.REQUESTED,
+        PaymentStatus.WAITING_TXID,       # admin sends details -> THE missing link
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
     },
-    PaymentStatus.REQUESTED: {
-        PaymentStatus.PENDING_DETAILS,
-        PaymentStatus.CANCELLED,
-        PaymentStatus.EXPIRED,
-    },
-    PaymentStatus.PENDING_DETAILS: {
-        PaymentStatus.AWAITING_PAYMENT,
-        PaymentStatus.REQUESTED,  # Allow cancel send
-        PaymentStatus.CANCELLED,
-        PaymentStatus.EXPIRED,
-    },
-    PaymentStatus.AWAITING_PAYMENT: {
-        PaymentStatus.WAITING_SCREENSHOT,
+    PaymentStatus.WAITING_TXID: {
+        PaymentStatus.WAITING_SCREENSHOT, # user submits TXID text
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
     },
     PaymentStatus.WAITING_SCREENSHOT: {
-        PaymentStatus.SUBMITTED,
+        PaymentStatus.UNDER_REVIEW,       # real flow: handle_payment_inputs goes direct to UNDER_REVIEW
+        PaymentStatus.SUBMITTED,          # legacy path kept valid (no-op for new sessions)
         PaymentStatus.CANCELLED,
         PaymentStatus.EXPIRED,
     },
@@ -65,12 +78,35 @@ ALLOWED_TRANSITIONS = {
     },
     PaymentStatus.UNDER_REVIEW: {
         PaymentStatus.PROCESSING,
+        PaymentStatus.APPROVED,           # approve_payment() bypasses this table directly,
+                                           # but allow it here too for defensive/manual calls
         PaymentStatus.REJECTED,
+        PaymentStatus.CANCELLED,
     },
     PaymentStatus.PROCESSING: {
         PaymentStatus.APPROVED,
         PaymentStatus.REJECTED,
-        PaymentStatus.UNDER_REVIEW,
+        PaymentStatus.UNDER_REVIEW,       # reset path if processing crashes mid-way
+    },
+
+    # ── Legacy/dead states — kept valid only so an old stuck document never
+    # hard-fails an admin action. No new session is ever created in these
+    # states (confirmed: zero non-table references in the codebase). ────────
+    PaymentStatus.REQUESTED: {
+        PaymentStatus.PENDING_DETAILS,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+    },
+    PaymentStatus.PENDING_DETAILS: {
+        PaymentStatus.AWAITING_PAYMENT,
+        PaymentStatus.REQUESTED,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
+    },
+    PaymentStatus.AWAITING_PAYMENT: {
+        PaymentStatus.WAITING_SCREENSHOT,
+        PaymentStatus.CANCELLED,
+        PaymentStatus.EXPIRED,
     },
 }
 
@@ -557,17 +593,51 @@ class PaymentService:
                     extra={"ctx_count": reset_count},
                 )
 
+            # ROOT CAUSE FIX (spec Section 25 — restart safety): this list
+            # previously only included AWAITING_PAYMENT (a dead legacy status
+            # that never has real sessions in it), WAITING_SCREENSHOT, and
+            # UNDER_REVIEW. It was missing WAITING_PAYMENT_DETAILS and
+            # WAITING_TXID — the two statuses every real session actually
+            # spends most of its life in — meaning a restart during either of
+            # those phases would silently drop the session's timeout timer
+            # entirely, with no expiry enforcement and no recovery. Also added
+            # SUBMITTED and PROCESSING defensively for the same reason.
             active_statuses = [
-                PaymentStatus.AWAITING_PAYMENT.value,
+                PaymentStatus.WAITING_PAYMENT_DETAILS.value,
+                PaymentStatus.WAITING_TXID.value,
                 PaymentStatus.WAITING_SCREENSHOT.value,
+                PaymentStatus.SUBMITTED.value,
                 PaymentStatus.UNDER_REVIEW.value,
+                PaymentStatus.PROCESSING.value,
+                PaymentStatus.AWAITING_PAYMENT.value,  # legacy, kept defensively
             ]
 
             # Use a public repository method rather than accessing _collection directly
             active_sessions = await self.repository.get_sessions_by_statuses(active_statuses)
 
+            # Statuses that legitimately carry a 20-minute timeout window per
+            # spec Section 7.4. WAITING_PAYMENT_DETAILS has NO timer by
+            # design — the clock starts only after confirmed delivery — and
+            # SUBMITTED/PROCESSING are momentary transitional states, not
+            # user-facing timeboxes. Granting them a fresh timer on restart
+            # would be a NEW bug, not a fix, so they are logged for
+            # visibility only and otherwise left untouched.
+            _timed_statuses = {
+                PaymentStatus.WAITING_TXID.value,
+                PaymentStatus.WAITING_SCREENSHOT.value,
+                PaymentStatus.UNDER_REVIEW.value,
+                PaymentStatus.AWAITING_PAYMENT.value,
+            }
+
             now = datetime.now(timezone.utc)
             for session in active_sessions:
+                if session.status.value not in _timed_statuses:
+                    logger.info(
+                        "resume_active_sessions: untimed session found, no timer needed",
+                        extra={"ctx_payment_id": session.id, "ctx_status": session.status.value},
+                    )
+                    continue
+
                 if not session.expires_at:
                     await self.start_timeout(session.id)
                     continue
