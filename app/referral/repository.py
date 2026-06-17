@@ -64,39 +64,76 @@ class ReferralRepository:
     @staticmethod
     async def _safe_create_indexes(collection, indexes: list, label: str) -> None:
         """
-        Attempt to create indexes one by one. On IndexOptionsConflict (name already exists
-        with different options, or same options under a different name), drop
-        conflicting index and retry.
+        Attempt to create indexes one by one.
+
+          - IndexOptionsConflict (85): an index with this exact name already
+            exists with different options. Drop it by name and recreate.
+          - IndexKeySpecsConflict (86): an index on the same key pattern
+            already exists under a DIFFERENT name (e.g. created by a prior
+            deployment/migration under an older name). Find that index by
+            matching its key pattern, drop it by its actual name, then
+            recreate under the new canonical name.
         """
+        from app.utils.logger import get_logger
+        logger = get_logger(__name__)
+
         for index in indexes:
             idx_name = index.document.get("name")
+            idx_key = index.document.get("key")
             try:
                 await collection.create_indexes([index])
             except OperationFailure as e:
-                if e.code == 85:  # IndexOptionsConflict
+                if e.code == 85:  # IndexOptionsConflict — same name, different options
                     try:
-                        from app.utils.logger import get_logger
-                        get_logger(__name__).warning(
+                        logger.warning(
                             f"IndexOptionsConflict for {idx_name} on {label}, dropping and recreating."
                         )
                         # We try to drop by name
                         await collection.drop_index(idx_name)
                         await collection.create_indexes([index])
                     except Exception as retry_err:
-                        from app.utils.logger import get_logger
-                        get_logger(__name__).error(
+                        logger.error(
                             f"Failed to reconcile index {idx_name} for {label}",
                             extra={"ctx_error": str(retry_err)},
                         )
+                elif e.code == 86:  # IndexKeySpecsConflict — same keys, different name
+                    try:
+                        existing_indexes = await collection.list_indexes().to_list(length=100)
+                        conflicting_name = None
+                        for existing_idx in existing_indexes:
+                            if (
+                                existing_idx.get("key") == idx_key
+                                and existing_idx.get("name") != idx_name
+                            ):
+                                conflicting_name = existing_idx.get("name")
+                                break
+
+                        if conflicting_name:
+                            logger.warning(
+                                f"IndexKeySpecsConflict for {idx_name} on {label} — "
+                                f"dropping conflicting index '{conflicting_name}' "
+                                f"(same keys, old name) and recreating."
+                            )
+                            await collection.drop_index(conflicting_name)
+                            await collection.create_indexes([index])
+                        else:
+                            logger.error(
+                                f"IndexKeySpecsConflict for {idx_name} on {label} "
+                                f"but no conflicting index found by key pattern.",
+                                extra={"ctx_error": str(e)},
+                            )
+                    except Exception as retry_err:
+                        logger.error(
+                            f"Failed to reconcile index {idx_name} for {label} (code 86)",
+                            extra={"ctx_error": str(retry_err)},
+                        )
                 else:
-                    from app.utils.logger import get_logger
-                    get_logger(__name__).error(
+                    logger.error(
                         f"Index creation failed for {idx_name} on {label}",
                         extra={"ctx_error": str(e), "ctx_code": e.code},
                     )
             except Exception as ex:
-                from app.utils.logger import get_logger
-                get_logger(__name__).error(
+                logger.error(
                     f"Unexpected error creating index {idx_name} on {label}",
                     extra={"ctx_error": str(ex)},
                 )

@@ -118,10 +118,12 @@ class MembershipReconciliationWorker:
         now = datetime.now(timezone.utc)
         summary: dict[str, int] = {"re_invited": 0, "kicked": 0, "errors": 0}
 
-        hub_config = await self._db["hub_config"].find_one({})
+        hub_config_docs = await self._db["hub_config"].find({}).to_list(length=None)
+        hub_config: dict[str, Any] = {
+            doc["key"]: doc["value"] for doc in hub_config_docs if "key" in doc
+        }
         if not hub_config:
             logger.warning("reconciliation_hub_config_missing_using_settings_fallback")
-            hub_config = {}
 
         group_map: dict[str, Optional[int]] = {
             "nsfw":    hub_config.get("nsfw_group_id") or settings.NSFW_GROUP_ID,
@@ -315,8 +317,12 @@ class MembershipReconciliationWorker:
         topic in the Verification Hub. If the topic ID is missing from
         hub_config the post is silently skipped.
         """
-        admin_logs_topic_id = hub_config.get("admin_logs_topic_id")
-        verification_group_id = hub_config.get("verification_group_id")
+        admin_logs_topic_id = hub_config.get("admin_logs_topic_id") or getattr(
+            settings, "HUB_TOPIC_ADMIN_LOGS", None
+        )
+        verification_group_id = hub_config.get("hub_supergroup_id") or getattr(
+            settings, "VERIFICATION_GROUP_ID", None
+        )
 
         if not admin_logs_topic_id or not verification_group_id:
             logger.warning(
@@ -418,6 +424,13 @@ class AppLifecycle:
         except Exception:
             logger.exception("lifecycle_channel_seeding_failed")
             sys.exit(1)
+
+        try:
+            from app.services.topic_manager import seed_hub_config_defaults
+            await seed_hub_config_defaults()
+        except Exception:
+            logger.exception("lifecycle_hub_config_seeding_failed")
+            # Non-fatal: workers fall back to settings if hub_config is empty.
 
         # ── Step 3: Redis health check ─────────────────────────────────────
         redis_client = None

@@ -427,13 +427,32 @@ class DatabaseManager:
                 )
             except Exception as e:
                 error_str = str(e).lower()
-                # Broaden the conflict detection to handle various MongoDB error messages
-                is_conflict = any(msg in error_str for msg in [
-                    "already exists with different options",
-                    "indexoptionsconflict",
-                    "already exists with the same name",
-                    "duplicate index",
-                ])
+                error_code = getattr(e, "code", None)
+                # Broaden the conflict detection to handle various MongoDB error
+                # messages AND OperationFailure codes:
+                #   85 = IndexOptionsConflict  (index exists under the same name
+                #                                with different options)
+                #   86 = IndexKeySpecsConflict (an index on the same key pattern
+                #                                already exists under a DIFFERENT
+                #                                name — this happens whenever a
+                #                                prior deployment/manual script
+                #                                created an index under an older
+                #                                name and this code now expects a
+                #                                renamed index, e.g.
+                #                                user_topics_topic_id (old) vs
+                #                                user_topics_topic_id_lookup (new))
+                is_conflict = (
+                    error_code in (85, 86)
+                    or any(msg in error_str for msg in [
+                        "already exists with different options",
+                        "indexoptionsconflict",
+                        "already exists with the same name",
+                        "already exists with a different name",
+                        "indexkeyspecsconflict",
+                        "equivalent index already exists",
+                        "duplicate index",
+                    ])
+                )
 
                 if is_conflict:
                     logger.warning(

@@ -797,6 +797,70 @@ async def _upsert_hub_config(key: str, value: int) -> None:
         )
 
 
+async def seed_hub_config_defaults() -> None:
+    """
+    Seed hub_config (Section 25A.19) with required group/channel ID keys
+    from settings/env, if they are not already present in MongoDB.
+
+    hub_config is the canonical, restart-safe source of truth for these IDs
+    (Section 25, Section 25A.19). Several workers — the membership
+    reconciliation worker (Section 26) and the subscription expiry worker —
+    read group/vault channel IDs directly from hub_config and only fall back
+    to settings when the key is missing. Previously NOTHING ever wrote these
+    keys into hub_config, so that fallback fired on every single run
+    ("hub_config has no premium chat IDs — falling back to settings") and
+    the reconciliation summary post was skipped every cycle
+    ("reconciliation_summary_skipped_no_topic").
+
+    Called once during lifecycle bootstrap (Step 2, immediately after
+    channel seeding, before the Telegram client starts). Idempotent and
+    non-destructive:
+      - Never overwrites an existing hub_config value — an admin-set
+        override (e.g. via a future /setconfig command) always wins.
+      - Skips any setting that is unset/zero so we never write a
+        placeholder "0" as if it were a configured value.
+    """
+    required: dict[str, int] = {
+        "hub_supergroup_id": (
+            getattr(settings, "VERIFICATION_GROUP_ID", 0)
+            or getattr(settings, "HUB_SUPERGROUP_ID", 0)
+        ),
+        "admin_logs_topic_id": getattr(settings, "HUB_TOPIC_ADMIN_LOGS", 0),
+        "main_channel_id": getattr(settings, "MAIN_CHANNEL_ID", 0),
+        "nsfw_group_id": getattr(settings, "NSFW_GROUP_ID", 0),
+        "premium_group_id": getattr(settings, "PREMIUM_GROUP_ID", 0),
+        "nsfw_vault_channel_id": getattr(settings, "NSFW_VAULT_CHANNEL_ID", 0),
+        "premium_vault_channel_id": getattr(settings, "PREMIUM_VAULT_CHANNEL_ID", 0),
+    }
+
+    try:
+        db = DatabaseManager.get_db()
+        seeded: list[str] = []
+        for key, value in required.items():
+            if not value:
+                continue
+            existing = await db["hub_config"].find_one({"key": key})
+            if existing is not None and existing.get("value"):
+                continue  # Already configured (manually or by a prior boot) — never overwrite.
+            await db["hub_config"].update_one(
+                {"key": key},
+                {"$set": {"key": key, "value": value}},
+                upsert=True,
+            )
+            seeded.append(key)
+
+        if seeded:
+            logger.info("hub_config_defaults_seeded", extra={"ctx_keys": seeded})
+        else:
+            logger.debug("hub_config_defaults_already_present")
+    except Exception as exc:
+        logger.error(
+            "Failed to seed hub_config defaults",
+            extra={"ctx_error": str(exc)},
+            exc_info=exc,
+        )
+
+
 async def _write_audit_log(
     *,
     action: str,

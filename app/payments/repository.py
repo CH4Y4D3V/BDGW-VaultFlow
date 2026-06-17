@@ -229,9 +229,9 @@ class PaymentRepository:
             await collection.create_indexes(index_models)
 
         except OperationFailure as e:
-            if e.code == 85:  # IndexOptionsConflict
+            if e.code in (85, 86):  # IndexOptionsConflict / IndexKeySpecsConflict
                 logger.warning(
-                    f"Index conflict on {label} — dropping all non-id indexes and retrying",
+                    f"Index conflict on {label} (code {e.code}) — dropping all non-id indexes and retrying",
                     extra={"ctx_error": str(e)},
                 )
                 try:
