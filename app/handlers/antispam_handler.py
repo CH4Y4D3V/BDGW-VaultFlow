@@ -39,13 +39,30 @@ async def antispam_handler(client: Client, message: Message) -> None:
     user_doc = await db["users"].find_one({"_id": user_id})
     if user_doc and user_doc.get("mute_until"):
         mute_until = user_doc["mute_until"]
-        if isinstance(mute_until, str):
-            mute_until = datetime.fromisoformat(mute_until)
-            
-        if datetime.now(timezone.utc) < mute_until:
-            await message.reply_text("🚫 <b>You are currently muted.</b>\nPlease wait until your mute expires.")
-            message.stop_propagation()
-            return
+        try:
+            if isinstance(mute_until, str):
+                mute_until = datetime.fromisoformat(mute_until)
+            if mute_until.tzinfo is None:
+                # Defensive normalization: MongoDB/BSON stores datetimes as UTC
+                # instants with no tzinfo metadata. If this value was ever read
+                # back naive (e.g. an older driver config, a manual DB edit, or
+                # a legacy string write), treat it as UTC rather than crashing
+                # the comparison below.
+                mute_until = mute_until.replace(tzinfo=timezone.utc)
+
+            if datetime.now(timezone.utc) < mute_until:
+                await message.reply_text("🚫 <b>You are currently muted.</b>\nPlease wait until your mute expires.")
+                message.stop_propagation()
+                return
+            else:
+                # Mute has expired — clear it so we don't keep re-checking stale state.
+                await db["users"].update_one({"_id": user_id}, {"$unset": {"mute_until": ""}})
+        except (ValueError, TypeError) as exc:
+            logger.error(
+                f"Invalid mute_until value for user {user_id}: {mute_until!r} — clearing",
+                extra={"user_id": user_id, "error": str(exc)},
+            )
+            await db["users"].update_one({"_id": user_id}, {"$unset": {"mute_until": ""}})
 
     # 2. Rate limiting logic
     now = datetime.now(timezone.utc).timestamp()

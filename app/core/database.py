@@ -249,6 +249,7 @@ class DatabaseManager:
                 maxPoolSize=settings.MONGO_MAX_POOL_SIZE,
                 minPoolSize=settings.MONGO_MIN_POOL_SIZE,
                 retryWrites=True,
+                tz_aware=True,
             )
             cls._client = client
             cls._db = client[settings.MONGO_DB_NAME]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -70,7 +70,7 @@ class Activity:
         return cls(
             user_id=data["user_id"],
             action=ActivityAction(data.get("action", ActivityAction.AUDIT)),
-            timestamp=data.get("timestamp") or datetime.now(),
+            timestamp=data.get("timestamp") or datetime.now(timezone.utc),
             chat_id=data.get("chat_id"),
             performed_by=data.get("performed_by"),
             metadata=data.get("metadata", {}),

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from bson import ObjectId
@@ -201,7 +201,7 @@ async def _create_session(admin_user_id: int) -> str:
         "admin_user_id": admin_user_id,
         "state": "COLLECTING",
         "messages": [],
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "confirmed_at": None,
         "completed_at": None,
         "target_total": 0,
@@ -434,7 +434,7 @@ async def _emit_broadcast_completed_log(
             )
             return
 
-        timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         text = (
             "📢 <b>BROADCAST SENT</b>\n"
             f"Admin     : {admin_name}\n"
@@ -612,7 +612,7 @@ async def _execute_broadcast(
         session_id,
         {
             "state": "BROADCASTING",
-            "confirmed_at": datetime.utcnow(),
+            "confirmed_at": datetime.now(timezone.utc),
         },
     )
 
@@ -801,7 +801,7 @@ async def _run_broadcast_loop(
         session_id,
         {
             "state": "COMPLETED",
-            "completed_at": datetime.utcnow(),
+            "completed_at": datetime.now(timezone.utc),
             "sent_count": sent,
             "failed_count": failed,
         },

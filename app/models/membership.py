@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -48,7 +48,7 @@ class Membership:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Membership":
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         return cls(
             user_id=data["user_id"],
             chat_id=data["chat_id"],
