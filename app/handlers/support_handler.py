@@ -34,10 +34,30 @@ async def handle_help_command(client: Client, message: Message) -> None:
 @Client.on_message(
     filters.private
     & ~filters.command(["start", "rules", "mystatus", "ping", "help", "takedown", "cancel", "become_creator"])
-    & ~filters.bot
+    & ~filters.bot,
+    group=3,
 )
 async def handle_private_message(client: Client, message: Message) -> None:
-    """Catch-all for private messages — routes to support topic."""
+    """
+    Catch-all for private messages — routes to support topic.
+
+    This MUST be the LAST handler tried among the four private-message
+    handlers (payment / takedown / submission / support). Each of the other
+    three explicitly raises ContinuePropagation when its own state doesn't
+    apply, so by the time we reach here, none of them claimed the message —
+    this really is a true unhandled message (Section 15.1).
+
+    Explicit group=3 makes this ordering deterministic. Previously these
+    four handlers shared the same implicit default group with no explicit
+    ordering, so which one ran first depended on Pyrogram's plugin loader
+    file-discovery order — which uses bare os.walk() with no sorting, and
+    is therefore NOT guaranteed alphabetical or stable across deployments.
+    On at least one deployment this handler won that race for content
+    submissions from verified creators, intercepting media before
+    handle_submission ever got a chance to run, and incorrectly telling the
+    user their content was "sent to support" instead of processing it as a
+    submission.
+    """
     if not message.from_user:
         return
 
@@ -75,17 +95,9 @@ async def handle_private_message(client: Client, message: Message) -> None:
     except Exception:
         pass  # FSM lookup failure — fall through to support
 
-    # ── Gate 3: yield to submission handler for media/content
-    # submission_handler registers at the same group (0) but BEFORE
-    # support_handler alphabetically, so it runs first. If it raised
-    # ContinuePropagation (no consent), we still catch here. If it handled
-    # the message successfully, Pyrogram breaks the group loop and we
-    # never run. This gate is a safety net for text-only messages that slip
-    # through submission (which filters on media|text).
-
     await route_to_support_topic(client, message)
-    # Raise StopPropagation to prevent takedown_handler or any later handler
-    # in the same group from also processing this message.
+    # Raise StopPropagation to prevent any later handler from also
+    # processing this message.
     raise StopPropagation
 
 

@@ -30,7 +30,8 @@ _album_lock = asyncio.Lock()
     (filters.media | filters.text)
     & filters.private
     & ~filters.command(["start", "rules", "mystatus", "ping", "help", "takedown", "cancel", "become_creator"])
-    & ~filters.bot
+    & ~filters.bot,
+    group=2,
 )
 async def handle_submission(client: Client, message: Message) -> None:
     """

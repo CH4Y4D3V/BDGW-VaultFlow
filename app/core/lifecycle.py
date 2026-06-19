@@ -455,13 +455,86 @@ class AppLifecycle:
             me = await self._bot.get_me()
             set_bot_id(me.id)
 
-            from pyrogram.types import BotCommand
+            from pyrogram.types import (
+                BotCommand,
+                BotCommandScopeAllPrivateChats,
+                BotCommandScopeChatAdministrators,
+                BotCommandScopeChatMember,
+            )
+
+            # ── 1. Public commands — all private chats (Section 4.1) ─────────
+            public_commands = [
+                BotCommand("start",    "Main Menu"),
+                BotCommand("takedown", "Remove Content"),
+                BotCommand("help",     "Support"),
+            ]
+
+            # ── 2. Admin commands — shown in the hub (Section 9.5) ───────────
+            hub_commands = [
+                BotCommand("accept",      "Accept support session"),
+                BotCommand("close",       "Close active support session"),
+                BotCommand("ban",         "Ban user — /ban <id> <reason>"),
+                BotCommand("unban",       "Remove ban — /unban <id>"),
+                BotCommand("warn",        "Issue warning — /warn <id> <reason>"),
+                BotCommand("mute",        "Mute user — /mute <id> <mins> <reason>"),
+                BotCommand("unmute",      "Remove mute — /unmute <id>"),
+                BotCommand("paymentdone", "Mark payment done — /paymentdone <id>"),
+                BotCommand("profile",     "User profile card — /profile <id>"),
+                BotCommand("history",     "Event history — /history <id>"),
+                BotCommand("note",        "Add note — /note <id> <text>"),
+                BotCommand("notes",       "List notes — /notes <id>"),
+                BotCommand("grant",       "Grant premium — /grant <id> <days>"),
+                BotCommand("revoke",      "Revoke premium — /revoke <id>"),
+                BotCommand("broadcast",   "Broadcast to all users"),
+            ]
+
             try:
-                await self._bot.set_bot_commands([
-                    BotCommand("start", "Main Menu"),
-                    BotCommand("takedown", "Remove Content"),
-                    BotCommand("help", "Support"),
-                ])
+                # Public scope
+                await self._bot.set_bot_commands(
+                    public_commands,
+                    scope=BotCommandScopeAllPrivateChats(),
+                )
+
+                # Hub admin scope — all admins in the verification hub group
+                # see these when they type / inside any hub topic
+                hub_id = getattr(settings, "VERIFICATION_GROUP_ID", None)
+                if hub_id:
+                    try:
+                        await self._bot.set_bot_commands(
+                            hub_commands,
+                            scope=BotCommandScopeChatAdministrators(chat_id=hub_id),
+                        )
+                    except Exception as hub_scope_err:
+                        logger.warning(
+                            "lifecycle_set_hub_admin_commands_failed",
+                            extra={"ctx_error": str(hub_scope_err)},
+                        )
+
+                    # Also register per-user in private chat for each admin/owner
+                    # so they see admin commands when DMing the bot directly
+                    try:
+                        from app.core.database import DatabaseManager
+                        db = DatabaseManager.get_db()
+                        admin_docs = await db["admins"].find(
+                            {"is_active": True}
+                        ).to_list(length=100)
+                        for admin_doc in admin_docs:
+                            try:
+                                await self._bot.set_bot_commands(
+                                    public_commands + hub_commands,
+                                    scope=BotCommandScopeChatMember(
+                                        chat_id=hub_id,
+                                        user_id=admin_doc["user_id"],
+                                    ),
+                                )
+                            except Exception:
+                                pass  # Non-fatal — admin may have left hub
+                    except Exception as per_user_err:
+                        logger.warning(
+                            "lifecycle_set_per_admin_commands_failed",
+                            extra={"ctx_error": str(per_user_err)},
+                        )
+
             except Exception as cmd_err:
                 logger.warning(
                     "lifecycle_set_bot_commands_failed",

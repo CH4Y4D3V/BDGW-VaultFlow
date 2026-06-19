@@ -203,7 +203,7 @@ async def handle_takedown_cancel(client: Client, message: Message) -> None:
         await message.reply_text("❌ Takedown request cancelled.")
 
 
-@Client.on_message(filters.private & ~filters.command(["takedown", "cancel", "start", "help"]))
+@Client.on_message(filters.private & ~filters.command(["takedown", "cancel", "start", "help"]), group=1)
 async def handle_takedown_fsm(client: Client, message: Message) -> None:
     """
     BUG-3 FIX: FSM now follows spec §14.2 exactly:

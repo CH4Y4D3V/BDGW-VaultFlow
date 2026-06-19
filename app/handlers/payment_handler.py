@@ -602,8 +602,20 @@ async def handle_payment_cancel(client: Client, callback: CallbackQuery) -> None
 
 
 # ── User private message handler for TXID + screenshot ───────────────────────
-
-@Client.on_message(filters.private & ~filters.regex(r"^/"))
+#
+# Explicit group=0: this must be the FIRST of the four competing private-
+# message handlers (payment / takedown / submission / support) to run.
+# Previously all four had no explicit group, defaulting to Pyrogram's
+# implicit group 0 together — intra-group order then depended on Pyrogram's
+# plugin loader, which uses bare os.walk() with NO sorting (confirmed in
+# pyrogram/client.py load_plugins), making the winner non-deterministic
+# across deployments/filesystems. Distinct group numbers force Pyrogram's
+# dispatcher (which sorts self.groups by integer key — see dispatcher.py)
+# to always try them in this exact order. Each handler raises
+# ContinuePropagation when not applicable to its own state, so the chain
+# correctly falls through to the next, with support_handler as the true
+# last-resort catch-all.
+@Client.on_message(filters.private & ~filters.regex(r"^/"), group=0)
 async def handle_payment_inputs(client: Client, message: Message) -> None:
     """
     Capture TXID and payment screenshot from the user in sequence.
