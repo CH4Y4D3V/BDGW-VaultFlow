@@ -513,7 +513,6 @@ class AppLifecycle:
                     # Also register per-user in private chat for each admin/owner
                     # so they see admin commands when DMing the bot directly
                     try:
-                        from app.core.database import DatabaseManager
                         db = DatabaseManager.get_db()
                         admin_docs = await db["admins"].find(
                             {"is_active": True}
