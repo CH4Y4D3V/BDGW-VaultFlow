@@ -295,7 +295,7 @@ async def handle_direct_vault_upload(client: Client, message: Message) -> None:
             messages=[message],
             dest=dest,
             submitter_user_id=admin_id,
-            initial_status=ModerationState.APPROVED.value,  # Admin direct-upload = pre-approved
+            initial_status=ModerationState.QUEUED.value,  # Admin direct-upload: must be QUEUED to be eligible for fetch_distribution_content() (provider.py), the sole content source wired into DistributionScheduler. "Pre-approved" content with status=APPROVED was silently invisible to every distribution cycle.
         )
     except Exception as e:
         logger.error(

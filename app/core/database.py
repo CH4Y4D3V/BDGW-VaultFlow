@@ -206,6 +206,46 @@ class DataMigrationManager:
 
         logger.info("MIGRATION: Vault stabilization complete.")
 
+        # ── One-time backfill: promote stuck APPROVED → QUEUED ─────────────
+        # Prior to this fix, handle_direct_vault_upload() (admin direct
+        # uploads to the vault channel) wrote status=APPROVED instead of
+        # QUEUED. fetch_distribution_content() (app/bot/provider.py) — the
+        # sole content source wired into DistributionScheduler — only ever
+        # selects status=QUEUED, so any document left at APPROVED is fully
+        # archived and watermarked but permanently invisible to every
+        # distribution cycle. The code fix prevents this for new uploads;
+        # this backfill repairs anything already stuck from before the fix.
+        # Idempotent: only matches documents still at status=APPROVED with
+        # valid vault references, so it becomes a no-op once the backlog
+        # clears.
+        try:
+            stuck_query = {
+                "status": "approved",
+                "vault_chat_id": {"$ne": None},
+                "vault_message_id": {"$ne": None},
+            }
+            stuck_count = await vault.count_documents(stuck_query)
+            if stuck_count > 0:
+                result = await vault.update_many(
+                    stuck_query,
+                    {"$set": {"status": "queued", "updated_at": datetime.now(timezone.utc)}},
+                )
+                logger.warning(
+                    "MIGRATION: Backfilled stuck APPROVED vault items to QUEUED — "
+                    "these were previously invisible to the distribution cycle.",
+                    extra={
+                        "ctx_collection": settings.VAULT_COLLECTION,
+                        "ctx_matched": stuck_count,
+                        "ctx_modified": result.modified_count,
+                    },
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: vault APPROVED→QUEUED backfill failed",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  DatabaseManager
