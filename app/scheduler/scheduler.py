@@ -93,18 +93,34 @@ def _resolve_vault_type(content_item: dict, source_id: str) -> Optional[str]:
     Resolve the canonical vault_type ('nsfw' or 'premium') for a content item.
 
     Resolution order:
-      1. content_item['vault_type']   — explicit field, most authoritative
-      2. source_id label prefix        — e.g. 'submission_nsfw' → 'nsfw'
-      3. None                          — caller must treat as unresolvable
+      1. content_item['moderation_destination'] — the field actually written
+         by archive_to_vault() on every vault document (Section 11). This is
+         the most reliable source: provider.py's vault.find() query is
+         itself filtered on this exact field, so it is guaranteed present
+         and correct on every item reaching this function, regardless of
+         which approval path wrote it (execute_queue's "submission_" source
+         label, or handle_direct_vault_upload's raw vault channel ID).
+      2. content_item['vault_type']     — explicit field, if ever set.
+      3. source_id label prefix          — e.g. 'submission_nsfw' → 'nsfw'.
+         Only matches the execute_queue() approval path; does NOT match
+         direct-vault-upload's raw channel ID source_channel_id values
+         (e.g. '-1002048690257'), which is why (1) above is required.
+      4. None                            — caller must treat as unresolvable.
 
     Args:
         content_item: Content descriptor dict from the provider callback.
-        source_id:    source_channel_id label string (e.g. 'submission_nsfw').
+        source_id:    source_channel_id label string (e.g. 'submission_nsfw'
+                      or a raw vault channel ID string).
 
     Returns:
         'nsfw', 'premium', or None if the type cannot be determined.
     """
-    # Explicit vault_type on the content item is authoritative.
+    # Most authoritative: the field archive_to_vault() actually writes.
+    mod_dest = content_item.get("moderation_destination")
+    if mod_dest in _VALID_VAULT_TYPES:
+        return mod_dest
+
+    # Explicit vault_type on the content item, if ever set.
     vault_type = content_item.get("vault_type")
     if vault_type in _VALID_VAULT_TYPES:
         return vault_type
