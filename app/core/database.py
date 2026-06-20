@@ -166,6 +166,54 @@ class DataMigrationManager:
         """
         logger.info("MIGRATION: Starting vault stabilization audit...")
 
+        # ── Drop broken legacy unique index on a non-existent field ────────
+        # 'vault_submission_id_unique' enforced uniqueness on 'submission_id',
+        # a field that archive_to_vault() never writes (the actual upsert key
+        # is 'content_id'). Every vault document's submission_id was
+        # therefore missing/null, and MongoDB's unique index silently
+        # rejected every vault upsert after the very first one ever
+        # inserted — breaking content distribution from day one without
+        # ever raising a startup error. Must drop explicitly by name: the
+        # replacement index ('vault_content_id_unique', on 'content_id') has
+        # a different name AND different key pattern, so neither of
+        # _safe_create's conflict-recovery paths (same-name/different-options,
+        # or same-keys/different-name) would ever detect or remove this
+        # orphaned index on their own.
+        try:
+            vault_for_index_check = db[settings.VAULT_COLLECTION]
+            existing_index_names = {
+                idx["name"]
+                async for idx in vault_for_index_check.list_indexes()
+            }
+            if "vault_submission_id_unique" in existing_index_names:
+                await vault_for_index_check.drop_index("vault_submission_id_unique")
+                logger.warning(
+                    "MIGRATION: Dropped broken legacy index vault_submission_id_unique "
+                    "(targeted non-existent field 'submission_id' — was silently "
+                    "blocking every vault upsert after the first).",
+                    extra={"ctx_collection": settings.VAULT_COLLECTION},
+                )
+
+            pending_for_index_check = db[settings.PENDING_COLLECTION]
+            existing_pending_index_names = {
+                idx["name"]
+                async for idx in pending_for_index_check.list_indexes()
+            }
+            if "pending_key_unique" in existing_pending_index_names:
+                await pending_for_index_check.drop_index("pending_key_unique")
+                logger.warning(
+                    "MIGRATION: Dropped broken legacy index pending_key_unique "
+                    "(targeted non-existent field 'key' — was silently "
+                    "blocking every pending-submission write after the first).",
+                    extra={"ctx_collection": settings.PENDING_COLLECTION},
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: failed to drop legacy vault_submission_id_unique index",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
         vault = db[settings.VAULT_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
 
@@ -804,9 +852,19 @@ class DatabaseManager:
         # ══════════════════════════════════════════════════════════════════
         await _safe_create(settings.VAULT_COLLECTION, [
             IndexModel(
-                [("submission_id", ASCENDING)],
-                name="vault_submission_id_unique",
+                [("content_id", ASCENDING)],
+                name="vault_content_id_unique",
                 unique=True,
+                background=True,
+                # content_id is set via $setOnInsert on every archive_to_vault()
+                # write (the real upsert key — see moderation_actions.py). The
+                # prior index name 'vault_submission_id_unique' targeted a
+                # 'submission_id' field that is NEVER written anywhere in the
+                # codebase; since every document's submission_id was therefore
+                # missing (indexed as null), the old unique index rejected
+                # every vault upsert after the first one ever inserted,
+                # silently breaking content distribution for the life of the
+                # project.
             ),
             IndexModel(
                 [("vault_chat_id", ASCENDING), ("vault_message_id", ASCENDING)],
@@ -1105,7 +1163,18 @@ class DatabaseManager:
 
         # ── Pending submissions (album buffer / pre-moderation) ─────────────
         await _safe_create(settings.PENDING_COLLECTION, [
-            IndexModel([("key", ASCENDING)], name="pending_key_unique", unique=True),
+            IndexModel(
+                [("first_msg_id", ASCENDING)],
+                name="pending_first_msg_id_unique",
+                unique=True,
+                # 'pending_key_unique' (prior index, dropped in
+                # stabilize_vault-adjacent migration below) targeted a 'key'
+                # field that create_pending_submission() never writes — the
+                # actual upsert key is 'first_msg_id'. Same failure class as
+                # the vault_submission_id_unique bug: every document's 'key'
+                # was missing/null, so the unique index rejected every
+                # pending-submission write after the first ever insert.
+            ),
             IndexModel(
                 [("expires_at", ASCENDING)],
                 name="pending_expiry_ttl",
