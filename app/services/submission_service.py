@@ -113,11 +113,28 @@ async def register_pending(user_id: int, messages: list[Message]) -> int:
     # Note: legacy caller doesn't provide hub IDs, we use 0
     return await service.create_pending_submission(user_id, messages, 0, 0)
 
+async def _fire_and_forget_pending_cleanup(msg_id: int) -> None:
+    """Delete the pending-submission DB record. Wrapped in a real ``async def``
+    coroutine because Motor's ``delete_one(...)`` returns an awaitable wrapper,
+    not a plain coroutine object — ``asyncio.create_task()`` requires the
+    latter and raises ``TypeError: a coroutine was expected`` if handed the
+    former directly."""
+    try:
+        await SubmissionService()._db[settings.PENDING_COLLECTION].delete_one(
+            {"first_msg_id": msg_id}
+        )
+    except Exception as e:
+        logger.warning(
+            "failed_to_cleanup_pending_db_legacy",
+            extra={"ctx_key": msg_id, "ctx_error": str(e)},
+        )
+
+
 def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
     # This remains sync for legacy callers but DB cleanup will be missed or must be fire-and-forget
     entry = _pending_submissions.pop(msg_id, None)
     if entry:
-        asyncio.create_task(SubmissionService()._db[settings.PENDING_COLLECTION].delete_one({"first_msg_id": msg_id}))
+        asyncio.create_task(_fire_and_forget_pending_cleanup(msg_id))
     return entry
 
 async def reject_pending(msg_id: int) -> None:
