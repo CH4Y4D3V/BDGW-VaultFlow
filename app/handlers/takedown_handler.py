@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
-from pyrogram import Client, ContinuePropagation, filters
+from pyrogram import Client, ContinuePropagation, StopPropagation, filters
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import (
@@ -229,7 +229,7 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
         reason = (message.text or "").strip()
         if not reason:
             await message.reply_text("❌ Please provide a reason as text.")
-            return
+            raise StopPropagation
 
         data["reason"] = reason
         await _set_fsm(user_id, STATE_AWAITING_LINK, data)
@@ -240,7 +240,7 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
             "<i>Send /cancel to abort.</i>",
             parse_mode=ParseMode.HTML,
         )
-        return
+        raise StopPropagation
 
     # ── Step 2: Collect LINK (spec §14.2 Step 2) ─────────────────────────────
     if state == STATE_AWAITING_LINK:
@@ -251,7 +251,7 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
         content_link = (message.text or "").strip()
         if not content_link:
             await message.reply_text("❌ Please send the content link or reference.")
-            return
+            raise StopPropagation
 
         await _set_fsm(user_id, STATE_IDLE, {})
 
@@ -287,7 +287,7 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
                 content_link,
             )
         )
-        return
+        raise StopPropagation
 
     # Stale STATE_AWAITING_ID from old code — clear it
     if state == STATE_AWAITING_ID:

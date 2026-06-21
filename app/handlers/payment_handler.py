@@ -625,6 +625,18 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
     the service layer (points refund, Redis clear, event log).
 
     TXID uniqueness is validated before accepting to prevent fraud.
+
+    CRITICAL: every code path below the two initial "not applicable"
+    ContinuePropagation checks MUST end with `raise StopPropagation`, not a
+    bare `return`. Pyrogram's dispatcher tries handlers group-by-group
+    (payment=0, takedown=1, submission=2, support=3) — but a handler that
+    returns normally only stops its OWN group; the dispatcher still tries
+    every later group against the same message. Without StopPropagation
+    here, a successfully-processed TXID or screenshot was immediately
+    ALSO claimed by submission_handler (group=2) as a content submission,
+    since the user — being mid-payment-flow — is virtually always a
+    consenting/verified creator and submission_handler had no way to know
+    this message was already handled.
     """
     if not message.from_user:
         return
@@ -664,7 +676,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 ]]),
             )
         )
-        return
+        raise StopPropagation
 
     # ── TXID submission ───────────────────────────────────────────────────────
     if session.status == PaymentStatus.WAITING_TXID:
@@ -675,7 +687,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                     "This is the reference number from your payment app."
                 )
             )
-            return
+            raise StopPropagation
 
         txid = message.text.strip()
 
@@ -694,7 +706,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 "duplicate_txid_rejected",
                 extra={"ctx_user_id": user_id, "ctx_txid_prefix": txid[:8]},
             )
-            return
+            raise StopPropagation
 
         await service.update_status(session.id, PaymentStatus.WAITING_SCREENSHOT, txid=txid)
         await _tg_send(
@@ -705,7 +717,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 parse_mode=ParseMode.HTML,
             )
         )
-        return
+        raise StopPropagation
 
     # ── Screenshot submission ─────────────────────────────────────────────────
     if session.status == PaymentStatus.WAITING_SCREENSHOT:
@@ -725,7 +737,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                     parse_mode=ParseMode.HTML,
                 )
             )
-            return
+            raise StopPropagation
 
         # Write status to DB BEFORE sending any Telegram messages (restart-safe)
         await service.update_status(
@@ -801,6 +813,7 @@ async def handle_payment_inputs(client: Client, message: Message) -> None:
                 "ctx_skipped": skipped,
             },
         )
+        raise StopPropagation
 
 
 # ── Admin handlers: Send Payment Details ─────────────────────────────────────

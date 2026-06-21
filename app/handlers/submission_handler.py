@@ -51,6 +51,35 @@ async def handle_submission(client: Client, message: Message) -> None:
     if state != STATE_IDLE:
         raise ContinuePropagation
 
+    # FIX: if the user has an open support conversation (PENDING or ACTIVE
+    # support_sessions record — e.g. they sent /help and are now replying),
+    # yield so support_handler's catch-all (group=3) can route this message
+    # into their hub topic instead of it being silently claimed here as a
+    # content submission. Mirrors the identical query in
+    # route_to_support_topic() (support_handler.py). Without this check, any
+    # consenting/verified creator's support follow-up messages were
+    # unconditionally treated as submissions, since this handler (group=2)
+    # runs before support's catch-all (group=3) and previously had no way
+    # to know a support conversation was already open.
+    try:
+        db_check = DatabaseManager.get_db()
+        open_support_session = await db_check["support_sessions"].find_one(
+            {"user_id": user_id, "status": {"$in": ["PENDING", "ACTIVE"]}},
+        )
+        if open_support_session:
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception as support_check_err:
+        logger.error(
+            "submission_support_session_check_failed",
+            extra={"ctx_user_id": user_id, "ctx_error": str(support_check_err)},
+        )
+        # DB hiccup — fail safe by NOT claiming the message as a submission;
+        # let it fall through to support's catch-all rather than risk
+        # swallowing an in-progress support conversation.
+        raise ContinuePropagation
+
     # ── Check consent first ───────────────────────────────────────────────────
     db = DatabaseManager.get_db()
     service = SubmissionService(db)
