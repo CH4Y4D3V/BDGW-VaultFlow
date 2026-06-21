@@ -668,12 +668,46 @@ class DistributionScheduler:
 
         initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
 
+        # Resolve the correct destination-specific vault channel ID.
+        #
+        # ROOT CAUSE FIX (spec Section 11 — strict NSFW/Premium vault
+        # separation): this previously hardcoded settings.VAULT_CHANNEL_ID
+        # for EVERY job regardless of the content's actual destination. Since
+        # this deployment's VAULT_CHANNEL_ID happens to equal
+        # NSFW_VAULT_CHANNEL_ID, NSFW jobs got the right channel by
+        # coincidence — but every PREMIUM job's vault_chat_id pointed at the
+        # wrong channel, so resolve_fresh_message() (media_refresh.py) could
+        # never locate the message there, causing every watermark job to
+        # exhaust all resolution paths and fall back to a raw file_id.
+        #
+        # Resolution order:
+        #   1. content_item['vault_channel_id'] — the real field written by
+        #      archive_to_vault() on every vault document (most reliable,
+        #      zero extra logic needed since provider.py returns full
+        #      documents with no field projection).
+        #   2. Destination-aware lookup via moderation_destination, mirroring
+        #      _resolve_vault_channel_id() in moderation_actions.py.
+        #   3. settings.VAULT_CHANNEL_ID — legacy fallback only.
+        raw_vault_channel_id = content_item.get("vault_channel_id")
+        try:
+            resolved_vault_chat_id = int(raw_vault_channel_id) if raw_vault_channel_id else None
+        except (TypeError, ValueError):
+            resolved_vault_chat_id = None
+        if not resolved_vault_chat_id:
+            mod_dest = content_item.get("moderation_destination")
+            if mod_dest == "nsfw":
+                resolved_vault_chat_id = settings.NSFW_VAULT_CHANNEL_ID or settings.VAULT_CHANNEL_ID
+            elif mod_dest == "premium":
+                resolved_vault_chat_id = settings.PREMIUM_VAULT_CHANNEL_ID or settings.VAULT_CHANNEL_ID
+            else:
+                resolved_vault_chat_id = settings.VAULT_CHANNEL_ID
+
         job = QueueJob(
             schema_version=1,
             content_id=content_item["content_id"],
             source_channel_id=source_channel_id,
             source_message_id=content_item.get("message_id"),
-            vault_chat_id=settings.VAULT_CHANNEL_ID,
+            vault_chat_id=resolved_vault_chat_id,
             vault_message_id=vault_message_id,
             target_channel_ids=target_channel_ids,
             media_group_id=content_item.get("media_group_id"),

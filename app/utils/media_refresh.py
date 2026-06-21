@@ -206,7 +206,13 @@ async def resolve_fresh_message(
     and a DB lookup fallback is needed.  Pass None to skip the DB path.
     """
     # ── Path 1: coordinates already on the job doc ────────────────────────────
-    job_vault_channel_id = _int_or_none(job_doc.get("vault_channel_id"))
+    # QueueJob's real field name is 'vault_chat_id' (confirmed via
+    # app/core/models.py, app/bot/delivery.py, app/repositories/
+    # queue_repository.py, app/utils/job_validator.py — all consistently use
+    # 'vault_chat_id'). This previously read 'vault_channel_id', a field that
+    # has never existed on a queue_jobs document, so this fast path had a
+    # 100% failure rate on every watermark job ever processed.
+    job_vault_channel_id = _int_or_none(job_doc.get("vault_chat_id"))
     job_vault_message_id = _int_or_none(job_doc.get("vault_message_id"))
 
     if job_vault_channel_id and job_vault_message_id:

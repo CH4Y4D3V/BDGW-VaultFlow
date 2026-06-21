@@ -217,9 +217,68 @@ class DataMigrationManager:
         vault = db[settings.VAULT_COLLECTION]
         quarantine = db[settings.QUARANTINE_COLLECTION]
 
+        # ── One-time recovery: restore vault items wrongly quarantined by
+        # the vault_chat_id/vault_channel_id field-name bug ────────────────
+        # Every boot prior to this fix ran the quarantine query below using
+        # the wrong field name 'vault_chat_id' (a field that has never
+        # existed on a vault document — the real field is
+        # 'vault_channel_id'). MongoDB's equality-with-null semantics treat
+        # a MISSING field as matching {field: None}, so this query matched
+        # EVERY vault document — including every legitimately successful
+        # archive_to_vault() write — and moved it to quarantine before
+        # deleting it from vault, on every single restart. Since
+        # quarantine.insert_one() preserved the full original document
+        # (real vault_channel_id and vault_message_id intact), this content
+        # was never actually lost — just incorrectly evicted. Restore it now.
+        try:
+            recoverable_query = {
+                "quarantine_reason": "migration_null_vault_reference",
+                "original_collection": settings.VAULT_COLLECTION,
+                "vault_channel_id": {"$ne": None},
+                "vault_message_id": {"$ne": None},
+            }
+            recoverable_count = await quarantine.count_documents(recoverable_query)
+            if recoverable_count > 0:
+                logger.warning(
+                    "MIGRATION: Recovering vault items wrongly quarantined by "
+                    "the vault_chat_id field-name bug (had valid vault "
+                    "references all along).",
+                    extra={"ctx_count": recoverable_count},
+                )
+                restored = 0
+                cursor = quarantine.find(recoverable_query)
+                async for doc in cursor:
+                    doc.pop("quarantine_reason", None)
+                    doc.pop("quarantined_at", None)
+                    doc.pop("original_collection", None)
+                    doc_id = doc.pop("_id", None)
+                    try:
+                        await vault.update_one(
+                            {"_id": doc_id},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+                        await quarantine.delete_one({"_id": doc_id})
+                        restored += 1
+                    except Exception as restore_err:
+                        logger.error(
+                            "MIGRATION: failed to restore individual quarantined vault item",
+                            extra={"ctx_id": str(doc_id), "ctx_error": str(restore_err)},
+                        )
+                logger.info(
+                    "MIGRATION: Vault quarantine recovery complete.",
+                    extra={"ctx_restored": restored},
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: vault quarantine recovery failed",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
         invalid_vault_query = {
             "$or": [
-                {"vault_chat_id": None},
+                {"vault_channel_id": None},
                 {"vault_message_id": None},
             ]
         }
@@ -269,7 +328,7 @@ class DataMigrationManager:
         try:
             stuck_query = {
                 "status": "approved",
-                "vault_chat_id": {"$ne": None},
+                "vault_channel_id": {"$ne": None},
                 "vault_message_id": {"$ne": None},
             }
             stuck_count = await vault.count_documents(stuck_query)
@@ -867,12 +926,12 @@ class DatabaseManager:
                 # project.
             ),
             IndexModel(
-                [("vault_chat_id", ASCENDING), ("vault_message_id", ASCENDING)],
+                [("vault_channel_id", ASCENDING), ("vault_message_id", ASCENDING)],
                 name="vault_message_unique",
                 unique=True,
                 background=True,
                 partialFilterExpression={
-                    "vault_chat_id": {"$gt": 0},
+                    "vault_channel_id": {"$exists": True},
                     "vault_message_id": {"$gt": 0},
                 },
             ),
