@@ -121,56 +121,69 @@ class FFmpegProcessor:
             return output_path
 
     async def _process_video(self, input_path: str, output_path: str, config: dict) -> str:
-        text1 = config.get("watermark_text", "BDGW")
-        text2 = "VaultFlow" # Secondary text
+        text1 = config.get("watermark_text", settings.WATERMARK_TEXT_NSFW or "BDGW")
+        text2 = config.get("watermark_text_secondary", settings.WATERMARK_TEXT_PREMIUM or "VaultFlow")
 
-        opacity1 = config.get("opacity", settings.WATERMARK_OPACITY)
-        opacity2 = config.get("opacity", settings.WATERMARK_OPACITY)
+        # FFmpeg drawtext requires alpha as a float in [0.0, 1.0].
+        # WATERMARK_OPACITY in settings (and in the config dict) is an
+        # integer in the PIL/0-255 range (107 by default in this deployment).
+        # Passing it directly as 'white@107' makes FFmpeg reject the entire
+        # filter with "Invalid alpha value specifier" and exit non-zero,
+        # causing shutil.copy (the fallback) to run — meaning every video was
+        # distributed without any watermark. Normalize to 0.0-1.0 here.
+        raw_opacity = config.get("opacity", settings.WATERMARK_OPACITY) or 107
+        opacity_float = round(min(max(int(raw_opacity) / 255.0, 0.0), 1.0), 3)
 
         # Randomize start times (0 to 5 seconds)
         start1 = round(random.uniform(0, 5), 1)
         start2 = round(random.uniform(0, 5), 1)
 
-        # ── RANDOM POSITION (TRUE RANDOM) ──
-        # pos1 = random.randint(20, width-text_w-20)
-        # In FFmpeg filter syntax, we use 'w' and 'h' as variables.
-        # We'll use a mix of FFmpeg expressions and pre-calculated random offsets.
-        
         offset_x1 = random.randint(20, 100)
         offset_y1 = random.randint(20, 100)
         offset_x2 = random.randint(20, 100)
         offset_y2 = random.randint(20, 100)
-        
+
         # Corner selection for pos1
-        corner1 = config.get("position", random.choice(["TL", "TR", "BL", "BR", "C"]))
-        if corner1 == "TL": pos1 = f"x={offset_x1}:y={offset_y1}"
+        corner1 = random.choice(["TL", "TR", "BL", "BR", "C"])
+        if corner1 == "TL":   pos1 = f"x={offset_x1}:y={offset_y1}"
         elif corner1 == "TR": pos1 = f"x=w-text_w-{offset_x1}:y={offset_y1}"
         elif corner1 == "BL": pos1 = f"x={offset_x1}:y=h-text_h-{offset_y1}"
         elif corner1 == "BR": pos1 = f"x=w-text_w-{offset_x1}:y=h-text_h-{offset_y1}"
-        else: pos1 = f"x=(w-text_w)/2:y=(h-text_h)/2"
+        else:                  pos1 = "x=(w-text_w)/2:y=(h-text_h)/2"
 
-        # Corner selection for pos2 (different from pos1 if possible)
+        # Corner selection for pos2 (different from pos1)
         corner2 = random.choice([c for c in ["TL", "TR", "BL", "BR", "C"] if c != corner1])
-        if corner2 == "TL": pos2 = f"x={offset_x2}:y={offset_y2}"
+        if corner2 == "TL":   pos2 = f"x={offset_x2}:y={offset_y2}"
         elif corner2 == "TR": pos2 = f"x=w-text_w-{offset_x2}:y={offset_y2}"
         elif corner2 == "BL": pos2 = f"x={offset_x2}:y=h-text_h-{offset_y2}"
         elif corner2 == "BR": pos2 = f"x=w-text_w-{offset_x2}:y=h-text_h-{offset_y2}"
-        else: pos2 = f"x=(w-text_w)/2:y=(h-text_h)/2"
+        else:                  pos2 = "x=(w-text_w)/2:y=(h-text_h)/2"
+
+        # Escape single quotes in text strings to avoid breaking the FFmpeg
+        # filter expression (e.g. "BD GONE WILD ✦ PREMIUM" is safe, but any
+        # literal apostrophe would break the filter string).
+        def _esc(t: str) -> str:
+            return t.replace("'", "\\'").replace(":", "\\:")
+
+        font_path = getattr(settings, "WATERMARK_FONT_PATH", None)
+        font_clause = f":fontfile='{font_path}'" if font_path and Path(font_path).exists() else ""
 
         drawtext1 = (
-            f"drawtext=text='{text1}':"
-            f"{pos1}:"
-            f"enable='between(t,{start1},99999)':"
-            f"fontsize=h/20:fontcolor=white@{opacity1}:"
-            f"shadowcolor=black:shadowx=2:shadowy=2"
+            f"drawtext=text='{_esc(text1)}'"
+            f"{font_clause}"
+            f":{pos1}"
+            f":enable='between(t,{start1},99999)'"
+            f":fontsize=h/20:fontcolor=white@{opacity_float}"
+            f":shadowcolor=black:shadowx=2:shadowy=2"
         )
-        
+
         drawtext2 = (
-            f"drawtext=text='{text2}':"
-            f"{pos2}:"
-            f"enable='between(t,{start2},99999)':"
-            f"fontsize=h/25:fontcolor=white@{opacity2}:"
-            f"shadowcolor=black:shadowx=2:shadowy=2"
+            f"drawtext=text='{_esc(text2)}'"
+            f"{font_clause}"
+            f":{pos2}"
+            f":enable='between(t,{start2},99999)'"
+            f":fontsize=h/25:fontcolor=white@{opacity_float}"
+            f":shadowcolor=black:shadowx=2:shadowy=2"
         )
 
         cmd = [
@@ -178,7 +191,7 @@ class FFmpegProcessor:
             "-vf", f"{drawtext1},{drawtext2}",
             "-c:a", "copy",
             "-preset", "ultrafast",
-            output_path
+            output_path,
         ]
 
         logger.debug("Executing FFmpeg for video watermark", extra={"ctx_cmd": " ".join(cmd)})
