@@ -447,9 +447,6 @@ class DistributionScheduler:
         failing channel config does not abort the whole cycle.
         """
         if await self._check_backpressure():
-            logger.warning(
-                "Scheduler: backpressure threshold reached — skipping distribution cycle"
-            )
             return
 
         try:
@@ -550,25 +547,32 @@ class DistributionScheduler:
 
     async def _check_backpressure(self) -> bool:
         """
-        Return True if the active queue depth exceeds the safe threshold.
+        Return True if the in-flight queue depth exceeds the safe threshold.
 
-        Counts all jobs in active states (PENDING, WATERMARKING, READY,
-        LOCKED, DELIVERING).  If the total exceeds MAX_JOBS_PER_CYCLE × 2
-        the distribution cycle should be skipped to avoid unbounded memory /
-        DB growth.
+        Counts only jobs that are ACTIVELY being processed (LOCKED, WATERMARKING,
+        READY, DELIVERING) — NOT PENDING jobs. PENDING jobs are simply work
+        waiting in line and do not indicate backpressure: they have zero memory
+        or CPU impact. Counting PENDING against the threshold caused the entire
+        distribution pipeline to stop permanently when the vault quarantine
+        recovery restored thousands of items at once (all became PENDING jobs
+        simultaneously, far exceeding the 200-job threshold, and the scheduler
+        never recovered since the watermark workers drain slower than the
+        threshold).
+
+        True backpressure is workers being overwhelmed: jobs sitting in LOCKED,
+        WATERMARKING, or DELIVERING states for longer than they should means
+        downstream workers can't keep up. That's what this check now measures.
 
         Returns:
             True  — backpressure active; skip this cycle.
-            False — queue depth is acceptable; proceed normally.
-            False — also returned on DB error (fail-open: prefer distributing
-                    over starvation from a transient query failure).
+            False — in-flight depth acceptable; proceed normally.
+            False — also returned on DB error (fail-open).
         """
         try:
             queue = self._db[settings.QUEUE_COLLECTION]
-            active_count = await queue.count_documents({
+            in_flight_count = await queue.count_documents({
                 "status": {
                     "$in": [
-                        JobStatus.PENDING,
                         JobStatus.WATERMARKING,
                         JobStatus.READY,
                         JobStatus.LOCKED,
@@ -576,7 +580,17 @@ class DistributionScheduler:
                     ]
                 }
             })
-            return active_count >= settings.MAX_JOBS_PER_CYCLE * 2
+            threshold = settings.MAX_JOBS_PER_CYCLE * 2
+            if in_flight_count >= threshold:
+                logger.warning(
+                    "Scheduler: backpressure threshold reached — skipping distribution cycle",
+                    extra={
+                        "ctx_in_flight": in_flight_count,
+                        "ctx_threshold": threshold,
+                    },
+                )
+                return True
+            return False
         except Exception as exc:
             logger.error(f"Backpressure check failed (failing open): {exc}", exc_info=True)
             return False
