@@ -305,11 +305,24 @@ class WatermarkWorker:
                     temp_file_set.add(processed_path)
 
                 # 3. Upload to vault with FloodWait retry.
+                # FIX: use the job's vault_chat_id (destination-specific vault
+                # channel) instead of the hardcoded generic settings.VAULT_CHANNEL_ID.
+                # Previously all watermarked files were uploaded to VAULT_CHANNEL_ID
+                # regardless of type. For NSFW where VAULT_CHANNEL_ID ==
+                # NSFW_VAULT_CHANNEL_ID this was accidentally correct, but for
+                # Premium content the watermarked file landed in the NSFW vault
+                # while vault_chat_id in the job still pointed at
+                # PREMIUM_VAULT_CHANNEL_ID. Delivery then tried copy_message from
+                # the wrong channel → failed on every Premium job.
+                job_vault_chat_id = int(
+                    job.get("vault_chat_id") or settings.VAULT_CHANNEL_ID
+                )
                 uploaded_msg = await self._upload_to_vault(
                     bot=bot,
                     media_type=media_type,
                     processed_path=processed_path,
                     job_id=job_id,
+                    vault_chat_id=job_vault_chat_id,
                 )
 
                 partial_uploads.append({
@@ -368,9 +381,17 @@ class WatermarkWorker:
         media_type: Optional[str],
         processed_path: str,
         job_id: str,
+        vault_chat_id: Optional[int] = None,
     ):
         """
-        Upload one watermarked file to the vault channel.
+        Upload one watermarked file to the correct destination vault channel.
+
+        Args:
+            vault_chat_id: The Telegram channel ID to upload to. Callers must
+                pass the job's ``vault_chat_id`` field so that NSFW content
+                goes to NSFW_VAULT_CHANNEL_ID and Premium content goes to
+                PREMIUM_VAULT_CHANNEL_ID. Falls back to settings.VAULT_CHANNEL_ID
+                only when the caller does not supply this argument (legacy path).
 
         Retries up to 3 times on FloodWait (sleeping the required seconds)
         and on transient errors (exponential backoff).  Raises immediately
@@ -379,24 +400,28 @@ class WatermarkWorker:
         Returns the sent Message object on success.
         Raises DispatcherError if all retries are exhausted.
         """
+        # Use caller-supplied vault channel; fall back to generic only as
+        # a safety net for callers that don't pass the argument.
+        target_channel = int(vault_chat_id) if vault_chat_id else settings.VAULT_CHANNEL_ID
+
         uploaded_msg = None
         for attempt in range(3):
             try:
                 if media_type == MediaType.VIDEO.value:
                     uploaded_msg = await bot.send_video(
-                        chat_id=settings.VAULT_CHANNEL_ID,
+                        chat_id=target_channel,
                         video=processed_path,
                         caption="[WATERMARKED ALBUM ITEM]",
                     )
                 elif media_type == MediaType.PHOTO.value:
                     uploaded_msg = await bot.send_photo(
-                        chat_id=settings.VAULT_CHANNEL_ID,
+                        chat_id=target_channel,
                         photo=processed_path,
                         caption="[WATERMARKED ALBUM ITEM]",
                     )
                 else:
                     uploaded_msg = await bot.send_document(
-                        chat_id=settings.VAULT_CHANNEL_ID,
+                        chat_id=target_channel,
                         document=processed_path,
                         caption="[WATERMARKED ITEM]",
                     )
@@ -404,7 +429,8 @@ class WatermarkWorker:
             except _FATAL_UPLOAD_ERRORS as e:
                 # These errors will not resolve on retry — fail fast.
                 raise DispatcherError(
-                    f"Fatal vault upload error for job {job_id}: {e}"
+                    f"Fatal vault upload error for job {job_id} "
+                    f"(target_channel={target_channel}): {e}"
                 ) from e
             except FloodWait as fw:
                 await asyncio.sleep(fw.value + 1)
@@ -416,7 +442,7 @@ class WatermarkWorker:
         if uploaded_msg is None:
             raise DispatcherError(
                 f"Failed to upload watermarked item to vault for job {job_id} "
-                f"after 3 attempts"
+                f"(target_channel={target_channel}) after 3 attempts"
             )
         return uploaded_msg
 

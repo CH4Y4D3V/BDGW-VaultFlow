@@ -32,7 +32,16 @@ class ChannelService:
                 destination=ModerationDestination.NSFW.value,
                 doc={
                     "destination": ModerationDestination.NSFW.value,
-                    "source_channel_id": str(settings.VAULT_CHANNEL_ID),
+                    # FIX: was settings.VAULT_CHANNEL_ID (generic). NSFW content is
+                    # archived to NSFW_VAULT_CHANNEL_ID — that is the correct source
+                    # for daily-cap accounting and job source_channel_id labelling.
+                    # Using the generic VAULT_CHANNEL_ID caused daily cap counts for
+                    # the scheduler/provider path to be attributed to a different
+                    # source_channel_id than the one written by enqueue_for_distribution
+                    # ("submission_nsfw"), making cap enforcement unreliable.
+                    "source_channel_id": str(
+                        settings.NSFW_VAULT_CHANNEL_ID or settings.VAULT_CHANNEL_ID
+                    ),
                     "target_channel_ids": [str(settings.NSFW_GROUP_ID)],
                     "is_active": True,
                     "watermark_config": _get_watermark_config(ModerationDestination.NSFW),

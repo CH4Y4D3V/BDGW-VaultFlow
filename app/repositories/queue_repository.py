@@ -26,6 +26,10 @@ class QueueRepository:
         self._dlq = db[settings.DEAD_LETTER_COLLECTION]
         self._metrics = db[settings.METRICS_COLLECTION]
         self._locks = db[settings.LOCK_COLLECTION]
+        # Vault collection handle used by mark_completed() to release the
+        # distribution_state lock and set cooldown_until after delivery so the
+        # vault replay pool respects the configured fairness window.
+        self._vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
 
     # ─── Enqueue ─────────────────────────────────────────────────────────────
 
@@ -484,21 +488,71 @@ class QueueRepository:
 
     async def mark_completed(self, job_id: str) -> None:
         """
-        Mark a job as COMPLETED and clear its lock fields.
-        Sets completed_at timestamp for fairness/repost-prevention window queries.
+        Mark a job as COMPLETED, clear its lock fields, and release the vault doc.
+
+        Two actions are performed atomically in sequence (the vault update is
+        non-fatal — a failure there does not prevent the job from being marked
+        COMPLETED):
+
+        1. Queue job:  status → COMPLETED, lock fields cleared, completed_at set.
+        2. Vault doc:  distribution_state → None (unlocked), cooldown_until set
+                       to now + VAULT_FILL_COOLDOWN_HOURS, last_posted_at and
+                       post_count updated for fairness tracking.
+
+        The vault release is what allows this content to re-enter the vault
+        replay pool after the cooldown window expires.  Without this step the
+        vault doc keeps distribution_state="pending_delivery" forever, the
+        provider never returns it again, and vault replay silently dies.
         """
+        now = datetime.now(timezone.utc)
+
+        # 1. Mark the queue job completed.
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
             {
                 "$set": {
                     "status": JobStatus.COMPLETED,
-                    "completed_at": datetime.now(timezone.utc),
-                    "updated_at": datetime.now(timezone.utc),
+                    "completed_at": now,
+                    "updated_at": now,
                     "locked_by": None,
                     "locked_at": None,
                 }
             },
         )
+
+        # 2. Release the vault doc and set cooldown.
+        # Read the job to get content_id (needed to find the vault doc).
+        # Non-fatal: if this fails the job is still COMPLETED; the vault doc
+        # just remains locked until the next restart recovery or manual fix.
+        try:
+            job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
+            content_id = job_doc.get("content_id") if job_doc else None
+
+            if content_id:
+                cooldown_hours = getattr(settings, "VAULT_FILL_COOLDOWN_HOURS", 24)
+                cooldown_until = now + timedelta(hours=int(cooldown_hours))
+                await self._vault.update_one(
+                    {"content_id": content_id},
+                    {
+                        "$set": {
+                            "distribution_state": None,
+                            "cooldown_until": cooldown_until,
+                            "last_posted_at": now,
+                            "updated_at": now,
+                        },
+                        "$inc": {"post_count": 1},
+                    },
+                )
+            else:
+                logger.warning(
+                    "mark_completed: job has no content_id — vault doc not released",
+                    extra={"ctx_job_id": job_id},
+                )
+        except Exception as vault_err:
+            logger.error(
+                "mark_completed: vault doc release failed (non-fatal)",
+                extra={"ctx_job_id": job_id, "ctx_error": str(vault_err)},
+            )
 
     async def mark_failed(
         self,

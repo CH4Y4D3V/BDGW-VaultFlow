@@ -793,14 +793,26 @@ class AppLifecycle:
             )
 
         # ── Step 11: Watermark worker pool ─────────────────────────────────
+        # NOTE: WatermarkWorkerPool is already started inside DistributionEngine
+        # (Step 5). Starting a second standalone pool here causes two worker
+        # sets to race over the same WATERMARKING jobs, producing double-
+        # processing, vault_ref_unique constraint violations, and orphaned
+        # watermarked files. The engine's pool is authoritative — this step
+        # is intentionally a no-op that logs confirmation of the engine pool.
         try:
-            from app.watermark.worker_pool import WatermarkWorkerPool
-            self._watermark_pool = WatermarkWorkerPool(db=DatabaseManager.get_db())
-            await self._watermark_pool.start()
-            logger.info("lifecycle_watermark_pool_started")
+            if self._engine and self._engine.watermark_pool:
+                logger.info(
+                    "lifecycle_watermark_pool_confirmed",
+                    extra={"ctx_note": "engine watermark pool is active — no standalone pool needed"},
+                )
+            else:
+                logger.warning(
+                    "lifecycle_watermark_pool_engine_missing",
+                    extra={"ctx_note": "distribution engine has no watermark pool; check engine startup"},
+                )
         except Exception as e:
             logger.error(
-                "lifecycle_watermark_pool_failed",
+                "lifecycle_watermark_pool_check_failed",
                 extra={"ctx_error": str(e)},
             )
 

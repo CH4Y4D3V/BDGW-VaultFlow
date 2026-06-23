@@ -918,6 +918,49 @@ async def execute_approve(
             extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id},
         )
 
+    # Set cooldown_until and lock distribution_state on vault docs so the
+    # provider does not return them before the cooldown window expires.
+    #
+    # WHY: enqueue_for_distribution() creates a queue job with
+    # execute_after = vault_fill_execute_after. However, vault docs do not
+    # carry execute_after — the scheduler reads vault docs through provider.py
+    # and creates NEW jobs. Without cooldown_until on the vault doc the
+    # provider returns the item immediately every cycle, and the scheduler
+    # keeps hitting vault_ref_unique DuplicateKeyError (because an active
+    # job already exists) until the watermark + delivery completes. Setting
+    # cooldown_until = vault_fill_execute_after means the provider will not
+    # return this item until the active job has completed, eliminating the
+    # redundant DuplicateKeyError attempts entirely.
+    #
+    # The cooldown is also set here (not only in mark_completed) because this
+    # item was just immediately posted — we want the replay cooldown to start
+    # from now, not from when the fill job eventually runs.
+    try:
+        db = DatabaseManager.get_db()
+        vault_col = db[getattr(settings, "VAULT_COLLECTION", "vault")]
+        resolved_vault_channel = str(_resolve_vault_channel_id(dest))
+        valid_vault_ids = [vid for vid in vault_ids if vid and vid > 0]
+        if valid_vault_ids:
+            await vault_col.update_many(
+                {
+                    "vault_message_id": {"$in": valid_vault_ids},
+                    "vault_channel_id": resolved_vault_channel,
+                },
+                {
+                    "$set": {
+                        "distribution_state": "pending_delivery",
+                        "cooldown_until": vault_fill_execute_after,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+    except Exception as cooldown_err:
+        # Non-fatal: content was already posted and enqueued.
+        logger.warning(
+            "execute_approve: vault cooldown_until write failed (non-fatal)",
+            extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id, "ctx_error": str(cooldown_err)},
+        )
+
     # Step 4 — Clean up moderation card and hub media
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)
     try:
@@ -1099,6 +1142,34 @@ async def execute_queue(
             f"👤 Submitter: <code>{submitter_user_id}</code>",
         )
         return
+
+    # Lock vault docs so provider skips them while the active job exists.
+    # Without this the scheduler hits vault_ref_unique DuplicateJobError every
+    # cycle (harmless but noisy). mark_completed() releases the lock and sets
+    # cooldown_until after delivery.
+    try:
+        db = DatabaseManager.get_db()
+        vault_col = db[getattr(settings, "VAULT_COLLECTION", "vault")]
+        resolved_vault_channel = str(_resolve_vault_channel_id(dest))
+        valid_vault_ids = [vid for vid in vault_ids if vid and vid > 0]
+        if valid_vault_ids:
+            await vault_col.update_many(
+                {
+                    "vault_message_id": {"$in": valid_vault_ids},
+                    "vault_channel_id": resolved_vault_channel,
+                },
+                {
+                    "$set": {
+                        "distribution_state": "pending_delivery",
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+    except Exception as lock_err:
+        logger.warning(
+            "execute_queue: vault distribution_state lock write failed (non-fatal)",
+            extra={"ctx_dest": dest, "ctx_submitter": submitter_user_id, "ctx_error": str(lock_err)},
+        )
 
     # Step 3 — Clean up moderation card and hub media
     await safe_delete_message(client, mod_card_chat_id, mod_card_message_id)

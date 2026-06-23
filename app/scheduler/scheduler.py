@@ -749,6 +749,40 @@ class DistributionScheduler:
                     "ctx_watermark": watermark_required,
                 },
             )
+
+            # Lock the vault document so the provider will not return this item
+            # again on the next scheduler cycle.  Without this, the same vault
+            # doc is returned every cycle, triggering a DuplicateJobError on
+            # every subsequent attempt (because vault_ref_unique blocks
+            # re-insertion for active statuses).  That's harmless but wastes
+            # a round-trip per cycle per item.
+            #
+            # The lock is released by QueueRepository.mark_completed() once
+            # the delivery worker confirms the item was sent, at which point
+            # cooldown_until is also set so vault replay respects the fairness
+            # window before the item re-enters the pool.
+            try:
+                vault_col = self._db[settings.VAULT_COLLECTION]
+                await vault_col.update_one(
+                    {"content_id": content_item["content_id"]},
+                    {
+                        "$set": {
+                            "distribution_state": "pending_delivery",
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+            except Exception as vault_lock_err:
+                # Non-fatal: delivery will still happen. The next cycle will
+                # just hit DuplicateJobError again (harmless).
+                logger.warning(
+                    "enqueue_content: vault distribution_state lock write failed (non-fatal)",
+                    extra={
+                        "ctx_content_id": content_item.get("content_id"),
+                        "ctx_error": str(vault_lock_err),
+                    },
+                )
+
             return True
         except DuplicateJobError:
             return False

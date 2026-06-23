@@ -15,6 +15,13 @@ async def fetch_distribution_content() -> List[Dict]:
 
     Provides the data boundary ensuring only fully ingested, non-duplicate,
     non-locked, non-cooldown content is released to the fairness selector.
+
+    FIX: Previously only queried status=QUEUED. Content approved via
+    execute_approve() has status=POSTED and was invisible forever, meaning
+    "Approve Immediately" content never re-entered the distribution pool.
+    Now also includes status=POSTED items where cooldown_until has expired
+    (or is absent). execute_approve() sets cooldown_until on the vault doc
+    so these items are suppressed until their cooldown passes.
     """
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
@@ -43,21 +50,29 @@ async def fetch_distribution_content() -> List[Dict]:
             )
             continue
 
+        # Eligible statuses: QUEUED (queued for first delivery) and POSTED
+        # (already posted once via execute_approve — eligible for vault replay
+        # after cooldown expires).
+        eligible_statuses = [
+            ModerationState.QUEUED.value,
+            ModerationState.POSTED.value,
+        ]
+
         # Diagnostic counts so operators can see exactly why content is or isn't flowing
         total_queued = await vault.count_documents({
             "moderation_destination": dest,
-            "status": ModerationState.QUEUED.value,
+            "status": {"$in": eligible_statuses},
         })
 
         total_locked = await vault.count_documents({
             "moderation_destination": dest,
-            "status": ModerationState.QUEUED.value,
+            "status": {"$in": eligible_statuses},
             "distribution_state": {"$in": ["locked", "removed"]},
         })
 
         cursor = vault.find({
             "moderation_destination": dest,
-            "status": ModerationState.QUEUED.value,
+            "status": {"$in": eligible_statuses},
             "distribution_state": {"$nin": ["locked", "removed"]},
             "$or": [
                 {"cooldown_until": None},
