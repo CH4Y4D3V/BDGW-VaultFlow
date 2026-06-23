@@ -114,8 +114,21 @@ async def handle_submission(client: Client, message: Message) -> None:
         raise StopPropagation
 
     if not user_has_consent:
-        # Consent gate handled by creator_onboarding.py — pass to next handler
-        raise ContinuePropagation
+        # User has not completed creator onboarding (no creator_profile +
+        # consent_record in DB). Show the consent attestation prompt directly.
+        #
+        # PREVIOUS BUG: this raised ContinuePropagation with a comment saying
+        # "handled by creator_onboarding.py". But creator_onboarding.py has NO
+        # handler for general media/text messages — only for the /become_creator
+        # command and consent callbacks. ContinuePropagation therefore fell
+        # straight through to group=3 (support_handler.handle_private_message),
+        # which routed the message to the user's hub support topic with text
+        # "Your message has been sent to the support team". Every non-creator
+        # media send created a spurious support session instead of showing the
+        # consent form. Fixed: call _send_onboarding_prompt() here and stop.
+        from app.handlers.creator_onboarding import _send_onboarding_prompt
+        await _send_onboarding_prompt(client, message)
+        raise StopPropagation
 
     # ── Media group (album) buffering ─────────────────────────────────────────
     if message.media_group_id:

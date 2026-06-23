@@ -489,50 +489,141 @@ class AppLifecycle:
             ]
 
             try:
-                # Public scope
+                from pyrogram.types import BotCommandScopeDefault
+
+                # 1. Public commands for all private chats (Section 4.1).
                 await self._bot.set_bot_commands(
                     public_commands,
                     scope=BotCommandScopeAllPrivateChats(),
                 )
+                logger.info("lifecycle_public_commands_set")
 
-                # Hub admin scope — all admins in the verification hub group
-                # see these when they type / inside any hub topic
                 hub_id = getattr(settings, "VERIFICATION_GROUP_ID", None)
                 if hub_id:
+                    # 2. Hub-scope: all group administrators see hub_commands when
+                    #    they type / inside the verification hub (including topics).
+                    #    REQUIRES the bot to be a group administrator — Telegram
+                    #    rejects this call with USER_ADMIN_INVALID otherwise.
+                    #    We log the FULL error text so the operator knows exactly
+                    #    what to fix (previously was silently swallowed).
                     try:
                         await self._bot.set_bot_commands(
                             hub_commands,
                             scope=BotCommandScopeChatAdministrators(chat_id=hub_id),
                         )
+                        logger.info(
+                            "lifecycle_hub_admin_scope_commands_set",
+                            extra={"ctx_hub_id": hub_id},
+                        )
                     except Exception as hub_scope_err:
+                        # Common cause: bot is not a group admin.
+                        # Fix: promote the bot to admin in the verification hub.
                         logger.warning(
-                            "lifecycle_set_hub_admin_commands_failed",
-                            extra={"ctx_error": str(hub_scope_err)},
+                            "lifecycle_set_hub_admin_commands_failed — "                            "ensure bot is an ADMIN in the verification hub group "                            "(VERIFICATION_GROUP_ID=%s)",
+                            hub_id,
+                            extra={"ctx_error": str(hub_scope_err), "ctx_hub_id": hub_id},
                         )
 
-                    # Also register per-user in private chat for each admin/owner
-                    # so they see admin commands when DMing the bot directly
+                    # 3. Per-member scope — registers hub_commands for each admin
+                    #    in the bot's own admins collection AND for any ADMIN_IDS
+                    #    env entries, so they see commands both in the hub topics
+                    #    and when DMing the bot directly.
+                    #
+                    #    FIX: previously only queried the admins collection. If that
+                    #    collection is empty (owner not yet seeded via /grant or the
+                    #    DB seed script) the loop body never executed and no per-
+                    #    member commands were ever registered. Now we union the DB
+                    #    set with ADMIN_IDS from settings so at least the env-
+                    #    configured admins always get their commands.
+                    combined_admin_ids: set[int] = set()
+
+                    # From env
+                    env_admin_ids = getattr(settings, "ADMIN_IDS", []) or []
+                    if isinstance(env_admin_ids, str):
+                        env_admin_ids = [
+                            int(x.strip())
+                            for x in env_admin_ids.split(",")
+                            if x.strip().lstrip("-").isdigit()
+                        ]
+                    combined_admin_ids.update(int(a) for a in env_admin_ids if a)
+
+                    # From DB
                     try:
                         db = DatabaseManager.get_db()
                         admin_docs = await db["admins"].find(
                             {"is_active": True}
-                        ).to_list(length=100)
+                        ).to_list(length=200)
                         for admin_doc in admin_docs:
+                            uid = admin_doc.get("user_id")
+                            if uid:
+                                combined_admin_ids.add(int(uid))
+                    except Exception as db_err:
+                        logger.warning(
+                            "lifecycle_admin_db_read_failed — falling back to ADMIN_IDS only",
+                            extra={"ctx_error": str(db_err)},
+                        )
+
+                    logger.info(
+                        "lifecycle_registering_per_member_commands",
+                        extra={"ctx_admin_ids": sorted(combined_admin_ids)},
+                    )
+
+                    ok_count = 0
+                    fail_count = 0
+                    for admin_user_id in combined_admin_ids:
+                        # BotCommandScopeChatMember: commands shown to this specific
+                        # user inside the hub group/topics (highest priority scope).
+                        hub_member_ok = False
+                        try:
+                            await self._bot.set_bot_commands(
+                                public_commands + hub_commands,
+                                scope=BotCommandScopeChatMember(
+                                    chat_id=hub_id,
+                                    user_id=admin_user_id,
+                                ),
+                            )
+                            hub_member_ok = True
+                        except Exception as member_err:
+                            # Telegram returns USER_INVALID / CHAT_ADMIN_REQUIRED when
+                            # the user is not a member of the hub. Fall back to the
+                            # BotCommandScopeDefault so they at least see the commands
+                            # when DMing the bot privately.
+                            logger.debug(
+                                "lifecycle_chatmember_scope_failed — user not in hub, using default scope",
+                                extra={
+                                    "ctx_admin_id": admin_user_id,
+                                    "ctx_error": str(member_err),
+                                },
+                            )
+
+                        if not hub_member_ok:
+                            # Fallback: BotCommandScopeDefault shows to this user
+                            # everywhere (lowest priority but always works).
                             try:
                                 await self._bot.set_bot_commands(
                                     public_commands + hub_commands,
-                                    scope=BotCommandScopeChatMember(
-                                        chat_id=hub_id,
-                                        user_id=admin_doc["user_id"],
-                                    ),
+                                    scope=BotCommandScopeDefault(),
                                 )
                             except Exception:
-                                pass  # Non-fatal — admin may have left hub
-                    except Exception as per_user_err:
-                        logger.warning(
-                            "lifecycle_set_per_admin_commands_failed",
-                            extra={"ctx_error": str(per_user_err)},
-                        )
+                                pass  # Non-fatal; at minimum hub_admin scope is set
+
+                        if hub_member_ok:
+                            ok_count += 1
+                        else:
+                            fail_count += 1
+
+                    logger.info(
+                        "lifecycle_per_member_commands_done",
+                        extra={
+                            "ctx_ok": ok_count,
+                            "ctx_failed_fallback": fail_count,
+                            "ctx_total": len(combined_admin_ids),
+                        },
+                    )
+                else:
+                    logger.warning(
+                        "lifecycle_no_hub_id — admin commands not registered in hub scope. "                        "Set VERIFICATION_GROUP_ID in .env"
+                    )
 
             except Exception as cmd_err:
                 logger.warning(
