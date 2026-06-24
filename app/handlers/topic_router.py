@@ -147,11 +147,24 @@ async def _send_to_hub(
             return  # Non-fatal; do not retry on non-FloodWait errors
 
 
-@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID))
+@Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID), group=10)
 async def route_admin_reply_to_user(client: Client, message: Message) -> None:
     """
     Routes any non-command, non-card message from a user-centric hub topic
     to the corresponding user's private DMs.
+
+    Pinned to group=10 so it always runs AFTER group=0 handlers
+    (callback_handler.handle_mod_reject_reason_reply, admin command handlers,
+    payment_handler FSM handlers).  Without an explicit group number, plugin
+    load order on Linux is inode-ordered, not alphabetical.  If topic_router
+    happened to load before callback_handler, it would forward a rejection
+    reason text to the user's DM before the rejection flow could process it —
+    the user receives the raw typed reason instead of the formatted rejection
+    notice, and the admin card is left in a broken state.
+
+    By placing this handler at group=10 we guarantee it is the last resort:
+    only messages that all group=0 handlers have declined to claim (by raising
+    ContinuePropagation) reach this router.
 
     Gates (in order):
       1. Message must be inside a forum topic (thread_id present).

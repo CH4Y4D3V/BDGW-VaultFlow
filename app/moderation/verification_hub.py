@@ -253,11 +253,26 @@ async def forward_to_verification(
     # Admin always sees: Full Name, Username, User ID."
     # The Redis user:anon:{user_id} key and anonymous toggle were removed
     # from the spec — do NOT check any anonymous flag here.
-    user_label = f"User {submitter_user_id}"
+    #
+    # FIX: previously displayed only the numeric ID
+    # (user_label = f"User {submitter_user_id}"). The submitter's full name
+    # and username were never surfaced to admins on the moderation card.
+    # messages[0].from_user is always populated for private-chat messages
+    # (these originate in the user's DM with the bot).
+    _from_user = messages[0].from_user if messages else None
+    if _from_user:
+        _first = (_from_user.first_name or "").strip()
+        _last  = (_from_user.last_name  or "").strip()
+        _full_name = f"{_first} {_last}".strip() or "—"
+        _username_part = f" (@{_from_user.username})" if _from_user.username else ""
+    else:
+        _full_name = "—"
+        _username_part = ""
 
     info_text = (
         f"📬 <b>New Submission</b>\n\n"
-        f"👤 Submitter: <code>{user_label}</code> (<code>{submitter_user_id}</code>)\n"
+        f"👤 {_full_name}{_username_part}\n"
+        f"🆔 <code>{submitter_user_id}</code>\n"
         f"📦 Content: {count} {media_label}"
     )
 

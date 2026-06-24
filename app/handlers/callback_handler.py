@@ -259,7 +259,12 @@ async def handle_mod_reject_reason_reply(
     ctx_key = f"mod_reject_ctx:{card_message.chat.id}:{card_message.id}"
     ctx_raw = await redis.get(ctx_key)
     if not ctx_raw:
-        return
+        # Redis key expired or was never set — this is NOT a rejection reason
+        # reply we should handle. Yield to the next handler (topic_router) so
+        # the message can be bridged to the user as a normal admin reply.
+        # Previously used `return` here which silently dropped the message:
+        # neither execute_reject ran nor did topic_router get to bridge it.
+        raise ContinuePropagation
 
     import json
     ctx = json.loads(ctx_raw)
