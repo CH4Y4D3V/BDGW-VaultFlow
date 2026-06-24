@@ -216,7 +216,15 @@ async def route_to_support_topic(client: Client, message: Message) -> None:
                     "user_id": user.id,
                     "topic_id": topic_id,
                     "status": "PENDING",
-                    "created_at": now,
+                    # FIX: spec §25A.8 uses opened_at; submission_handler checks
+                    # this field to decide whether to yield a recent pending session
+                    # to support or proceed with content submission.  Previously
+                    # used created_at here which caused submission_handler's
+                    # opened_at check to always miss — any user with a stale
+                    # PENDING session had ALL subsequent content permanently routed
+                    # to support instead of the mod queue.
+                    "opened_at": now,
+                    "created_at": now,   # kept for backward compat with existing docs
                     "notified_unattended": False,
                 })
                 session_doc = {"_id": result.inserted_id, "user_id": user.id, "topic_id": topic_id, "status": "PENDING"}

@@ -39,47 +39,57 @@ async def handle_submission(client: Client, message: Message) -> None:
     Buffers album messages, then forwards to the verification hub.
     """
     if not message.from_user:
-        return
+        # No user context — nothing to route. Raise StopPropagation not return:
+        # a bare return() leaves group dispatch open, which lets group=3
+        # (support handler) run and create a spurious support session.
+        raise StopPropagation
 
     user_id = message.from_user.id
 
-    # FIX: if the user is mid-takedown-flow (STATE_AWAITING_ID/REASON/LINK),
-    # let handle_takedown_fsm process this message instead of treating it as
-    # a content submission (relevant for verified creators using /takedown).
-    from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
-    state, _ = await _get_fsm(user_id)
-    if state != STATE_IDLE:
-        raise ContinuePropagation
+    # ── Gate 1: takedown FSM ────────────────────────────────────────────────
+    # If the user is mid-takedown-flow, let takedown_handler claim this message.
+    try:
+        from app.handlers.takedown_handler import _get_fsm, STATE_IDLE
+        state, _ = await _get_fsm(user_id)
+        if state != STATE_IDLE:
+            raise ContinuePropagation
+    except ContinuePropagation:
+        raise
+    except Exception as fsm_err:
+        # FSM lookup error — proceed with submission rather than silently
+        # blocking the user.
+        logger.warning(
+            "submission_takedown_fsm_check_failed — proceeding",
+            extra={"ctx_user_id": user_id, "ctx_error": str(fsm_err)},
+        )
 
-    # FIX: if the user has an open support conversation, yield so
-    # support_handler's catch-all (group=3) can route this message
-    # into their hub topic instead. But only block for RECENT sessions
-    # to avoid permanently locking out users with stale PENDING sessions
-    # that were never accepted by an admin (PENDING sessions live forever
-    # per the spec — the 5-minute unattended timer only sends a notification,
-    # it does not close or expire the session).
+    # ── Gate 2: active support session ──────────────────────────────────────
+    # Yield ONLY for genuinely active (admin-accepted) sessions. Stale PENDING
+    # sessions (never accepted) must NOT permanently block content submission —
+    # they live forever per spec (the 5-min unattended timer only notifies, it
+    # does not close or expire the session).
     #
-    # Rules:
-    #   ACTIVE  (admin accepted)   → always yield to support
-    #   PENDING created < 10 min   → yield (covers /help immediate follow-up)
-    #   PENDING created ≥ 10 min   → do NOT yield (stale, don't block submission)
+    # FIX: previously checked "opened_at" but route_to_support_topic inserts
+    # the doc with field "created_at". The field name mismatch meant the
+    # PENDING-within-10-min gate ALWAYS missed, so any user who ever sent an
+    # unhandled message (creating a stale PENDING session) would have ALL their
+    # subsequent content permanently routed to support instead of the mod queue.
+    # Fixed: use "created_at" to match the actual insert field.
     try:
         from datetime import datetime, timezone, timedelta
         db_check = DatabaseManager.get_db()
-        # Check for an ACTIVE session first (most common case, fast indexed lookup)
         active_session = await db_check["support_sessions"].find_one(
             {"user_id": user_id, "status": "ACTIVE"},
         )
         if active_session:
             raise ContinuePropagation
 
-        # Check for a RECENT pending session (within 10 minutes)
         recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
         recent_pending = await db_check["support_sessions"].find_one(
             {
                 "user_id": user_id,
                 "status": "PENDING",
-                "opened_at": {"$gte": recent_cutoff},
+                "created_at": {"$gte": recent_cutoff},  # FIX: was "opened_at"
             },
         )
         if recent_pending:
@@ -91,18 +101,14 @@ async def handle_submission(client: Client, message: Message) -> None:
             "submission_support_session_check_failed — proceeding with submission",
             extra={"ctx_user_id": user_id, "ctx_error": str(support_check_err)},
         )
-        # DB hiccup — proceed with submission (don't silently swallow all
-        # content from this user by yielding to support on every DB error)
 
-    # ── Check consent first ───────────────────────────────────────────────────
+    # ── Consent / creator verification ──────────────────────────────────────
     db = DatabaseManager.get_db()
     service = SubmissionService(db)
 
     try:
         user_has_consent = await service.has_consent(user_id)
     except Exception as consent_err:
-        # Any DB/network error during consent check must NOT silently route to
-        # support. Log it and tell the user to try again.
         logger.error(
             "submission_consent_check_failed",
             extra={"ctx_user_id": user_id, "ctx_error": str(consent_err)},
@@ -114,30 +120,42 @@ async def handle_submission(client: Client, message: Message) -> None:
         raise StopPropagation
 
     if not user_has_consent:
-        # User has not completed creator onboarding (no creator_profile +
-        # consent_record in DB). Show the consent attestation prompt directly.
-        #
-        # PREVIOUS BUG: this raised ContinuePropagation with a comment saying
-        # "handled by creator_onboarding.py". But creator_onboarding.py has NO
-        # handler for general media/text messages — only for the /become_creator
-        # command and consent callbacks. ContinuePropagation therefore fell
-        # straight through to group=3 (support_handler.handle_private_message),
-        # which routed the message to the user's hub support topic with text
-        # "Your message has been sent to the support team". Every non-creator
-        # media send created a spurious support session instead of showing the
-        # consent form. Fixed: call _send_onboarding_prompt() here and stop.
+        # Not a verified creator — show consent form and stop. Never yield to
+        # support: a non-creator sending media should see the attestation prompt,
+        # not "Your message has been sent to the support team".
         from app.handlers.creator_onboarding import _send_onboarding_prompt
         await _send_onboarding_prompt(client, message)
         raise StopPropagation
 
-    # ── Media group (album) buffering ─────────────────────────────────────────
-    if message.media_group_id:
-        await _handle_album_message(client, message, user_id)
-        raise StopPropagation  # prevent support handler from also firing
-
-    # ── Single message ────────────────────────────────────────────────────────
-    await _process_submission(client, user_id, [message])
-    raise StopPropagation  # prevent support handler from also firing
+    # ── Verified creator — process submission ────────────────────────────────
+    # Wrap in try/except so that ANY exception inside _process_submission or
+    # _handle_album_message still raises StopPropagation afterward.
+    #
+    # ROOT-CAUSE FIX: previously the raise StopPropagation was on the line
+    # *after* await _process_submission(). If _process_submission raised an
+    # unhandled exception (topic creation failure, DB error, FloodWait, etc.)
+    # that line was never reached. Pyrogram caught the exception, logged it,
+    # and passed the message to group=3 (support handler). The verified
+    # creator's content ended up as a support ticket instead of the mod queue.
+    try:
+        if message.media_group_id:
+            await _handle_album_message(client, message, user_id)
+        else:
+            await _process_submission(client, user_id, [message])
+    except Exception as proc_err:
+        logger.error(
+            "submission_process_failed — notifying user",
+            extra={"ctx_user_id": user_id, "ctx_error": str(proc_err)},
+            exc_info=True,
+        )
+        try:
+            await message.reply_text(
+                "⚠️ Your submission could not be processed right now. "
+                "Please try again in a moment."
+            )
+        except Exception:
+            pass
+    raise StopPropagation  # always — a verified creator's message is NEVER support
 
 
 async def _handle_album_message(client: Client, message: Message, user_id: int) -> None:
