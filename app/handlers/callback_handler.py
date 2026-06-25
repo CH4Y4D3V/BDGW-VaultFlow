@@ -273,7 +273,10 @@ async def handle_mod_reject_reason_reply(
     reason = (message.text or "").strip()
     if not reason:
         await message.reply_text("❌ Rejection reason cannot be empty.")
-        return
+        # StopPropagation not ContinuePropagation: the message context is consumed
+        # (Redis key was already deleted above). We own this message — don't let
+        # route_admin_reply_to_user also try to forward the empty-text message.
+        raise StopPropagation
 
     submitter_id = ctx["submitter_id"]
     msg_id = ctx["msg_id"]
@@ -302,3 +305,7 @@ async def handle_mod_reject_reason_reply(
         await replied_to.delete()
     except Exception:
         pass
+    # StopPropagation: rejection is fully handled. Without this, Pyrogram
+    # moves to group=10 (route_admin_reply_to_user) which tries copy_message
+    # on the now-deleted admin message → logged as MessageIdInvalid every time.
+    raise StopPropagation

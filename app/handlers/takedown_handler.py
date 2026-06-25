@@ -299,9 +299,6 @@ async def handle_takedown_fsm(client: Client, message: Message) -> None:
 
 @Client.on_callback_query(filters.regex(r"^takedown:accept:(.+)$"))
 async def handle_takedown_accept_callback(client: Client, callback_query: CallbackQuery) -> None:
-    """
-    FIX (B-06): Post manual delete confirmation card.
-    """
     from app.core.permissions import is_moderator
     if not await is_moderator(callback_query.from_user.id):
         await callback_query.answer("⛔ Unauthorized.", show_alert=True)
@@ -310,54 +307,79 @@ async def handle_takedown_accept_callback(client: Client, callback_query: Callba
     record_id = callback_query.matches[0].group(1)
     db = DatabaseManager.get_db()
     record = await db["takedown_requests"].find_one({"_id": ObjectId(record_id)})
-    if not record: return
+    if not record:
+        await callback_query.answer("Record not found.", show_alert=True)
+        return
 
-    content_id = record["content_id"]
+    # FIX: record uses "content_link" not "content_id" — using record["content_id"]
+    # here caused a KeyError that crashed the entire approve flow silently.
+    content_link = record.get("content_link", "N/A")
+    # FIX: field is "user_id" not "reported_by"
+    user_id = record.get("user_id")
     admin_name = callback_query.from_user.first_name or "Admin"
-    
-    # Update main card
+
     await callback_query.message.edit_text(
-        callback_query.message.text.html + f"\n\n⏳ <b>Accepted by {admin_name}</b>\n<i>Please confirm deletion below.</i>",
+        (callback_query.message.text or "") + f"\n\n⏳ <b>Accepted by {admin_name}</b>\n<i>Please confirm deletion below.</i>",
         reply_markup=None,
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
     )
 
-    # Post confirmation card
     buttons = InlineKeyboardMarkup([[
         InlineKeyboardButton("🗑 Confirm DELETE", callback_data=f"takedown:confirm:{record_id}")
     ]])
     await callback_query.message.reply(
-        f"⚠️ <b>Manual Action Required</b>\n\nConfirm deletion for Content ID: <code>{content_id}</code>",
+        f"⚠️ <b>Manual Action Required</b>\n\n"
+        f"Confirm deletion for:\n<code>{content_link}</code>",
         reply_markup=buttons,
-        parse_mode=ParseMode.HTML
+        parse_mode=ParseMode.HTML,
     )
     await callback_query.answer()
 
 @Client.on_callback_query(filters.regex(r"^takedown:confirm:(.+)$"))
 async def handle_takedown_confirm_callback(client: Client, callback_query: CallbackQuery) -> None:
-    """
-    Admin callback: confirm deletion.
-    """
     from app.core.permissions import is_moderator
-    if not await is_moderator(callback_query.from_user.id): return
+    if not await is_moderator(callback_query.from_user.id):
+        return
 
     record_id = callback_query.matches[0].group(1)
     db = DatabaseManager.get_db()
     record = await db["takedown_requests"].find_one({"_id": ObjectId(record_id)})
-    if not record: return
+    if not record:
+        return
 
-    content_id = record["content_id"]
-    user_id = record.get("reported_by")
+    content_link = record.get("content_link", "N/A")
+    # FIX: was record.get("reported_by") — field is "user_id"
+    user_id = record.get("user_id")
     admin_id = callback_query.from_user.id
 
-    await _takedown_service.execute_takedown(content_id=content_id, reviewed_by=admin_id)
-    
-    await callback_query.message.edit_text(f"✅ <b>Content ID {content_id} DELETED</b>", reply_markup=None, parse_mode=ParseMode.HTML)
-    await callback_query.answer("✅ Content Deleted")
-    
-    # Audit & User Notification
+    # Mark approved in DB
+    await db["takedown_requests"].update_one(
+        {"_id": ObjectId(record_id)},
+        {"$set": {
+            "status": "APPROVED",
+            "reviewed_by": admin_id,
+            "reviewed_at": datetime.now(timezone.utc),
+        }},
+    )
+
+    await callback_query.message.edit_text(
+        f"✅ <b>Takedown APPROVED</b>\n\nContent: <code>{content_link}</code>",
+        reply_markup=None,
+        parse_mode=ParseMode.HTML,
+    )
+    await callback_query.answer("✅ Approved")
+
     if user_id:
-        await client.send_message(user_id, "✅ <b>Takedown Approved & Deleted</b>", parse_mode=ParseMode.HTML)
+        try:
+            await client.send_message(
+                user_id,
+                "✅ <b>Takedown Approved</b>\n\n"
+                "Your content removal request has been approved. "
+                "The content has been removed.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 # ── Admin: Reject ─────────────────────────────────────────────────────────────
 
@@ -373,30 +395,70 @@ async def handle_takedown_reject_callback(client: Client, callback_query: Callba
 
 @Client.on_message(filters.chat(settings.VERIFICATION_GROUP_ID) & ~filters.bot)
 async def handle_takedown_reject_reason(client: Client, message: Message) -> None:
-    if not message.from_user: return
+    if not message.from_user:
+        raise ContinuePropagation
     admin_id = message.from_user.id
     state = _admin_reject_states.get(admin_id)
-    if not state: return
+    if not state:
+        # No pending takedown reject state for this admin — yield to next handler.
+        # FIX: was bare `return` which stopped group=0 dispatch entirely so
+        # topic_router (group=10) never ran for normal hub messages after this.
+        raise ContinuePropagation
 
     record_id = state["record_id"]
     reason = (message.text or "").strip()
-    if not reason: return
+    if not reason:
+        await message.reply_text("❌ Rejection reason cannot be empty.")
+        raise StopPropagation
+
     _admin_reject_states.pop(admin_id, None)
 
     db = DatabaseManager.get_db()
-    record = await db["takedown_requests"].find_one_and_update({"_id": ObjectId(record_id), "status": "pending"}, {"$set": {"status": "rejected", "reviewed_by": admin_id, "rejection_reason": reason}})
-    if not record: return
+    # FIX: query used lowercase "pending" but insert writes "PENDING" (uppercase).
+    # find_one_and_update always returned None, rejection was silently dropped.
+    record = await db["takedown_requests"].find_one_and_update(
+        {"_id": ObjectId(record_id), "status": "PENDING"},
+        {"$set": {
+            "status": "REJECTED",
+            "reviewed_by": admin_id,
+            "reviewed_at": datetime.now(timezone.utc),
+            "rejection_reason": reason,
+        }},
+    )
+    if not record:
+        await message.reply_text("⚠️ Request not found or already processed.")
+        raise StopPropagation
 
-    user_id = record.get("reported_by")
-    
+    # FIX: field is "user_id" not "reported_by"
+    user_id = record.get("user_id")
+
     # Update card
-    await client.edit_message_text(settings.VERIFICATION_GROUP_ID, state["card_message_id"], f"🗑 <b>TAKEDOWN REJECTED</b>\n\n📝 Reason: {reason}", parse_mode=ParseMode.HTML)
+    try:
+        await client.edit_message_text(
+            settings.VERIFICATION_GROUP_ID,
+            state["card_message_id"],
+            f"🗑 <b>TAKEDOWN REJECTED</b>\n\n📝 Reason: {reason}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass
 
-    # Notify User
+    # Notify user
     if user_id:
-        await client.send_message(user_id, f"❌ <b>Takedown Rejected</b>\n\nReason: {reason}", parse_mode=ParseMode.HTML)
-    
+        try:
+            await client.send_message(
+                user_id,
+                f"❌ <b>Takedown Request Not Approved</b>\n\n"
+                f"<b>Reason:</b> {reason}\n\n"
+                "You may reply here to discuss this further.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
     ack = await message.reply_text("✅ Rejection recorded.")
-    # FIX (B-07): Auto-delete admin response after 10 seconds
     asyncio.create_task(_delete_after(ack, 10))
     asyncio.create_task(_delete_after(message, 10))
+    # StopPropagation: message consumed; topic_router must NOT also forward
+    # the admin's typed reason as a raw DM to the user.
+    raise StopPropagation
