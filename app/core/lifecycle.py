@@ -432,6 +432,28 @@ class AppLifecycle:
             logger.exception("lifecycle_hub_config_seeding_failed")
             # Non-fatal: workers fall back to settings if hub_config is empty.
 
+        # ── Extra handlers that use add_handler() instead of decorators ────────
+        # Pyrogram's plugin system (plugins=dict(root="app.handlers")) only
+        # auto-registers handlers built with @Client.on_* decorators.
+        # broadcast_handler and premium_links_handler use imperative
+        # app.add_handler() inside register_handlers() — without an explicit
+        # call here, those handlers are never wired and their features are
+        # completely dead (the /broadcast command would silently fall through
+        # to the support handler and premium invite links would never open).
+        try:
+            from app.handlers.broadcast_handler import register_handlers as register_broadcast
+            register_broadcast(self._bot)
+            logger.info("lifecycle_broadcast_handlers_registered")
+        except Exception:
+            logger.exception("lifecycle_broadcast_handlers_failed")
+
+        try:
+            from app.handlers.premium_links_handler import register_handlers as register_premium_links
+            register_premium_links(self._bot)
+            logger.info("lifecycle_premium_links_handlers_registered")
+        except Exception:
+            logger.exception("lifecycle_premium_links_handlers_failed")
+
         # ── Step 3: Redis health check ─────────────────────────────────────
         redis_client = None
         try:

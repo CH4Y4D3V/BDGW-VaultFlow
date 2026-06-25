@@ -1285,9 +1285,33 @@ def register_handlers(app: Client) -> None:
             filters.command("broadcast") & hub_filter,
         )
     )
+
+    # FIX: wrap _handle_broadcast_content so it ALWAYS raises StopPropagation,
+    # regardless of which internal code path exits (there are ~15 bare returns).
+    #
+    # ROOT CAUSE: _handle_broadcast_content had no StopPropagation anywhere.
+    # When an admin sent broadcast content in private chat, the handler ran and
+    # returned normally. Pyrogram then continued to group=2 (submission_handler).
+    # Since admins are verified creators, submission_handler processed the same
+    # message as a content submission — creating a spurious moderation card in
+    # the hub for every single piece of broadcast content the admin composed.
+    #
+    # Fix: every message that passes collecting_filter belongs exclusively to the
+    # broadcast flow and must never reach any lower-priority handler group.
+    async def _broadcast_content_guard(client: Client, message: Message) -> None:
+        try:
+            await _handle_broadcast_content(client, message)
+        except (StopPropagation, ContinuePropagation):
+            raise
+        except Exception:
+            logger.exception("_handle_broadcast_content raised unexpectedly")
+        finally:
+            # Always stop propagation — this message is owned by the broadcast FSM.
+            raise StopPropagation
+
     app.add_handler(
         MessageHandler(
-            _handle_broadcast_content,
+            _broadcast_content_guard,
             collecting_filter & filters.private,
         )
     )
