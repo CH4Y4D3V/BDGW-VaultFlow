@@ -359,7 +359,14 @@ class SubscriptionWorker:
 async def _get_all_premium_chat_ids() -> list[int]:
     db = DatabaseManager.get_db()
     chat_ids: list[int] = []
-    for key in ("nsfw_group_id", "premium_group_id", "premium_vault_channel_id"):
+    # FIX: previously included "premium_vault_channel_id" in this list.
+    # The vault channels are private admin-only content stores — regular users
+    # are never members of them. Including them caused the expiry sweep to call
+    # get_chat_member() and ban_chat_member() against the vault channel for
+    # every expired user, generating unnecessary Telegram API calls and
+    # ChatAdminRequired / UserNotParticipant errors in the logs on every sweep.
+    # Only kick from the actual group chats where users have access.
+    for key in ("nsfw_group_id", "premium_group_id"):
         try:
             doc = await db["hub_config"].find_one({"key": key})
             if doc and doc.get("value"):
@@ -381,9 +388,17 @@ async def _get_all_premium_chat_ids() -> list[int]:
 async def _fetch_user_display(user_id: int) -> dict:
     try:
         db = DatabaseManager.get_db()
-        doc = await db["users"].find_one({"user_id": user_id})
+        # FIX: was find_one({"user_id": user_id}). The users collection stores
+        # the Telegram user ID as MongoDB's _id field (_id = user_id, confirmed
+        # in user_repository.py). Querying by "user_id" always returned None,
+        # so full_name and username were always "Unknown / N/A" in every admin
+        # log entry and expiry notification.
+        doc = await db["users"].find_one({"_id": user_id})
         if doc:
-            return {"full_name": doc.get("full_name", "Unknown"), "username": doc.get("username") or "N/A"}
+            return {
+                "full_name": doc.get("full_name", "Unknown"),
+                "username": doc.get("username") or "N/A",
+            }
     except Exception:
         pass
     return {"full_name": "Unknown", "username": "N/A"}
