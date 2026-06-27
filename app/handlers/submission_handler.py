@@ -255,6 +255,7 @@ async def _process_submission(client: Client, user_id: int, messages: list[Messa
             messages=messages,
             hub_topic_id=topic_id,
             hub_card_message_id=0,
+            hub_forwarded_ids=delivered,  # FIX: hub copies never auto-deleted
         )
     except Exception as e:
         logger.error(

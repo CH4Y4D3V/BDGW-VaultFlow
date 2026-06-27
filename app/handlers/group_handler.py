@@ -97,19 +97,41 @@ async def _submit_for_review(
         topic_manager = get_topic_manager()
         topic_id = await topic_manager.get_user_topic_id(submitter_id, TOPIC_CONTENT)
 
-        await submission_service.register_pending(submitter_id, messages)
-        success = await verification_hub.forward_to_verification(
-            client=client, 
-            messages=messages, 
+        # forward_to_verification now returns list[int] (hub forwarded IDs) or []
+        hub_forwarded_ids = await verification_hub.forward_to_verification(
+            client=client,
+            messages=messages,
             submitter_user_id=submitter_id,
             topic_id=topic_id
         )
+        success = bool(hub_forwarded_ids)
         if not success:
             await submission_service.reject_pending(reference.id)
             logger.error(
                 "Group submission failed to forward",
                 extra={"ctx_submitter": submitter_id, "ctx_chat": reference.chat.id},
             )
+        else:
+            # Update pending doc with hub forwarded IDs so recovery works after restart
+            try:
+                from app.config import settings as _settings
+                from app.core.database import DatabaseManager
+                db = DatabaseManager.get_db()
+                await db[_settings.PENDING_COLLECTION].update_one(
+                    {"first_msg_id": reference.id},
+                    {
+                        "$set": {
+                            "hub_forwarded_ids": hub_forwarded_ids,
+                            "hub_topic_id": topic_id,
+                            "hub_chat_id": _settings.VERIFICATION_GROUP_ID,
+                        }
+                    },
+                )
+            except Exception as _e:
+                logger.warning(
+                    "group_handler: hub_forwarded_ids persist failed",
+                    extra={"ctx_submitter": submitter_id, "ctx_error": str(_e)},
+                )
     except Exception as e:
         logger.error(
             "Unexpected error in group submission pipeline",

@@ -122,40 +122,22 @@ async def forward_to_verification(
     messages: list[Message],
     submitter_user_id: int,
     topic_id: Optional[int] = None,
-) -> bool:
+) -> list[int]:
     """Forward a content submission to the Verification Hub and attach a
     moderation action card.
 
-    Flow (per spec 10.3):
-      1. Validate input.
-      2. Copy/forward all submitted messages to the hub topic.
-         Albums are copied atomically via ``copy_media_group``; single items
-         fall back to ``copy_message``.
-      3. Post a moderation card (reply to the last forwarded message) with
-         three inline buttons:
-           • 🔞 Approve NSFW
-           • ⭐ Approve Premium
-           • ❌ Reject
-      4. The submitter's full identity (name, user ID, username) is ALWAYS
-         shown.  Anonymous moderation was removed in spec v1.0 FINAL.
-
-    Args:
-        client:             Active Pyrogram client.
-        messages:           Ordered list of submitted messages (1 or many for
-                            an album).  Must not be empty.
-        submitter_user_id:  Telegram user ID of the person who submitted.
-        topic_id:           Forum topic ID in the Verification Hub.  MUST
-                            originate from ``user_topics_repo.get_or_create()``.
-
     Returns:
-        True if the moderation card was delivered successfully, False otherwise.
+        List of forwarded message IDs in the hub topic on success, empty list on failure.
+        Changed from bool to list[int] so callers can persist hub_forwarded_ids
+        into the pending doc — enabling recovery from the hub (permanent) instead of
+        the original private chat (auto-deleted after 60 min per spec §20).
     """
     if not messages:
         logger.warning(
             "forward_to_verification called with empty message list",
             extra={"ctx_user_id": submitter_user_id},
         )
-        return False
+        return []
 
     group_id = settings.VERIFICATION_GROUP_ID
     first_msg_id = messages[0].id
@@ -232,7 +214,7 @@ async def forward_to_verification(
                         "ctx_group_id": group_id,
                     },
                 )
-                return False
+                return []
             forwarded_ids.append(fwd.id)
 
     logger.info(
@@ -315,9 +297,10 @@ async def forward_to_verification(
                     "ctx_first_msg_id": first_msg_id,
                     "ctx_count": count,
                     "ctx_topic_id": topic_id,
+                    "ctx_hub_forwarded_ids": forwarded_ids,
                 },
             )
-            return True
+            return forwarded_ids
 
         except FloodWait as e:
             wait = int(e.value) + settings.FLOODWAIT_EXTRA_BUFFER
@@ -345,7 +328,7 @@ async def forward_to_verification(
                     "Failed to send moderation card after all retries",
                     extra={"ctx_user_id": submitter_user_id, "ctx_error": str(e)},
                 )
-                return False
+                return []
             await asyncio.sleep(2 ** attempt)
 
         except Exception as e:
@@ -353,9 +336,9 @@ async def forward_to_verification(
                 "Unexpected error sending moderation card",
                 extra={"ctx_user_id": submitter_user_id, "ctx_error": str(e)},
             )
-            return False
+            return []
 
-    return False
+    return []
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────

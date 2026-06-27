@@ -29,9 +29,22 @@ async def _recover_pending_from_db(
     msg_id: int,
 ) -> Optional[tuple[int, list]]:
     """
-    RC-15: Recover submission messages from vault when in-memory registry
+    Recover submission messages from the hub topic when the in-memory registry
     has been cleared (e.g. after bot restart).
-    Fetches messages from the vault channel using stored vault_message_ids.
+
+    Recovery order (most reliable → least reliable):
+      1. Hub forwarded copies — fetched from VERIFICATION_GROUP_ID using
+         hub_forwarded_ids stored in the pending doc. Hub messages are
+         permanent (no auto-delete). This is the primary path.
+      2. Source chat (private) — original messages in the user's private
+         chat. Auto-deleted after 60 minutes (spec §20). Falls back here
+         only when hub_forwarded_ids was not stored (old submissions from
+         before this fix, or group submissions).
+
+    ROOT CAUSE FIX: previously only tried the vault (wrong field names —
+    source_chat_id/source_message_id don't exist in vault docs) then the
+    source private chat. After 60 min the private messages are gone and
+    recovery always returned None, so admin clicks on approve did nothing.
     """
     try:
         from app.core.database import DatabaseManager
@@ -48,54 +61,55 @@ async def _recover_pending_from_db(
         return None
 
     submitter_user_id = pending_doc.get("user_id", 0)
-    # Private chats: chat_id == user_id (no separate chat_id field is stored)
-    chat_id = submitter_user_id
     message_ids = pending_doc.get("message_ids", [])
+    hub_forwarded_ids = pending_doc.get("hub_forwarded_ids", [])
+    hub_chat_id = pending_doc.get("hub_chat_id", settings.VERIFICATION_GROUP_ID)
+
+    # ── Path 1: Hub forwarded copies (permanent, preferred) ─────────────────
+    if hub_forwarded_ids:
+        try:
+            hub_msgs = await client.get_messages(
+                chat_id=hub_chat_id,
+                message_ids=hub_forwarded_ids,
+            )
+            if not isinstance(hub_msgs, list):
+                hub_msgs = [hub_msgs]
+            valid = [m for m in hub_msgs if m and not getattr(m, "empty", True)]
+            if valid:
+                logger.info(
+                    "_recover_pending_from_db: recovered from hub",
+                    extra={
+                        "ctx_msg_id": msg_id,
+                        "ctx_count": len(valid),
+                        "ctx_hub_chat": hub_chat_id,
+                    },
+                )
+                return (submitter_user_id, valid)
+        except Exception as e:
+            logger.warning(
+                "_recover_pending_from_db: hub recovery failed, trying source chat",
+                extra={"ctx_msg_id": msg_id, "ctx_error": str(e)},
+            )
 
     if not message_ids:
         return None
 
+    # ── Path 2: Source private chat (auto-deleted after 60 min) ─────────────
     try:
-        from app.core.database import DatabaseManager
-        db = DatabaseManager.get_db()
-        vault_col = db[settings.VAULT_COLLECTION]
-        vault_messages = []
-
-        for mid in message_ids:
-            v_doc = await vault_col.find_one({
-                "source_chat_id": str(chat_id),
-                "source_message_id": mid,
-            })
-
-            if v_doc and v_doc.get("vault_message_id"):
-                try:
-                    v_msg = await client.get_messages(
-                        chat_id=settings.VAULT_CHANNEL_ID,
-                        message_ids=v_doc["vault_message_id"],
-                    )
-                    if v_msg and not getattr(v_msg, "empty", True):
-                        vault_messages.append(v_msg)
-                except Exception:
-                    pass
-
-        if vault_messages:
-            return (submitter_user_id, vault_messages)
-
-        # Fallback to source chat (may have been deleted)
-        logger.info(
-            "_recover_pending_from_db: vault lookup failed, trying source chat",
-            extra={"ctx_msg_id": msg_id},
-        )
+        chat_id = submitter_user_id  # private chat = user ID
         messages = await client.get_messages(chat_id=chat_id, message_ids=message_ids)
         if not isinstance(messages, list):
             messages = [messages]
         valid = [m for m in messages if m and not getattr(m, "empty", True)]
         if valid:
+            logger.info(
+                "_recover_pending_from_db: recovered from source chat",
+                extra={"ctx_msg_id": msg_id, "ctx_count": len(valid)},
+            )
             return (submitter_user_id, valid)
-
     except Exception as e:
         logger.warning(
-            "_recover_pending_from_db: recovery failed",
+            "_recover_pending_from_db: source chat recovery failed",
             extra={"ctx_msg_id": msg_id, "ctx_error": str(e)},
         )
 

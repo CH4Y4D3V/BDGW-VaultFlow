@@ -236,15 +236,6 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
             # 6b. Payment auto-advance: when admin sends payment details directly
             # in the topic (not via the FSM button), advance the session from
             # WAITING_PAYMENT_DETAILS → WAITING_TXID and start the 20-min timer.
-            #
-            # BUG FIX: previous code checked PaymentStatus.PENDING_DETAILS and
-            # advanced to PaymentStatus.AWAITING_PAYMENT. Neither of these is
-            # the status actually used by the payment service:
-            #   - Sessions are created with status WAITING_PAYMENT_DETAILS
-            #   - handle_payment_inputs expects WAITING_TXID or WAITING_SCREENSHOT
-            # The wrong status meant the auto-advance never triggered, the session
-            # stayed in WAITING_PAYMENT_DETAILS, and when the user sent their TXID
-            # the payment handler raised ContinuePropagation → support caught it.
             try:
                 from app.payments import get_payment_service
                 from app.payments.models import PaymentStatus
@@ -253,14 +244,28 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                 session = await payment_service.get_active_session(user_id)
 
                 if session and session.status == PaymentStatus.WAITING_PAYMENT_DETAILS:
+                    # Critical: advance status so handle_payment_inputs can claim
+                    # the user's next message instead of it falling to support.
                     advanced = await payment_service.update_status(
                         session.id, PaymentStatus.WAITING_TXID
                     )
                     if advanced:
-                        await payment_service.start_timeout(
-                            session.id, confirmed_delivery=True
-                        )
-                        # Send user the "submit your TXID" prompt
+                        # Non-critical: start timeout. Decouple from status advance
+                        # so a timeout failure doesn't prevent the user from
+                        # submitting their TXID.
+                        try:
+                            await payment_service.start_timeout(
+                                session.id, confirmed_delivery=True
+                            )
+                        except Exception as timeout_err:
+                            logger.warning(
+                                "route_admin_reply: payment timeout start failed (non-fatal)",
+                                extra={
+                                    "ctx_user_id": user_id,
+                                    "ctx_error": str(timeout_err),
+                                },
+                            )
+
                         await client.send_message(
                             chat_id=user_id,
                             text=(
@@ -278,10 +283,21 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
                             thread_id=thread_id,
                             reply_to=message.id,
                         )
-            except Exception as e:
-                logger.warning(
+                    else:
+                        logger.warning(
+                            "route_admin_reply: payment advance rejected by FSM",
+                            extra={
+                                "ctx_user_id": user_id,
+                                "ctx_session_status": session.status.value if session else None,
+                            },
+                        )
+            except Exception:
+                # exc_info=True exposes the full traceback in Railway logs so the
+                # actual error is visible — previously only ctx_error=str(e) was
+                # logged which showed up as a one-liner with no traceback.
+                logger.exception(
                     "route_admin_reply: payment auto-advance failed",
-                    extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+                    extra={"ctx_user_id": user_id},
                 )
 
         else:

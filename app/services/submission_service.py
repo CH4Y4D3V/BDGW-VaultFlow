@@ -41,10 +41,17 @@ class SubmissionService:
         messages: list[Message],
         hub_topic_id: int,
         hub_card_message_id: int,
+        hub_forwarded_ids: Optional[list[int]] = None,
     ) -> int:
         """
         Registers a new submission as pending moderation.
         Writes to both in-memory cache and MongoDB.
+
+        hub_forwarded_ids: message IDs of the forwarded copies in the hub topic.
+        These are permanent (hub has no auto-delete) and are the primary recovery
+        source in _recover_pending_from_db. Without them, recovery falls back to
+        the original private-chat messages which are auto-deleted after 60 min
+        (spec §20), causing content accept to silently fail after that window.
         """
         if not messages:
             raise ValueError("Submission requires at least one message")
@@ -65,6 +72,8 @@ class SubmissionService:
                 "message_ids": [m.id for m in messages],
                 "hub_topic_id": hub_topic_id,
                 "hub_card_message_id": hub_card_message_id,
+                "hub_forwarded_ids": hub_forwarded_ids or [],
+                "hub_chat_id": settings.VERIFICATION_GROUP_ID,
                 "status": "pending",
                 "created_at": now,
                 "expires_at": now + timedelta(hours=settings.QUEUE_DEADLINE_HOURS),
