@@ -27,7 +27,12 @@ _album_lock = asyncio.Lock()
 
 
 @Client.on_message(
-    (filters.media | filters.text)
+    # FIX: was (filters.media | filters.text). Spec §10.2 lists only
+    # Photos | Videos | Albums | Documents | Audio | Voice | GIF | Files.
+    # Plain text messages from verified creators ("Hello", "Is anyone there")
+    # were hitting this handler and generating "Your submission has been
+    # received" responses — text-only messages must fall to support (group=3).
+    filters.media
     & filters.private
     & ~filters.command(["start", "rules", "mystatus", "ping", "help", "takedown", "cancel", "become_creator"])
     & ~filters.bot,

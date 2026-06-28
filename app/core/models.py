@@ -1,8 +1,8 @@
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MediaType(str, Enum):
@@ -107,6 +107,31 @@ class QueueJob(BaseModel):
     vault_message_id: int
 
     media_group_id: Optional[str] = None
+
+    @field_validator("media_group_id", mode="before")
+    @classmethod
+    def coerce_media_group_id(cls, v: Any) -> Optional[str]:
+        """
+        Telegram's MTProto protocol returns grouped_id (media_group_id) as
+        Int64. Pyrogram sometimes passes it through as an int rather than
+        converting to str. MongoDB stores it as Int64 as well when vault docs
+        are read back.
+
+        Without this validator Pydantic v2 raises:
+          Input should be a valid string [type=string_type,
+          input_value=14260836606299589, input_type=Int64]
+
+        This caused TWO failures:
+          1. Distribution cycle crashed on every album item in the vault:
+               "error processing source_id=...: 1 validation error for QueueJob"
+          2. Moderation approve callback failed after vault_insert_completed
+             because enqueue_for_distribution created a QueueJob with the
+             int media_group_id from the Pyrogram album message → Pydantic
+             validation error → exception propagated as "Moderation callback failed"
+        """
+        if v is None:
+            return None
+        return str(v)
 
     # ─────────────────────────────
     # Distribution
