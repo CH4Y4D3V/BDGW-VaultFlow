@@ -227,13 +227,27 @@ class ReferralRepository:
             upsert=True
         )
 
-    async def increment_balance(self, user_id: int, amount: int) -> None:
+    async def increment_balance(self, user_id: int, amount: int, is_referral: bool = False) -> None:
+        """
+        Add `amount` points to the user's wallet.
+
+        is_referral=True: also increment active_referrals by 1. Use ONLY
+        when crediting a qualified referral (new person joined channel).
+        Do NOT pass is_referral=True for content-approval bonus points —
+        that would incorrectly inflate the active_referrals counter, making
+        the dashboard show more active referrals than the user actually has.
+
+        FIX: previously always incremented active_referrals regardless of
+        whether the credit was for a referral or for content approvals.
+        reward_approved_content() called increment_balance(referrer_id, 1)
+        and active_referrals went up by 1 for every 3 approved pieces, even
+        though no new person joined via the referral link.
+        """
         update: dict = {"$inc": {"points_balance": amount}}
         if amount > 0:
             update["$inc"]["total_earned"] = amount
+        if is_referral and amount > 0:
             update["$inc"]["active_referrals"] = 1
-        else:
-            update["$inc"]["active_referrals"] = -1
 
         await self._wallets.update_one({"user_id": user_id}, update, upsert=True)
 

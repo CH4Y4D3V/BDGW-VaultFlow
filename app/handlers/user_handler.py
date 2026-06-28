@@ -443,6 +443,9 @@ async def _handle_referral_at_start(
             )
             return  # Nothing more to do — already processed.
 
+        # Ensure wallet doc exists for referrer before any credit
+        await ref_repo.upsert_wallet(referred_by)
+
         # ── Step 2: check MAIN_CHANNEL_ID membership
         main_channel_id = await _get_hub_config_value("main_channel_id")
         if main_channel_id is None:
@@ -456,21 +459,27 @@ async def _handle_referral_at_start(
         is_member = await _is_channel_member(client, user_id, main_channel_id)
 
         if is_member:
-            # ── Step 3a: user already in channel — credit immediately
-            try:
-                await ref_service.register_referral(referred_by, user_id)
+            # ── Step 3a: user already in channel — qualify and credit NOW
+            #
+            # FIX: was calling ref_service.register_referral() here, which
+            # found the pending record just created in Step 1 and returned
+            # False with reason="already_referred". Points were NEVER credited
+            # even though referral_credited_on_start was logged unconditionally.
+            # Fix: call qualify_referral() + increment_balance() directly,
+            # bypassing register_referral() which incorrectly treats the
+            # pre-created pending doc as a duplicate.
+            qualified = await ref_repo.qualify_referral(user_id)
+            if qualified:
+                # 1 referral = 1 point (spec §16)
+                await ref_repo.increment_balance(referred_by, 1, is_referral=True)
                 logger.info(
                     "referral_credited_on_start",
                     extra={"ctx_referrer": referred_by, "ctx_referred": user_id},
                 )
-            except Exception as credit_err:
+            else:
                 logger.warning(
-                    "referral_credit_failed",
-                    extra={
-                        "ctx_referrer": referred_by,
-                        "ctx_referred": user_id,
-                        "ctx_error": str(credit_err),
-                    },
+                    "referral_qualify_failed_on_start",
+                    extra={"ctx_referrer": referred_by, "ctx_referred": user_id},
                 )
         else:
             # ── Step 3b: not yet in channel — leave pending for join handler

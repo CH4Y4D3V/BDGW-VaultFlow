@@ -188,12 +188,14 @@ class ReferralRepository:
             upsert=True
         )
 
-    async def increment_balance(self, user_id: int, amount: int) -> None:
+    async def increment_balance(self, user_id: int, amount: int, is_referral: bool = False) -> None:
+        """Add points to wallet. Only touch active_referrals when is_referral=True."""
         update: dict = {"$inc": {"points_balance": amount}}
         if amount > 0:
             update["$inc"]["total_earned"] = amount
+        if is_referral and amount > 0:
             update["$inc"]["active_referrals"] = 1
-        else:
+        elif not is_referral and amount < 0:
             update["$inc"]["active_referrals"] = -1
 
         await self._wallets.update_one({"user_id": user_id}, update, upsert=True)
