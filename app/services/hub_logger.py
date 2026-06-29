@@ -114,7 +114,10 @@ async def write_admin_log(
                         "ctx_action": action_type,
                         "ctx_error": str(exc),
                         "ctx_attempt": attempt + 1,
+                        "ctx_hub_id": hub_id,
+                        "ctx_topic_id": topic_id,
                     },
+                    exc_info=True,  # Full traceback visible in Railway logs
                 )
                 return  # non-fatal
 

@@ -246,11 +246,19 @@ class PaymentService:
         """
         try:
             from app.repositories.txid_repository import TXIDRepository
-            repo = TXIDRepository(DatabaseManager.get_db())
+            # FIX: was TXIDRepository(DatabaseManager.get_db()).
+            # BaseRepository.__init__ takes no arguments — it uses a lazy
+            # @property db that calls DatabaseManager.get_db() on first access.
+            # Passing the db object caused:
+            #   TypeError: __init__() takes 1 positional argument but 2 were given
+            # which was caught and logged as txid_uniqueness_check_failed.
+            # Since the check fails open (returns True), duplicate TXIDs could
+            # be accepted silently — a critical payment security gap.
+            repo = TXIDRepository()
             existing = await repo.get_by_txid(txid)
             return existing is None
         except Exception as e:
-            logger.error("txid_uniqueness_check_failed", extra={"ctx_error": str(e)})
+            logger.error("txid_uniqueness_check_failed", extra={"ctx_error": str(e)}, exc_info=True)
             return True  # Fail open to allow payment but log error
 
     async def get_active_session(self, user_id: int) -> Optional[PaymentSession]:
