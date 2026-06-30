@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
 from pymongo.errors import OperationFailure
 from pyrogram.errors import (
     ChannelInvalid,
@@ -33,9 +34,9 @@ from pyrogram.errors import (
 
 from app.bot.client import get_bot
 from app.config import settings
-from app.core.exceptions import DispatcherError, MediaFileNotFoundError
+from app.core.exceptions import DispatcherError, MediaFileNotFoundError, ConsistencyViolationError
 from app.core.logger import reset_correlation_id, set_correlation_id
-from app.core.models import JobStatus, MediaType, WatermarkPosition
+from app.core.models import JobStatus, MediaType, WatermarkPosition, WatermarkState
 from app.distribution.flood_wait import calculate_retry_delay
 from app.repositories.queue_repository import QueueRepository
 from app.utils.logger import get_logger
@@ -367,7 +368,16 @@ class WatermarkWorker:
                 if retry_count >= job.get("max_retries", 3):
                     await self._queue.move_to_dead_letter(str(job["_id"]), str(e))
                 else:
-                    await self._queue.mark_failed(str(job["_id"]), str(e))
+                    # FIX: was mark_failed(), which sets status=PENDING
+                    # unconditionally. The general dispatcher (claim_next) has
+                    # no awareness of watermark_required/watermark_state and
+                    # would deliver the job's CURRENT vault_message_id —
+                    # which, since the swap never completed, still points at
+                    # the original UN-WATERMARKED vault item. mark_watermark_
+                    # failed() routes the job back to status=WATERMARKING
+                    # (re-claimable only by the watermark worker) instead,
+                    # so unwatermarked content can never reach the group.
+                    await self._queue.mark_watermark_failed(str(job["_id"]), str(e))
         finally:
             for path in temp_file_set:
                 _safe_unlink(path, context=f"wm_group_cleanup:{group_id}")
@@ -490,9 +500,39 @@ class WatermarkWorker:
         Safe in this context because the WATERMARKING status lock prevents
         the dispatcher from reading these jobs concurrently.
 
-        NOTE: Accesses self._queue._db (semi-private Motor db handle on
-        QueueRepository).  This coupling should be formalised by adding
-        a swap_album_vault_references_no_txn() method to QueueRepository.
+        CRITICAL FIX: this previously queried every ref by
+        {"media_group_id": group_id, "album_sequence_index": seq_idx}
+        unconditionally. For a SINGLE (non-album) photo, the job's real
+        media_group_id field is None — group_id passed in by _process_group
+        is actually the job's OWN ObjectId string (str(jobs[0]["_id"])),
+        used as a synthetic fallback identifier precisely because there is
+        no real media_group_id. The query {"media_group_id": "<objectid-str>"}
+        NEVER matched the document (whose media_group_id field is None),
+        so update_one always returned modified_count=0 — but this method
+        never checked that and logged a fake "watermark_no_txn_swap_complete"
+        success regardless.
+
+        Effect of the bug: the watermarked file was uploaded to the vault
+        successfully, but the job's vault_message_id was NEVER updated to
+        point at it. The job stayed stuck at status=LOCKED forever (orphaned
+        — unclaimable by either the watermark worker or the dispatcher).
+        Stale-lock recovery (release_claim) would eventually find watermark_
+        state stuck at PROCESSING (not PENDING) and route the job to PENDING
+        with the OLD un-watermarked vault_message_id, bypassing the watermark
+        requirement entirely. The general dispatcher's claim_next() has no
+        awareness of watermark_required/watermark_state, so it delivered the
+        un-watermarked original straight to the group. Every retry repeated
+        the cycle, uploading another orphaned watermarked duplicate to the
+        vault each time — the "bot keeps posting the same photo to the vault"
+        symptom, while the group only ever received the unwatermarked copy.
+
+        Fix: replicate the same $or fallback used by swap_album_vault_
+        references()._do_swap() for the album_sequence_index is None case
+        — match by the job's own _id OR media_group_id, never blindly by
+        media_group_id alone. Also check modified_count and raise
+        ConsistencyViolationError if a swap fails to match, so the failure
+        is surfaced (and the orphaned upload gets logged) instead of being
+        silently swallowed as success.
         """
         db = self._queue._db  # type: ignore[attr-defined]
         now = datetime.now(timezone.utc)
@@ -500,19 +540,53 @@ class WatermarkWorker:
         for ref in new_refs:
             seq_idx = ref["album_sequence_index"]
             vault_msg_id = ref["vault_message_id"]
-            await db["queue_jobs"].update_one(
-                {
+
+            if seq_idx is None:
+                # Single (non-album) job: group_id is the job's own ObjectId
+                # string, not a real media_group_id. Match by _id OR by
+                # media_group_id (covers both synthetic and real identifiers).
+                try:
+                    query = {
+                        "$or": [
+                            {"_id": ObjectId(group_id)},
+                            {"media_group_id": group_id},
+                        ]
+                    }
+                except Exception:
+                    # group_id wasn't a valid ObjectId string — fall back to
+                    # media_group_id-only match.
+                    query = {"media_group_id": group_id}
+            else:
+                query = {
                     "media_group_id": group_id,
                     "album_sequence_index": seq_idx,
-                },
+                }
+
+            result = await db["queue_jobs"].update_one(
+                query,
                 {
                     "$set": {
                         "vault_message_id": vault_msg_id,
+                        "watermark_state": WatermarkState.COMPLETED,
                         "status": JobStatus.PENDING.value,
                         "watermarked_at": now,
+                        "updated_at": now,
+                        "locked_by": None,
+                        "locked_at": None,
                     }
                 },
             )
+
+            if result.modified_count == 0:
+                # Surface the failure instead of silently claiming success.
+                # The caller (_process_group) catches this and runs
+                # mark_failed/move_to_dead_letter, which is the correct
+                # behaviour when a swap genuinely cannot find its target doc.
+                raise ConsistencyViolationError(
+                    f"_swap_references_no_txn: failed to match job for "
+                    f"group_id={group_id!r} album_sequence_index={seq_idx!r} "
+                    f"(query={query!r})"
+                )
 
         logger.info(
             "watermark_no_txn_swap_complete",

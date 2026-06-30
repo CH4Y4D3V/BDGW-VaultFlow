@@ -366,27 +366,46 @@ class QueueRepository:
     async def release_claim(self, job_id: str) -> None:
         """
         Release the lock on a job and return it to its correct pre-lock status.
-        Jobs that were in WATERMARKING state (identified by watermark_state=PENDING)
-        are returned to WATERMARKING; all others go back to PENDING.
+        Jobs whose watermarking never completed are returned to WATERMARKING;
+        all others go back to PENDING.
+
+        FIX: was checking watermark_state == WatermarkState.PENDING only.
+        claim_watermark_jobs() sets watermark_state=PROCESSING immediately
+        upon claim — so a worker that crashes or times out mid-processing
+        leaves the job at watermark_state=PROCESSING, not PENDING. The old
+        check missed this case entirely and routed crashed/stale watermark
+        jobs to status=PENDING with their ORIGINAL un-watermarked
+        vault_message_id still in place — the general dispatcher would then
+        deliver unwatermarked content to the group, identical to the
+        mark_watermark_failed bug this complements.
+        Fixed: treat any watermark_state that is NOT COMPLETED as
+        "watermarking incomplete, needs re-claim", covering both PENDING
+        (never started) and PROCESSING (started but never finished) cases.
         """
         doc = await self._queue.find_one({"_id": ObjectId(job_id)})
         if not doc:
             return
 
-        next_status = JobStatus.WATERMARKING if (
-            doc.get("watermark_required") and doc.get("watermark_state") == WatermarkState.PENDING
-        ) else JobStatus.PENDING
+        watermark_incomplete = (
+            doc.get("watermark_required")
+            and doc.get("watermark_state") != WatermarkState.COMPLETED
+        )
+        next_status = JobStatus.WATERMARKING if watermark_incomplete else JobStatus.PENDING
+
+        update_fields: dict = {
+            "status": next_status,
+            "locked_by": None,
+            "locked_at": None,
+            "updated_at": datetime.now(timezone.utc),
+        }
+        if watermark_incomplete:
+            # Reset to PENDING so claim_watermark_jobs' query
+            # (watermark_state == WatermarkState.PENDING) matches again.
+            update_fields["watermark_state"] = WatermarkState.PENDING
 
         await self._queue.update_one(
             {"_id": ObjectId(job_id)},
-            {
-                "$set": {
-                    "status": next_status,
-                    "locked_by": None,
-                    "locked_at": None,
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
+            {"$set": update_fields},
         )
 
     # ─── Progress Updates ─────────────────────────────────────────────────────
@@ -566,6 +585,15 @@ class QueueRepository:
         If next_retry_delay_seconds is provided, the job will not be visible
         to workers until that delay has elapsed (execute_after field).
         Returns the updated job document, or None if the job was not found.
+
+        WARNING: this unconditionally sets status=PENDING, which makes the
+        job immediately claimable by the general dispatcher (claim_next).
+        claim_next has NO awareness of watermark_required/watermark_state —
+        it will deliver the job's CURRENT vault_message_id regardless of
+        whether watermarking ever completed. Callers processing a
+        watermark_required job whose watermarking failed MUST use
+        mark_watermark_failed() instead, or unwatermarked content will be
+        delivered straight to the distribution group.
         """
         now = datetime.now(timezone.utc)
         execute_after = (
@@ -577,6 +605,67 @@ class QueueRepository:
         update_ops: dict = {
             "$set": {
                 "status": JobStatus.PENDING,
+                "last_error": error,
+                "last_error_at": now,
+                "execute_after": execute_after,
+                "locked_by": None,
+                "locked_at": None,
+                "updated_at": now,
+            }
+        }
+        if increment_retry:
+            update_ops["$inc"] = {"retry_count": 1}
+
+        return await self._queue.find_one_and_update(
+            {"_id": ObjectId(job_id)},
+            update_ops,
+            return_document=ReturnDocument.AFTER,
+        )
+
+    async def mark_watermark_failed(
+        self,
+        job_id: str,
+        error: str,
+        next_retry_delay_seconds: Optional[float] = None,
+        increment_retry: bool = True,
+    ) -> dict:
+        """
+        Mark a WATERMARK job as failed and route it back for re-watermarking
+        instead of into the general PENDING/dispatcher pool.
+
+        ROOT CAUSE THIS FIXES: _process_group's exception handler previously
+        called mark_failed() on watermark-job failures (e.g. when
+        _swap_with_fallback/_swap_references_no_txn could not match the
+        target document). mark_failed() unconditionally sets status=PENDING.
+        The general dispatcher's claim_next() has zero awareness of
+        watermark_required/watermark_state and will deliver ANY PENDING job
+        using its current vault_message_id — which, since the swap never
+        completed, still points at the ORIGINAL UN-WATERMARKED vault item.
+        Result: content reached the distribution group with no watermark
+        whatsoever, while the watermark worker silently uploaded an orphaned
+        watermarked duplicate to the vault on every retry cycle.
+
+        This method instead:
+          - status -> WATERMARKING (re-claimable only by claim_watermark_jobs,
+            never by the general dispatcher)
+          - watermark_state -> PENDING (so claim_watermark_jobs' query matches)
+          - clears locked_by/locked_at
+          - increments retry_count / sets execute_after exactly like mark_failed
+
+        If retries are exhausted, callers should route to move_to_dead_letter
+        instead of calling this method (same pattern as mark_failed).
+        """
+        now = datetime.now(timezone.utc)
+        execute_after = (
+            now + timedelta(seconds=next_retry_delay_seconds)
+            if next_retry_delay_seconds
+            else now
+        )
+
+        update_ops: dict = {
+            "$set": {
+                "status": JobStatus.WATERMARKING,
+                "watermark_state": WatermarkState.PENDING,
                 "last_error": error,
                 "last_error_at": now,
                 "execute_after": execute_after,
