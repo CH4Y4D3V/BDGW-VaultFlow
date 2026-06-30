@@ -140,7 +140,20 @@ async def _fire_and_forget_pending_cleanup(msg_id: int) -> None:
 
 
 def pop_pending(msg_id: int) -> Optional[tuple[int, list[Message]]]:
-    # This remains sync for legacy callers but DB cleanup will be missed or must be fire-and-forget
+    """
+    Legacy sync caller (used by callback_handler.handle_moderation_callback).
+
+    Only fires the fire-and-forget DB cleanup when an in-memory entry was
+    actually found. When entry is None (e.g. after a bot restart), the DB
+    record — if present — is intentionally left untouched here:
+    _recover_pending_from_db()'s find_one_and_delete() is the sole authority
+    for atomically consuming that record. Firing a concurrent delete from
+    here as well would race with find_one_and_delete(): whichever wins
+    actually removes the document, but only find_one_and_delete() returns
+    it to the caller. If this fire-and-forget delete won the race, a
+    legitimate first-time approval would find nothing and report
+    "Submission not found" even though it was never actually processed.
+    """
     entry = _pending_submissions.pop(msg_id, None)
     if entry:
         asyncio.create_task(_fire_and_forget_pending_cleanup(msg_id))

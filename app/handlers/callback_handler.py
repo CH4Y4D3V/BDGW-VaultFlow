@@ -41,15 +41,37 @@ async def _recover_pending_from_db(
          only when hub_forwarded_ids was not stored (old submissions from
          before this fix, or group submissions).
 
-    ROOT CAUSE FIX: previously only tried the vault (wrong field names —
-    source_chat_id/source_message_id don't exist in vault docs) then the
-    source private chat. After 60 min the private messages are gone and
-    recovery always returned None, so admin clicks on approve did nothing.
+    CRITICAL FIX (duplicate processing / "same content posted multiple
+    times"): this function previously used find_one(), which leaves the
+    pending doc in the database after a successful recovery. The module-
+    level pop_pending() that callback_handler.handle_moderation_callback
+    calls for the in-memory path is a SYNC function that only checks the
+    in-process _pending_submissions dict — after a bot restart (or simply
+    once the in-memory entry has already been consumed by an earlier
+    request) it always returns None without touching the DB at all, so
+    every single callback for that msg_id falls through to THIS function.
+    Since this function never deleted the doc, a double-tap on the
+    Approve/Queue button, a slow Telegram callback ack causing the client
+    to resend the callback_query, or even just two admins clicking the
+    same card, would recover the SAME messages every time and run the
+    entire execute_approve/execute_queue pipeline again — re-archiving to
+    vault (new physical upload), re-watermarking, and re-delivering the
+    same content multiple times.
+
+    Fixed: find_one_and_delete() now atomically consumes the doc on the
+    FIRST successful lookup. Any subsequent call for the same msg_id
+    (concurrent or sequential) gets pending_doc=None immediately and the
+    caller correctly reports "Submission not found" instead of
+    reprocessing. This closes the race even for genuinely simultaneous
+    duplicate callbacks, not just sequential ones.
     """
     try:
         from app.core.database import DatabaseManager
         db = DatabaseManager.get_db()
-        pending_doc = await db[settings.PENDING_COLLECTION].find_one({"first_msg_id": msg_id})
+        # Atomic consume: only one caller can ever receive this doc.
+        pending_doc = await db[settings.PENDING_COLLECTION].find_one_and_delete(
+            {"first_msg_id": msg_id}
+        )
     except Exception as e:
         logger.warning(
             "_recover_pending_from_db: DB lookup failed",
