@@ -115,7 +115,7 @@ class DistributionDispatcher:
         # past a time threshold) does not mistake an actively-processing job
         # for a stale lock and reset it to PENDING, causing a duplicate send.
         for job in job_docs:
-            await self._queue.mark_processing(str(job["_id"]))
+            await self._queue.mark_processing(str(job["_id"]), worker_id)
 
         sorted_targets = await self._balancer.sort_targets_by_load(remaining)
         all_succeeded = True
