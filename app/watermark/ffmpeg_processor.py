@@ -191,9 +191,11 @@ class FFmpegProcessor:
             "ffmpeg", "-y", "-i", input_path,
             "-vf", f"{drawtext1},{drawtext2}",
             "-map", "0:v:0",
-            "-map", "0:a:0?",  # optional: don't fail if input has no audio track
-            "-c:a", "copy",
+            "-map", "0:a:0?",
+            "-c:v", "libx264",
+            "-c:a", "aac",
             "-preset", "ultrafast",
+            "-crf", "28",
             output_path,
         ]
 
@@ -210,8 +212,14 @@ class FFmpegProcessor:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
 
             if process.returncode != 0:
-                error_msg = stderr.decode()
-                logger.error("Video watermarking failed", extra={"ctx_stderr": error_msg})
+                error_msg = stderr.decode(errors="replace")
+                logger.error(
+                    "Video watermarking failed",
+                    extra={
+                        "ctx_returncode": process.returncode,
+                        "ctx_stderr_tail": error_msg[-800:],
+                    },
+                )
                 shutil.copy(input_path, output_path)
                 return output_path
 

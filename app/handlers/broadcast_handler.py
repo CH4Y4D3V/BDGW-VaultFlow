@@ -421,10 +421,9 @@ async def _emit_broadcast_completed_log(
 
     # 2. Post to Admin Logs topic
     try:
-        from app.services.topic_manager import get_topic_manager
-        topic_mgr = get_topic_manager()
-        hub_sg_id = await topic_mgr._get_hub_config_int("hub_supergroup_id")
-        logs_topic_id = await topic_mgr._get_hub_config_int("admin_logs_topic_id")
+        from app.services.topic_manager import _get_hub_config_int
+        hub_sg_id = await _get_hub_config_int("hub_supergroup_id")
+        logs_topic_id = await _get_hub_config_int("admin_logs_topic_id")
 
         if not hub_sg_id or not logs_topic_id:
             logger.warning(
@@ -1272,9 +1271,8 @@ def register_handlers(app: Client) -> None:
     """
  
     async def _hub_check(_, __, message) -> bool:
-        from app.services.topic_manager import get_topic_manager
-        topic_mgr = get_topic_manager()
-        hub_id = await topic_mgr._get_hub_config_int("hub_supergroup_id")
+        from app.services.topic_manager import _get_hub_config_int
+        hub_id = await _get_hub_config_int("hub_supergroup_id")
         return bool(message.chat and message.chat.id == hub_id)
 
     hub_filter = filters.create(_hub_check)

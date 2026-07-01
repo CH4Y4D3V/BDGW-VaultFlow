@@ -421,19 +421,16 @@ class WatermarkWorker:
                     uploaded_msg = await bot.send_video(
                         chat_id=target_channel,
                         video=processed_path,
-                        caption="[WATERMARKED ALBUM ITEM]",
                     )
                 elif media_type == MediaType.PHOTO.value:
                     uploaded_msg = await bot.send_photo(
                         chat_id=target_channel,
                         photo=processed_path,
-                        caption="[WATERMARKED ALBUM ITEM]",
                     )
                 else:
                     uploaded_msg = await bot.send_document(
                         chat_id=target_channel,
                         document=processed_path,
-                        caption="[WATERMARKED ITEM]",
                     )
                 break
             except _FATAL_UPLOAD_ERRORS as e:
