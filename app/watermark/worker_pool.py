@@ -562,7 +562,7 @@ class WatermarkWorker:
                     "album_sequence_index": seq_idx,
                 }
 
-            result = await db["queue_jobs"].update_one(
+            result = await self._queue._queue.update_one(
                 query,
                 {
                     "$set": {

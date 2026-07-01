@@ -125,14 +125,15 @@ class FFmpegProcessor:
         text2 = config.get("watermark_text_secondary", settings.WATERMARK_TEXT_PREMIUM or "VaultFlow")
 
         # FFmpeg drawtext requires alpha as a float in [0.0, 1.0].
-        # WATERMARK_OPACITY in settings (and in the config dict) is an
-        # integer in the PIL/0-255 range (107 by default in this deployment).
-        # Passing it directly as 'white@107' makes FFmpeg reject the entire
-        # filter with "Invalid alpha value specifier" and exit non-zero,
-        # causing shutil.copy (the fallback) to run — meaning every video was
-        # distributed without any watermark. Normalize to 0.0-1.0 here.
-        raw_opacity = config.get("opacity", settings.WATERMARK_OPACITY) or 107
-        opacity_float = round(min(max(int(raw_opacity) / 255.0, 0.0), 1.0), 3)
+        # settings.WATERMARK_OPACITY is already normalized to 0.0-1.0 by
+        # the settings validator. The config dict may also carry a pre-normalized
+        # float value. Use it directly — do NOT divide by 255 again.
+        raw_opacity = config.get("opacity", settings.WATERMARK_OPACITY) or 0.42
+        raw_float = float(raw_opacity)
+        # Safety: if someone passed an old-style 0-255 integer, normalize it.
+        if raw_float > 1.0:
+            raw_float = raw_float / 255.0
+        opacity_float = round(min(max(raw_float, 0.0), 1.0), 3)
 
         # Randomize start times (0 to 5 seconds)
         start1 = round(random.uniform(0, 5), 1)
