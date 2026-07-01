@@ -69,17 +69,14 @@ async def handle_submission(client: Client, message: Message) -> None:
         )
 
     # ── Gate 2: active support session ──────────────────────────────────────
-    # Yield ONLY for genuinely active (admin-accepted) sessions. Stale PENDING
-    # sessions (never accepted) must NOT permanently block content submission —
-    # they live forever per spec (the 5-min unattended timer only notifies, it
-    # does not close or expire the session).
-    #
-    # FIX: previously checked "opened_at" but route_to_support_topic inserts
-    # the doc with field "created_at". The field name mismatch meant the
-    # PENDING-within-10-min gate ALWAYS missed, so any user who ever sent an
-    # unhandled message (creating a stale PENDING session) would have ALL their
-    # subsequent content permanently routed to support instead of the mod queue.
-    # Fixed: use "created_at" to match the actual insert field.
+    # Yield ONLY when an admin has explicitly accepted the session (ACTIVE).
+    # PENDING sessions must NEVER block media submission: a PENDING session
+    # simply means the user sent a text/contact/sticker that had no other
+    # handler — the support session is created automatically. If the user
+    # then sends a photo or video, that is a content submission, not a
+    # follow-up support message. Blocking on PENDING caused every media send
+    # within minutes of any text/sticker to be eaten by support instead of
+    # being forwarded to the moderation queue.
     try:
         from datetime import datetime, timezone, timedelta
         db_check = DatabaseManager.get_db()
@@ -87,17 +84,6 @@ async def handle_submission(client: Client, message: Message) -> None:
             {"user_id": user_id, "status": "ACTIVE"},
         )
         if active_session:
-            raise ContinuePropagation
-
-        recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
-        recent_pending = await db_check["support_sessions"].find_one(
-            {
-                "user_id": user_id,
-                "status": "PENDING",
-                "created_at": {"$gte": recent_cutoff},  # FIX: was "opened_at"
-            },
-        )
-        if recent_pending:
             raise ContinuePropagation
     except ContinuePropagation:
         raise
