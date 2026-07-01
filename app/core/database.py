@@ -16,7 +16,7 @@ Spec coverage: Section 25A (all 20 collections), Section 8 (TXID uniqueness),
 ────────────────────────────────────────────────────────────────────────────
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase

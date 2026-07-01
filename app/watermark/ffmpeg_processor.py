@@ -190,6 +190,8 @@ class FFmpegProcessor:
         cmd = [
             "ffmpeg", "-y", "-i", input_path,
             "-vf", f"{drawtext1},{drawtext2}",
+            "-map", "0:v:0",
+            "-map", "0:a:0?",  # optional: don't fail if input has no audio track
             "-c:a", "copy",
             "-preset", "ultrafast",
             output_path,

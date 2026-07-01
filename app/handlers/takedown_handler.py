@@ -104,7 +104,7 @@ async def _post_takedown_card_to_hub(
     # Resolve user's permanent topic (creates it if missing)
     topic_manager = get_topic_manager()
     topic_id: Optional[int] = await topic_manager.get_or_create_user_topic(
-        client=client,
+        bot=client,
         user_id=user_id,
         full_name=full_name,
     )
