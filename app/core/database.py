@@ -313,6 +313,48 @@ class DataMigrationManager:
 
         logger.info("MIGRATION: Vault stabilization complete.")
 
+        # ── One-time recovery: reset cooldown_until for items delivered in a
+        # burst that would otherwise stay excluded for VAULT_FILL_COOLDOWN_HOURS
+        # (typically 24 h). When the quarantine-recovery migration ran and
+        # restored hundreds of vault items at once, mark_completed() set
+        # cooldown_until = now + 24h on all of them simultaneously, making the
+        # ENTIRE vault appear empty to fetch_distribution_content() for 24 hours.
+        # This pass resets cooldown_until = None on vault items whose last
+        # delivery was more than 30 days ago (safe: clearly not a recent burst)
+        # so they immediately re-enter the distribution pool on next cycle.
+        # Idempotent: vault items already past their cooldown_until have
+        # distribution_state=None and will be picked up anyway; this only
+        # accelerates items still nominally inside a stale cooldown window.
+        try:
+            cooldown_reset_cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+            reset_result = await vault.update_many(
+                {
+                    "cooldown_until": {"$ne": None},
+                    "last_posted_at": {"$lt": cooldown_reset_cutoff},
+                    "vault_channel_id": {"$ne": None},
+                    "vault_message_id": {"$ne": None},
+                },
+                {
+                    "$set": {
+                        "cooldown_until": None,
+                        "updated_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            if reset_result.modified_count:
+                logger.warning(
+                    "MIGRATION: Reset stale cooldown_until for %d vault items whose "
+                    "last_posted_at was >30 days ago — restoring them to the distribution pool.",
+                    reset_result.modified_count,
+                    extra={"ctx_modified": reset_result.modified_count},
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: vault cooldown reset failed (non-fatal)",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
         # ── One-time backfill: promote stuck APPROVED → QUEUED ─────────────
         # Prior to this fix, handle_direct_vault_upload() (admin direct
         # uploads to the vault channel) wrote status=APPROVED instead of

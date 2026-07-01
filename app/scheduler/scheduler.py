@@ -580,7 +580,7 @@ class DistributionScheduler:
                     ]
                 }
             })
-            threshold = settings.MAX_JOBS_PER_CYCLE * 2
+            threshold = settings.MAX_JOBS_PER_CYCLE * 5
             if in_flight_count >= threshold:
                 logger.warning(
                     "Scheduler: backpressure threshold reached — skipping distribution cycle",
@@ -590,6 +590,10 @@ class DistributionScheduler:
                     },
                 )
                 return True
+            logger.debug(
+                "Scheduler: backpressure check passed",
+                extra={"ctx_in_flight": in_flight_count, "ctx_threshold": threshold},
+            )
             return False
         except Exception as exc:
             logger.error(f"Backpressure check failed (failing open): {exc}", exc_info=True)

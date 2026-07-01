@@ -199,7 +199,11 @@ async def route_admin_reply_to_user(client: Client, message: Message) -> None:
         topic_doc = await topic_manager.get_user_by_topic(thread_id)
 
         if not topic_doc:
-            return  # Not a user-centric topic — ignore silently
+            logger.debug(
+                "route_admin_reply_to_user: thread_id not mapped to any user — ignoring",
+                extra={"ctx_thread_id": thread_id, "ctx_admin_id": message.from_user.id},
+            )
+            return
 
         user_id: int = topic_doc["user_id"]
 

@@ -862,19 +862,51 @@ class QueueRepository:
         """
         Recover jobs from crashed workers, returning them to their correct pre-lock status.
 
-        Two-phase approach:
+        Three-phase approach:
+          Phase 0 — Jobs stuck in PROCESSING (worker crashed between mark_processing and
+                     dispatch completion, or mark_failed itself raised a DB error leaving
+                     the job in PROCESSING). Reset to PENDING and increment retry_count so
+                     max-retry enforcement eventually fires and moves them to dead_letters.
           Phase 1 — Jobs that were WATERMARKING (identified by watermark_state=PROCESSING)
                      are returned to WATERMARKING + watermark_state=PENDING.
           Phase 2 — All remaining stale LOCKED jobs (non-watermark) are returned to PENDING.
 
-        The phases are sequenced deliberately: Phase 1 updates a subset and changes their
-        status away from LOCKED, so Phase 2 finds only the remaining non-watermark jobs.
+        Phases 1 and 2 are sequenced deliberately: Phase 1 updates a subset and changes
+        their status away from LOCKED, so Phase 2 finds only the remaining non-watermark
+        jobs.
         Returns the total count of recovered jobs.
         """
         threshold = datetime.now(timezone.utc) - timedelta(
             seconds=settings.STALE_LOCK_THRESHOLD_SECONDS
         )
         now = datetime.now(timezone.utc)
+
+        # Phase 0: Recover stuck PROCESSING jobs.
+        # updated_at is set by mark_processing(); if it's older than the stale threshold
+        # the worker that owned this job is gone and will never complete it.
+        # retry_count is incremented so that repeated recoveries eventually exhaust
+        # max_retries and the dispatcher moves the job to dead_letters on the next attempt.
+        processing_result = await self._queue.update_many(
+            {
+                "status": JobStatus.PROCESSING,
+                "updated_at": {"$lt": threshold},
+            },
+            {
+                "$set": {
+                    "status": JobStatus.PENDING,
+                    "locked_by": None,
+                    "locked_at": None,
+                    "updated_at": now,
+                },
+                "$inc": {"retry_count": 1},
+            },
+        )
+        if processing_result.modified_count:
+            logger.warning(
+                "recover_stale_jobs: Phase 0 recovered %d stuck PROCESSING jobs → PENDING",
+                processing_result.modified_count,
+                extra={"ctx_phase": 0, "ctx_recovered": processing_result.modified_count},
+            )
 
         # Phase 1: Recover watermarking jobs
         wm_result = await self._queue.update_many(
@@ -910,7 +942,7 @@ class QueueRepository:
                 }
             },
         )
-        return wm_result.modified_count + other_result.modified_count
+        return processing_result.modified_count + wm_result.modified_count + other_result.modified_count
 
     # ─── Fairness / Repost Prevention ────────────────────────────────────────
 

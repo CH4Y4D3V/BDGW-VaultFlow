@@ -58,7 +58,16 @@ class AdminLogger:
                 parse_mode=ParseMode.HTML
             )
         except Exception as e:
-            logger.error(f"Failed to post to Admin Logs: {e}")
+            logger.error(
+                "write_admin_log: Telegram send failed",
+                extra={
+                    "ctx_action": action,
+                    "ctx_error": str(e),
+                    "ctx_hub_id": settings.VERIFICATION_GROUP_ID,
+                    "ctx_topic_id": settings.HUB_TOPIC_ADMIN_LOGS,
+                },
+                exc_info=True,
+            )
 
 _admin_logger: Optional[AdminLogger] = None
 
