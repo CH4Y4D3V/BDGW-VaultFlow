@@ -545,7 +545,23 @@ class QueueRepository:
         # just remains locked until the next restart recovery or manual fix.
         try:
             job_doc = await self._queue.find_one({"_id": ObjectId(job_id)})
-            content_id = job_doc.get("content_id") if job_doc else None
+
+            # FIX: enqueue_for_distribution writes content_id under
+            # metadata.content_id (nested), but this method was reading
+            # job_doc.get("content_id") (top-level only), which always
+            # returned None. This caused:
+            #   - vault doc distribution_state="pending_delivery" never cleared
+            #   - cooldown_until never set
+            #   - provider returned same vault doc on every scheduler cycle
+            #   - new job created, watermarked again, delivered again — the
+            #     "same content multiple times" loop reported in production.
+            # Fix: check both locations.
+            content_id = None
+            if job_doc:
+                content_id = (
+                    job_doc.get("content_id")
+                    or (job_doc.get("metadata") or {}).get("content_id")
+                )
 
             if content_id:
                 cooldown_hours = getattr(settings, "VAULT_FILL_COOLDOWN_HOURS", 24)
@@ -564,7 +580,9 @@ class QueueRepository:
                 )
             else:
                 logger.warning(
-                    "mark_completed: job has no content_id — vault doc not released",
+                    "mark_completed: job has no content_id (checked top-level and metadata) "
+                    "— vault doc distribution_state will remain pending_delivery. "
+                    "Fix: ensure enqueue_for_distribution sets content_id as a top-level field.",
                     extra={"ctx_job_id": job_id},
                 )
         except Exception as vault_err:
@@ -836,13 +854,36 @@ class QueueRepository:
 
     async def get_channel_pending_count(self, source_channel_id: str) -> int:
         """
-        Return the count of PENDING jobs for a given source_channel_id.
+        Return the count of in-flight jobs for a given source_channel_id.
 
-        BUG FIX: Original used hardcoded string "pending" instead of JobStatus.PENDING.
-        If the enum value changes, the hardcoded string silently returns 0.
+        Used by the scheduler to compute available slots before creating new
+        queue jobs for a distribution cycle.
+
+        FIX: Previously only counted PENDING jobs. WATERMARKING jobs are
+        invisible to this count because they have status=WATERMARKING, not
+        PENDING. If 8 of 10 slots were occupied by WATERMARKING jobs, the
+        scheduler would see 0 PENDING, compute 10 available slots, and attempt
+        to enqueue 10 more items — 8 of which would immediately fail with
+        DuplicateJobError (vault_ref_unique partial index) or, worse, create
+        genuine duplicate jobs in deployments where the index is missing.
+
+        Now counts all statuses that represent genuinely in-flight work:
+        PENDING, WATERMARKING, LOCKED, PROCESSING, and DELIVERING.
+        COMPLETED and FAILED jobs are not counted — they do not occupy slots.
         """
         return await self._queue.count_documents(
-            {"source_channel_id": source_channel_id, "status": JobStatus.PENDING}
+            {
+                "source_channel_id": source_channel_id,
+                "status": {
+                    "$in": [
+                        JobStatus.PENDING,
+                        JobStatus.WATERMARKING,
+                        JobStatus.LOCKED,
+                        JobStatus.PROCESSING,
+                        JobStatus.DELIVERING,
+                    ]
+                },
+            }
         )
 
     async def get_deadline_exceeded_jobs(self, cutoff: datetime) -> list[dict]:
@@ -909,6 +950,12 @@ class QueueRepository:
             )
 
         # Phase 1: Recover watermarking jobs
+        # FIX: missing $inc retry_count. Without it, a watermark job that keeps
+        # timing out (stale lock) loops forever: worker claims it, times out,
+        # stale recovery resets it, worker claims it again — uploading another
+        # copy to the vault channel on every iteration. Adding $inc here ensures
+        # that after max_retries stale recoveries the job eventually reaches
+        # dead letter and the loop stops.
         wm_result = await self._queue.update_many(
             {
                 "status": JobStatus.LOCKED,
@@ -923,7 +970,8 @@ class QueueRepository:
                     "locked_by": None,
                     "locked_at": None,
                     "updated_at": now,
-                }
+                },
+                "$inc": {"retry_count": 1},
             },
         )
 

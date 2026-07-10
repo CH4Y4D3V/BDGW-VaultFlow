@@ -73,7 +73,21 @@ async def fetch_distribution_content() -> List[Dict]:
         cursor = vault.find({
             "moderation_destination": dest,
             "status": {"$in": eligible_statuses},
-            "distribution_state": {"$nin": ["locked", "removed"]},
+            # FIX: "pending_delivery" was missing from this exclusion list.
+            # _enqueue_content() sets distribution_state="pending_delivery"
+            # immediately after creating a queue job. Without this exclusion,
+            # the scheduler returned the same vault doc every cycle (every 2 min)
+            # while the job was active — triggering a DuplicateJobError on every
+            # attempt (vault_ref_unique blocks duplicate active jobs). In
+            # deployments where vault_ref_unique was not successfully migrated,
+            # this caused the scheduler to create a second job for the same
+            # content, resulting in a second watermark upload to the vault channel
+            # AND a second delivery to the group — exactly the "same content
+            # multiple times" symptom. The exclusion is safe: mark_completed()
+            # resets distribution_state to None after delivery, so content
+            # becomes eligible again (subject to cooldown_until) once the job
+            # completes normally.
+            "distribution_state": {"$nin": ["locked", "removed", "pending_delivery"]},
             "$or": [
                 {"cooldown_until": None},
                 {"cooldown_until": {"$exists": False}},
