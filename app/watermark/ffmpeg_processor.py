@@ -76,8 +76,17 @@ class FFmpegProcessor:
                 base = base.convert("RGBA")
                 logo = logo.convert("RGBA")
                 
-                # ── SYSTEM 17: FIXED SCALE 15% ──
-                scale = settings.WATERMARK_SCALE # 0.15
+                # FIX: was `scale = settings.WATERMARK_SCALE` which ignored
+                # the `scale` key in config entirely. apply_image_watermark()
+                # correctly passes scale via the config dict (config["scale"]),
+                # but _process_photo discarded it and re-read from settings.
+                # settings.WATERMARK_SCALE = 0.040 (4% of image width), which
+                # on a typical 1080px Telegram photo = 43px watermark —
+                # too small to see at normal viewing size. The comment says
+                # "FIXED SCALE 15%" but the constant was wrong. Fixed to use
+                # config.get("scale", settings.WATERMARK_SCALE) so callers
+                # can override the scale, and the default is now 0.15 (15%).
+                scale = config.get("scale", settings.WATERMARK_SCALE)
                 logo_w = int(base.width * scale)
                 logo_h = int(logo.height * (logo_w / logo.width))
                 logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)

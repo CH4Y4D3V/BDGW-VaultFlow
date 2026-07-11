@@ -990,7 +990,50 @@ class QueueRepository:
                 }
             },
         )
-        return processing_result.modified_count + wm_result.modified_count + other_result.modified_count
+
+        # Phase 3: Recover stale DELIVERING jobs.
+        # The dispatcher transitions PROCESSING → DELIVERING per target in
+        # mark_delivering(), then calls record_target_delivered() on success,
+        # and finally mark_completed() when all targets are done.
+        # If the worker crashes between mark_delivering() and mark_completed(),
+        # the job is stuck in DELIVERING forever — the previous recover_stale_jobs
+        # only handled LOCKED and PROCESSING, leaving DELIVERING jobs permanently
+        # unreachable by claim_next() (which only claims PENDING) and by stale
+        # recovery (which never looked at DELIVERING).
+        #
+        # Recovery is safe because dispatch() checks `delivered_targets` and
+        # skips already-delivered targets, so resetting to PENDING does not
+        # cause duplicate delivery of targets that were already recorded.
+        # It WILL re-attempt any target that was not yet in `delivered_targets`
+        # — which is exactly correct for a restart recovery.
+        delivering_result = await self._queue.update_many(
+            {
+                "status": JobStatus.DELIVERING,
+                "updated_at": {"$lt": threshold},
+            },
+            {
+                "$set": {
+                    "status": JobStatus.PENDING,
+                    "locked_by": None,
+                    "locked_at": None,
+                    "updated_at": now,
+                },
+                "$inc": {"retry_count": 1},
+            },
+        )
+        if delivering_result.modified_count:
+            logger.warning(
+                "recover_stale_jobs: Phase 3 recovered %d stuck DELIVERING jobs → PENDING",
+                delivering_result.modified_count,
+                extra={"ctx_phase": 3, "ctx_recovered": delivering_result.modified_count},
+            )
+
+        return (
+            processing_result.modified_count
+            + wm_result.modified_count
+            + other_result.modified_count
+            + delivering_result.modified_count
+        )
 
     # ─── Fairness / Repost Prevention ────────────────────────────────────────
 

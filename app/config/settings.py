@@ -176,7 +176,11 @@ class Settings(BaseSettings):
     #
     WATERMARK_OPACITY: float = 0.42
 
-    WATERMARK_SCALE: float = 0.040
+    # FIX: was 0.040 (4% of image width = ~43px on a 1080px image, invisible
+    # at normal viewing size). The comment in ffmpeg_processor.py said "15%"
+    # but the actual constant contradicted it. Changed to 0.15 to match the
+    # intended visible scale. Operators can override via WATERMARK_SCALE env var.
+    WATERMARK_SCALE: float = 0.15
     WATERMARK_ROTATION: int = 0
 
     # ── Verification Hub Topics ───────────────────────────────────────────────
