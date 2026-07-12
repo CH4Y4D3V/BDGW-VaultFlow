@@ -159,32 +159,116 @@ class QueueRepository:
                                 claimed.append(res)
                                 claimed_ids.append(res["_id"])
         else:
+            # ROOT CAUSE FIX: the previous implementation claimed jobs ONE
+            # DOCUMENT AT A TIME via find_one_and_update, with NO album
+            # affinity whatsoever — it never checked or grouped by
+            # media_group_id. With WATERMARK_WORKER_COUNT=2 (default) running
+            # concurrently, this created a genuine race for albums:
+            #
+            #   Worker A calls claim_watermark_jobs() and its per-document
+            #   loop happens to claim items [0, 1] of a 3-item album.
+            #   Worker B calls claim_watermark_jobs() concurrently and its
+            #   loop claims item [2] of the SAME album.
+            #
+            #   _run_loop() then groups each worker's own results by
+            #   media_group_id — but since BOTH workers' results share the
+            #   same real media_group_id, Worker A calls _process_group()
+            #   with group_id=X and 2 jobs, while Worker B calls
+            #   _process_group() with the SAME group_id=X and 1 job — two
+            #   concurrent, independent watermark uploads and vault-reference
+            #   swaps for fragments of the same logical album. This produced
+            #   duplicate watermarked uploads to the vault channel and
+            #   duplicate/inconsistent deliveries — the "same content posted
+            #   multiple times" symptom that persisted through all previous
+            #   fixes because none of them addressed this race.
+            #
+            # Fix: mirror the transactional branch's group-atomic claiming
+            # pattern. A bare (non-transactional) update_many() with a filter
+            # on locked_by=None is STILL atomic per individual document —
+            # MongoDB evaluates the filter against each document's current
+            # state at the moment of the write. If Worker A's update_many
+            # reaches a document first and flips locked_by away from None,
+            # Worker B's concurrent update_many (using the identical filter)
+            # will simply not match that document anymore. This guarantees
+            # whole-group atomicity without requiring a multi-document ACID
+            # transaction or a replica-set deployment.
+            #
+            # batch_size now means "number of GROUPS to claim" in BOTH
+            # branches (previously only true for the transactional branch),
+            # since one group can expand to multiple documents.
             for _ in range(batch_size):
-                res = await self._queue.find_one_and_update(
+                candidate = await self._queue.find_one(
                     {
                         "status": JobStatus.WATERMARKING,
                         "watermark_required": True,
                         "watermark_state": WatermarkState.PENDING,
                         "locked_by": None,
-                        "_id": {"$nin": claimed_ids}
-                    },
-                    {
-                        "$set": {
-                            "status": JobStatus.LOCKED,
-                            "locked_by": worker_id,
-                            "locked_at": now,
-                            "updated_at": now,
-                            "watermark_state": WatermarkState.PROCESSING,
-                        }
+                        "_id": {"$nin": claimed_ids},
                     },
                     sort=[("priority", -1), ("created_at", 1)],
-                    return_document=ReturnDocument.AFTER
                 )
-                if res:
-                    claimed.append(res)
-                    claimed_ids.append(res["_id"])
-                else:
+                if not candidate:
                     break
+
+                group_id = candidate.get("media_group_id")
+
+                if group_id:
+                    # Album: claim every member of the group atomically.
+                    # The locked_by=None filter re-evaluates per document at
+                    # write time, so a concurrent worker's update_many for
+                    # the same group_id cannot double-claim any document
+                    # this call successfully locks.
+                    result = await self._queue.update_many(
+                        {
+                            "media_group_id": group_id,
+                            "status": JobStatus.WATERMARKING,
+                            "locked_by": None,
+                        },
+                        {
+                            "$set": {
+                                "status": JobStatus.LOCKED,
+                                "locked_by": worker_id,
+                                "locked_at": now,
+                                "updated_at": now,
+                                "watermark_state": WatermarkState.PROCESSING,
+                            }
+                        },
+                    )
+                    if result.modified_count > 0:
+                        cursor = self._queue.find(
+                            {"media_group_id": group_id, "locked_by": worker_id},
+                        ).sort("album_sequence_index", 1)
+                        async for g_doc in cursor:
+                            if g_doc["_id"] not in claimed_ids:
+                                claimed.append(g_doc)
+                                claimed_ids.append(g_doc["_id"])
+                    else:
+                        # Another worker won the race for this entire group
+                        # between our find_one and update_many. Exclude it
+                        # from the next candidate search and keep going.
+                        claimed_ids.append(candidate["_id"])
+                else:
+                    # Single (non-album) job: atomic check-and-set claim.
+                    res = await self._queue.find_one_and_update(
+                        {"_id": candidate["_id"], "locked_by": None},
+                        {
+                            "$set": {
+                                "status": JobStatus.LOCKED,
+                                "locked_by": worker_id,
+                                "locked_at": now,
+                                "updated_at": now,
+                                "watermark_state": WatermarkState.PROCESSING,
+                            }
+                        },
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    if res:
+                        claimed.append(res)
+                        claimed_ids.append(res["_id"])
+                    else:
+                        # Another worker claimed it between find_one and
+                        # find_one_and_update. Exclude and keep going.
+                        claimed_ids.append(candidate["_id"])
 
         return claimed
 
@@ -274,8 +358,33 @@ class QueueRepository:
                                 claimed.append(res)
                                 claimed_ids.append(res["_id"])
         else:
+            # ROOT CAUSE FIX: identical bug pattern to claim_watermark_jobs'
+            # non-transactional branch. The previous implementation claimed
+            # PENDING jobs one document at a time via find_one_and_update
+            # with NO album/media_group_id affinity. With
+            # DISPATCHER_WORKER_COUNT=4 (default) running concurrently, an
+            # album's queue jobs could be split across MULTIPLE dispatcher
+            # workers' individual claims within the same instant — each
+            # worker's _run_loop() groups its own (partial) results by
+            # media_group_id and calls _handle_job_group()/dispatch() with
+            # the SAME media_group_id but a DIFFERENT subset of the album's
+            # jobs. This caused duplicate/partial delivery of the same
+            # album content to the target group — contributing directly to
+            # the reported "same content posted multiple times" symptom.
+            #
+            # Fix: mirror the transactional branch's group-atomic claiming.
+            # A bare update_many() with locked_by=None in its filter is still
+            # atomic per individual document — MongoDB re-evaluates the
+            # filter against each document's live state at write time, so a
+            # concurrent worker's update_many for the same media_group_id
+            # cannot double-claim any document this call successfully locks.
+            # This gives whole-group atomicity without requiring a replica
+            # set or multi-document ACID transaction.
+            #
+            # batch_size now means "number of GROUPS to claim" in BOTH
+            # branches (previously only true for the transactional branch).
             for _ in range(batch_size):
-                res = await self._queue.find_one_and_update(
+                candidate = await self._queue.find_one(
                     {
                         "status": JobStatus.PENDING,
                         "locked_by": None,
@@ -283,24 +392,61 @@ class QueueRepository:
                             {"execute_after": None},
                             {"execute_after": {"$lte": now}},
                         ],
-                        "_id": {"$nin": claimed_ids}
-                    },
-                    {
-                        "$set": {
-                            "status": JobStatus.LOCKED,
-                            "locked_by": worker_id,
-                            "locked_at": now,
-                            "updated_at": now,
-                        }
+                        "_id": {"$nin": claimed_ids},
                     },
                     sort=[("priority", -1), ("execute_after", 1), ("_id", 1)],
-                    return_document=ReturnDocument.AFTER
                 )
-                if res:
-                    claimed.append(res)
-                    claimed_ids.append(res["_id"])
-                else:
+                if not candidate:
                     break
+
+                group_id = candidate.get("media_group_id")
+
+                if group_id:
+                    result = await self._queue.update_many(
+                        {
+                            "media_group_id": group_id,
+                            "status": JobStatus.PENDING,
+                            "locked_by": None,
+                        },
+                        {
+                            "$set": {
+                                "status": JobStatus.LOCKED,
+                                "locked_by": worker_id,
+                                "locked_at": now,
+                                "updated_at": now,
+                            }
+                        },
+                    )
+                    if result.modified_count > 0:
+                        cursor = self._queue.find(
+                            {"media_group_id": group_id, "locked_by": worker_id},
+                        ).sort("album_sequence_index", 1)
+                        async for g_doc in cursor:
+                            if g_doc["_id"] not in claimed_ids:
+                                claimed.append(g_doc)
+                                claimed_ids.append(g_doc["_id"])
+                    else:
+                        # Another worker won the race for this entire group
+                        # between our find_one and update_many.
+                        claimed_ids.append(candidate["_id"])
+                else:
+                    res = await self._queue.find_one_and_update(
+                        {"_id": candidate["_id"], "locked_by": None},
+                        {
+                            "$set": {
+                                "status": JobStatus.LOCKED,
+                                "locked_by": worker_id,
+                                "locked_at": now,
+                                "updated_at": now,
+                            }
+                        },
+                        return_document=ReturnDocument.AFTER,
+                    )
+                    if res:
+                        claimed.append(res)
+                        claimed_ids.append(res["_id"])
+                    else:
+                        claimed_ids.append(candidate["_id"])
 
         return claimed
 
