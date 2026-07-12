@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
 
 from pyrogram.enums import ParseMode
@@ -135,11 +135,49 @@ class MembershipReconciliationWorker:
             {"status": "ACTIVE", "expires_at": {"$gt": now}}
         ):
             user_id: int = sub["user_id"]
-            vault_type: str = sub.get("vault_type", "nsfw")
-            group_id = group_map.get(vault_type)
+            # FIX: was sub.get("vault_type", "nsfw"). The subscriptions
+            # collection NEVER writes a "vault_type" field anywhere in the
+            # codebase — the actual field distinguishing NSFW from Premium
+            # subscribers is "plan" (see app/models/subscription.py: Plan enum
+            # values free/premium/nsfw/admin/sudo/owner). Because "vault_type"
+            # never exists, this ALWAYS fell back to the literal string
+            # "nsfw" for every single subscriber, regardless of their real
+            # plan. Every premium subscriber was therefore checked against
+            # the NSFW group — a group they were never added to — producing
+            # a PERMANENT, never-resolving UserNotParticipant false positive.
+            # Each reconciliation cycle (every 6 hours) then created a brand
+            # new single-use invite link to the WRONG group and re-sent the
+            # "you appear to have left the group" DM, forever — exactly the
+            # reported symptom of a user accumulating multiple rejoin-link
+            # messages over time despite never having left their actual
+            # (premium) group.
+            plan_value = sub.get("plan") or sub.get("package_id") or "nsfw"
+            group_id = group_map.get(plan_value)
 
             if not group_id:
                 continue
+
+            # Cooldown: never re-invite the same subscriber more than once
+            # per RECONCILE_REINVITE_COOLDOWN_HOURS, regardless of how many
+            # consecutive reconciliation cycles find them absent. Without
+            # this, ANY genuinely-not-yet-joined user (or any other edge
+            # case that causes a persistent UserNotParticipant) would still
+            # accumulate a fresh invite link + DM every single cycle forever.
+            # This is a defensive backstop independent of the plan/group
+            # field fix above.
+            last_invite_at = sub.get("last_reconcile_reinvite_at")
+            cooldown_hours = getattr(settings, "RECONCILE_REINVITE_COOLDOWN_HOURS", 24)
+            if last_invite_at is not None:
+                if isinstance(last_invite_at, str):
+                    try:
+                        last_invite_at = datetime.fromisoformat(last_invite_at)
+                    except ValueError:
+                        last_invite_at = None
+                if last_invite_at is not None:
+                    if last_invite_at.tzinfo is None:
+                        last_invite_at = last_invite_at.replace(tzinfo=timezone.utc)
+                    if now - last_invite_at < timedelta(hours=cooldown_hours):
+                        continue  # Already re-invited recently — skip.
 
             try:
                 await self._bot.get_chat_member(group_id, user_id)
@@ -162,15 +200,24 @@ class MembershipReconciliationWorker:
                 summary["errors"] += 1
 
         # Phase 2 — expired members still in group
-        # Collect distinct (user_id, vault_type) pairs from expired subs
+        # Collect distinct (user_id, plan) pairs from expired subs
+        #
+        # FIX: same vault_type→plan field bug as Phase 1. This ALSO meant
+        # expired PREMIUM subscribers were checked (and, if present, kicked)
+        # against the NSFW group instead of Premium — since they were never
+        # a member of the NSFW group, get_chat_member() always raised
+        # UserNotParticipant, silently caught by "pass", meaning expired
+        # premium users were NEVER actually removed from their real
+        # (premium) group by this worker.
         expired_pairs: set[tuple[int, str]] = set()
         async for sub in self._db["subscriptions"].find(
             {"$or": [{"status": "EXPIRED"}, {"expires_at": {"$lt": now}}]}
         ):
-            expired_pairs.add((int(sub["user_id"]), sub.get("vault_type", "nsfw")))
+            plan_value = sub.get("plan") or sub.get("package_id") or "nsfw"
+            expired_pairs.add((int(sub["user_id"]), plan_value))
 
-        for user_id, vault_type in expired_pairs:
-            group_id = group_map.get(vault_type)
+        for user_id, plan_value in expired_pairs:
+            group_id = group_map.get(plan_value)
             if not group_id:
                 continue
 
@@ -229,6 +276,24 @@ class MembershipReconciliationWorker:
                 if attempt == 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
+
+        # Record when this re-invite was sent so the Phase 1 cooldown check
+        # (RECONCILE_REINVITE_COOLDOWN_HOURS, default 24h) can skip this
+        # subscriber on subsequent cycles until the cooldown elapses. Without
+        # this, every 6-hour cycle would keep generating a fresh invite link
+        # and DM for as long as the subscriber remains (or appears to remain)
+        # absent from the group.
+        try:
+            sub_filter = {"_id": sub["_id"]} if sub.get("_id") else {"user_id": user_id}
+            await self._db["subscriptions"].update_one(
+                sub_filter,
+                {"$set": {"last_reconcile_reinvite_at": datetime.now(timezone.utc)}},
+            )
+        except Exception as e:
+            logger.warning(
+                "reconciliation_reinvite_cooldown_write_failed",
+                extra={"ctx_user_id": user_id, "ctx_error": str(e)},
+            )
 
         await self._write_audit(
             action="RECONCILE_REINVITE",

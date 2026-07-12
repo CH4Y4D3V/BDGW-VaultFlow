@@ -193,6 +193,13 @@ class Settings(BaseSettings):
     # ── Subscriptions ─────────────────────────────────────────────────────────
     GRACE_PERIOD_DAYS: int = 3
 
+    # Minimum hours between consecutive re-invite DMs sent to the same
+    # subscriber by MembershipReconciliationWorker (Section 26, runs every
+    # 6h). Prevents accumulating a fresh single-use invite link every cycle
+    # for a subscriber who has not yet clicked a previous one, or for any
+    # other edge case producing a persistent "not in group" false positive.
+    RECONCILE_REINVITE_COOLDOWN_HOURS: int = 24
+
     # ── Invite security ───────────────────────────────────────────────────────
     INVITE_EXPIRY_MINUTES: int = 30
 
