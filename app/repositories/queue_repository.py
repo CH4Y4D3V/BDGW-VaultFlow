@@ -979,6 +979,54 @@ class QueueRepository:
                             "watermark_state": WatermarkState.COMPLETED,
                             "status": JobStatus.PENDING,
                             "updated_at": datetime.now(timezone.utc),
+                            # ROOT CAUSE FIX: this $set previously did NOT
+                            # clear locked_by/locked_at. The job was claimed
+                            # for watermarking via claim_watermark_jobs(),
+                            # which sets locked_by=<watermark_worker_id> and
+                            # status=LOCKED. This swap correctly transitions
+                            # status back to PENDING (signalling "ready for
+                            # the general dispatcher to claim"), but left
+                            # locked_by populated with the watermark worker's
+                            # ID. claim_next() REQUIRES locked_by=None as
+                            # part of its match filter — with locked_by still
+                            # set, the job became invisible to claim_next()
+                            # FOREVER. It was also invisible to
+                            # recover_stale_jobs()'s stale-LOCKED-job recovery
+                            # phase, because that phase filters on
+                            # status=LOCKED, and this job's status was
+                            # already PENDING — it fell into a permanent,
+                            # unrecoverable limbo: status says "ready", but
+                            # the lock field says "still claimed by the
+                            # watermark worker that already finished with it".
+                            #
+                            # This bug was masked in earlier debugging because
+                            # the NON-transactional fallback path
+                            # (_swap_references_no_txn in worker_pool.py) was
+                            # separately fixed to clear these fields — but
+                            # that fallback only runs when MongoDB does NOT
+                            # support transactions. Once this deployment's
+                            # MongoDB was recognised as a replica set
+                            # ("MongoDB replica set detected" in the startup
+                            # log), THIS transactional function became the
+                            # one actually executing, and it still had the
+                            # original bug.
+                            #
+                            # Consequence: every approved submission
+                            # successfully archived to the vault and
+                            # successfully watermarked (watermark_swap_complete
+                            # logged), but the underlying queue job could
+                            # never be delivered — content never reached the
+                            # group. Because mark_completed() (which releases
+                            # the vault doc's distribution_state and sets its
+                            # replay cooldown) never ran for these stuck jobs,
+                            # every corresponding vault item also stayed
+                            # permanently stuck at distribution_state=
+                            # "pending_delivery", making the ENTIRE backlog
+                            # invisible to the scheduler's vault-replay query
+                            # too (vault_has_content_none_eligible on every
+                            # cycle, for both NSFW and Premium).
+                            "locked_by": None,
+                            "locked_at": None,
                         }
                     },
                     **kwargs

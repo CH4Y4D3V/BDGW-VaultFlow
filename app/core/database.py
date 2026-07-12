@@ -158,6 +158,66 @@ class DataMigrationManager:
 
         logger.info("MIGRATION: Queue stabilization complete.")
 
+        # ── One-time repair: release jobs stuck PENDING-but-still-locked ────
+        # swap_album_vault_references()._do_swap() (the transactional vault-
+        # reference swap, used whenever MongoDB is a replica set) transitioned
+        # a job's status from LOCKED back to PENDING after a successful
+        # watermark swap, but never cleared locked_by/locked_at — those still
+        # held the watermark worker's ID from the original claim_watermark_
+        # jobs() call. claim_next() requires locked_by=None as part of its
+        # match filter, so every job that passed through this swap became
+        # permanently invisible to the dispatcher: status said "ready to
+        # send", but the stale lock field silently excluded it from every
+        # claim query, forever. recover_stale_jobs() couldn't rescue these
+        # either, since its recovery phases only match status=LOCKED, and
+        # these jobs were already sitting at status=PENDING.
+        #
+        # The code fix (adding locked_by=None, locked_at=None to _do_swap's
+        # $set) prevents this for jobs processed AFTER this deploy. This pass
+        # repairs the existing backlog: any job already sitting at
+        # status=PENDING with a non-null locked_by is, by definition, in this
+        # exact broken state — a legitimately in-flight job would never be at
+        # status=PENDING (that status is reserved for "unclaimed, ready").
+        # Idempotent: once every affected job has locked_by cleared, this
+        # query matches nothing on subsequent restarts.
+        try:
+            queue_for_lock_repair = db[settings.QUEUE_COLLECTION]
+            stuck_lock_query = {
+                # String literal "pending" matches this file's existing
+                # convention (see active_statuses above) rather than
+                # importing JobStatus from app.core.models here.
+                "status": "pending",
+                "locked_by": {"$ne": None},
+            }
+            stuck_lock_count = await queue_for_lock_repair.count_documents(stuck_lock_query)
+            if stuck_lock_count > 0:
+                repair_result = await queue_for_lock_repair.update_many(
+                    stuck_lock_query,
+                    {
+                        "$set": {
+                            "locked_by": None,
+                            "locked_at": None,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+                logger.warning(
+                    "MIGRATION: Released %d job(s) stuck PENDING-but-locked "
+                    "(swap_album_vault_references lock-clear bug) — these are "
+                    "now claimable by the dispatcher again.",
+                    repair_result.modified_count,
+                    extra={
+                        "ctx_matched": stuck_lock_count,
+                        "ctx_modified": repair_result.modified_count,
+                    },
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: stuck PENDING-but-locked job repair failed (non-fatal)",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
     @classmethod
     async def stabilize_vault(cls, db: AsyncIOMotorDatabase) -> None:
         """
@@ -391,6 +451,85 @@ class DataMigrationManager:
         except Exception as exc:
             logger.error(
                 "MIGRATION: vault APPROVED→QUEUED backfill failed",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
+        # ── One-time repair: release vault items orphaned at
+        # distribution_state="pending_delivery" with no active queue job ────
+        # execute_approve()/execute_queue() set distribution_state=
+        # "pending_delivery" on a vault doc immediately after creating its
+        # queue job, so the scheduler's replay query skips it while delivery
+        # is in flight. mark_completed() is what releases this lock
+        # (distribution_state -> None) once delivery finishes.
+        #
+        # The swap_album_vault_references lock-clear bug (see the
+        # "stuck PENDING-but-locked" repair in stabilize_queue above) meant
+        # affected jobs could never reach delivery, so mark_completed() never
+        # ran, and every corresponding vault item stayed locked at
+        # "pending_delivery" forever — invisible to the scheduler's vault-
+        # replay query for BOTH NSFW and Premium destinations
+        # (vault_has_content_none_eligible on every cycle).
+        #
+        # The stabilize_queue repair above unblocks jobs that still exist.
+        # This pass is the defensive complement: it catches vault items whose
+        # distribution_state is stuck at "pending_delivery" but whose
+        # corresponding queue job no longer exists in an active state at all
+        # (e.g. it was separately quarantined/removed by an earlier migration
+        # pass, or completed under an older code path before mark_completed
+        # existed). Without this, such vault items would remain permanently
+        # stuck even after the job-level repair, since there is no job left
+        # to complete and release them.
+        #
+        # Idempotent: only matches distribution_state="pending_delivery" vault
+        # docs with no matching active-status job for their content_id, so it
+        # becomes a no-op once the backlog clears.
+        try:
+            active_job_statuses = [
+                "pending", "processing", "locked",
+                "watermarking", "ready", "delivering",
+            ]
+            # NOTE: `queue` is NOT in scope here — it's a local variable of
+            # stabilize_queue(), a separate classmethod. Must reference the
+            # collection explicitly via db[...] in this function's scope.
+            queue_for_orphan_check = db[settings.QUEUE_COLLECTION]
+            stuck_vault_query = {"distribution_state": "pending_delivery"}
+            stuck_vault_ids = []
+            async for v_doc in vault.find(stuck_vault_query, {"content_id": 1}):
+                content_id = v_doc.get("content_id")
+                if not content_id:
+                    continue
+                active_job = await queue_for_orphan_check.find_one({
+                    "content_id": content_id,
+                    "status": {"$in": active_job_statuses},
+                })
+                if active_job is None:
+                    stuck_vault_ids.append(v_doc["_id"])
+
+            if stuck_vault_ids:
+                release_result = await vault.update_many(
+                    {"_id": {"$in": stuck_vault_ids}},
+                    {
+                        "$set": {
+                            "distribution_state": None,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+                logger.warning(
+                    "MIGRATION: Released %d orphaned vault item(s) stuck at "
+                    "distribution_state='pending_delivery' with no active "
+                    "queue job — these are now eligible for the distribution "
+                    "pool again (subject to any existing cooldown_until).",
+                    release_result.modified_count,
+                    extra={
+                        "ctx_matched": len(stuck_vault_ids),
+                        "ctx_modified": release_result.modified_count,
+                    },
+                )
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: orphaned vault distribution_state repair failed (non-fatal)",
                 extra={"ctx_error": str(exc)},
                 exc_info=True,
             )
