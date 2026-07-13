@@ -299,6 +299,26 @@ async def post_to_destination(
         logger.error("Destination group ID not configured", extra={"ctx_dest": dest})
         return False
 
+    # Diagnostic: explicitly log the resolved group_id and source chat/message
+    # for every post attempt. If content is archiving to vault successfully but
+    # not appearing in the destination group, this log line makes it
+    # immediately visible whether group_id is correct/nonzero and exactly
+    # which source message(s) copy_message/copy_media_group is attempting to
+    # read from — without this, a misconfigured NSFW_GROUP_ID/PREMIUM_GROUP_ID,
+    # or a bot lacking post permission in that group, would fail with an
+    # RPCError that IS logged below, but without this context line it's harder
+    # to immediately correlate which destination and source were involved.
+    logger.info(
+        "post_to_destination_attempt",
+        extra={
+            "ctx_dest": dest,
+            "ctx_group_id": group_id,
+            "ctx_source_chat_id": messages[0].chat.id if messages else None,
+            "ctx_source_msg_id": messages[0].id if messages else None,
+            "ctx_count": len(messages),
+        },
+    )
+
     is_album = len(messages) > 1 and all(m.media_group_id for m in messages)
     album_succeeded = False
 
@@ -371,10 +391,11 @@ async def post_to_destination(
                 )
                 return False
 
+    logger.info(
+        "post_to_destination_success",
+        extra={"ctx_dest": dest, "ctx_group_id": group_id, "ctx_count": len(messages)},
+    )
     return True
-
-
-def _generate_content_id(chat_id: int, message_id: int, file_unique_id: Optional[str]) -> str:
     """Generate a deterministic SHA-256 content ID from source coordinates.
 
     The content ID is stable across restarts and survives message edits

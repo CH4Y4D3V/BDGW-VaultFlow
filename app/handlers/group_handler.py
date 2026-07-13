@@ -10,6 +10,7 @@ from pyrogram.types import Message
 
 from app.config import settings
 from app.bot.client import get_bot_id
+from app.core.database import DatabaseManager
 from app.moderation import verification_hub
 from app.services import submission_service
 from app.services.topic_manager import get_topic_manager, TOPIC_CONTENT
@@ -111,27 +112,50 @@ async def _submit_for_review(
                 "Group submission failed to forward",
                 extra={"ctx_submitter": submitter_id, "ctx_chat": reference.chat.id},
             )
-        else:
-            # Update pending doc with hub forwarded IDs so recovery works after restart
-            try:
-                from app.config import settings as _settings
-                from app.core.database import DatabaseManager
-                db = DatabaseManager.get_db()
-                await db[_settings.PENDING_COLLECTION].update_one(
-                    {"first_msg_id": reference.id},
-                    {
-                        "$set": {
-                            "hub_forwarded_ids": hub_forwarded_ids,
-                            "hub_topic_id": topic_id,
-                            "hub_chat_id": _settings.VERIFICATION_GROUP_ID,
-                        }
-                    },
-                )
-            except Exception as _e:
-                logger.warning(
-                    "group_handler: hub_forwarded_ids persist failed",
-                    extra={"ctx_submitter": submitter_id, "ctx_error": str(_e)},
-                )
+            return
+
+        # ROOT CAUSE FIX: this function previously never registered the
+        # pending submission anywhere — neither in the in-memory
+        # _pending_submissions dict nor as a proper MongoDB document. It only
+        # called forward_to_verification() (which posts the moderation card
+        # to the hub but does NOT persist any pending state) and then
+        # attempted a bare update_one() against PENDING_COLLECTION filtered
+        # by first_msg_id — WITHOUT upsert=True. Since no document with that
+        # first_msg_id had ever been inserted, that update_one() silently
+        # matched and modified zero documents every single time.
+        #
+        # Consequence: when an admin clicked Approve/Reject on a moderation
+        # card for a GROUP-sourced submission, handle_moderation_callback's
+        # submission_service.pop_pending(msg_id) found nothing in memory,
+        # fell back to _recover_pending_from_db(), which ALSO found nothing
+        # (no document ever existed to recover), and the callback showed
+        # "Submission not found in registry or vault." every time — silently
+        # and permanently, for every group-sourced submission, regardless of
+        # how quickly the admin approved it.
+        #
+        # Fix: call create_pending_submission() exactly as submission_handler.py
+        # (the private-chat path) already does. This writes BOTH the in-memory
+        # cache (so pop_pending() succeeds immediately, no restart needed) and
+        # the MongoDB document (first_msg_id, message_ids pointing at the
+        # ORIGINAL group-chat messages, hub_forwarded_ids/hub_topic_id/
+        # hub_chat_id for hub-based recovery) via a single upsert=True call.
+        try:
+            from app.services.submission_service import SubmissionService
+            db = DatabaseManager.get_db()
+            service = SubmissionService(db)
+            await service.create_pending_submission(
+                user_id=submitter_id,
+                messages=messages,
+                hub_topic_id=topic_id,
+                hub_card_message_id=0,
+                hub_forwarded_ids=hub_forwarded_ids,
+            )
+        except Exception as persist_err:
+            logger.error(
+                "group_handler: create_pending_submission failed",
+                extra={"ctx_submitter": submitter_id, "ctx_error": str(persist_err)},
+                exc_info=True,
+            )
     except Exception as e:
         logger.error(
             "Unexpected error in group submission pipeline",
