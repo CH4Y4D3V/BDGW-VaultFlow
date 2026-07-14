@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Dict
 
 from app.config import settings
@@ -25,6 +25,7 @@ async def fetch_distribution_content() -> List[Dict]:
     """
     db = DatabaseManager.get_db()
     vault = db[getattr(settings, "VAULT_COLLECTION", "vault")]
+    queue = db[getattr(settings, "QUEUE_COLLECTION", "queue_jobs")]
     channels = db[getattr(settings, "CHANNEL_CONFIG_COLLECTION", "channel_config")]
 
     # Case A: no channels at all — seeding failure
@@ -70,6 +71,76 @@ async def fetch_distribution_content() -> List[Dict]:
             "distribution_state": {"$in": ["locked", "removed"]},
         })
 
+        # FIX: total_locked never checked "pending_delivery" specifically, so
+        # a warning like "vault_has_content_none_eligible ctx_locked:0" gave
+        # no way to tell whether items were correctly waiting out a cooldown
+        # (benign, by design — see execute_approve's 24h vault-fill cooldown)
+        # or permanently orphaned at distribution_state="pending_delivery"
+        # with no job left to ever release them (a real, silent bug). These
+        # two counts make the distinction explicit in every cycle's log.
+        total_pending_delivery = await vault.count_documents({
+            "moderation_destination": dest,
+            "status": {"$in": eligible_statuses},
+            "distribution_state": "pending_delivery",
+        })
+        total_future_cooldown = await vault.count_documents({
+            "moderation_destination": dest,
+            "status": {"$in": eligible_statuses},
+            "distribution_state": {"$nin": ["locked", "removed", "pending_delivery"]},
+            "cooldown_until": {"$gt": now},
+        })
+
+        # ── Self-healing: release orphaned "pending_delivery" vault items ──
+        # PROACTIVE COMPLEMENT to the one-time stabilize_vault() startup
+        # migration. That migration only runs once per container start, so
+        # any item that becomes orphaned AFTER startup (e.g. an edge case
+        # not covered by existing recovery paths) would stay silently stuck
+        # until the next restart. This check runs every distribution cycle
+        # (~2 min) instead: any vault item stuck at distribution_state=
+        # "pending_delivery" for longer than ORPHAN_GRACE_PERIOD_MINUTES
+        # (default 15 — long enough that a genuinely in-flight job's brief
+        # enqueue window can never be mistaken for an orphan) with NO
+        # matching active-status queue job is released automatically.
+        grace_minutes = getattr(settings, "ORPHAN_GRACE_PERIOD_MINUTES", 15)
+        grace_cutoff = now - timedelta(minutes=grace_minutes)
+        active_job_statuses = [
+            "pending", "processing", "locked",
+            "watermarking", "ready", "delivering",
+        ]
+        released_count = 0
+        async for v_doc in vault.find(
+            {
+                "moderation_destination": dest,
+                "status": {"$in": eligible_statuses},
+                "distribution_state": "pending_delivery",
+                "updated_at": {"$lt": grace_cutoff},
+            },
+            {"content_id": 1},
+        ):
+            content_id = v_doc.get("content_id")
+            if not content_id:
+                continue
+            active_job = await queue.find_one({
+                "content_id": content_id,
+                "status": {"$in": active_job_statuses},
+            })
+            if active_job is None:
+                await vault.update_one(
+                    {"_id": v_doc["_id"]},
+                    {"$set": {"distribution_state": None, "updated_at": now}},
+                )
+                released_count += 1
+
+        if released_count:
+            logger.warning(
+                "provider_self_heal_released_orphaned_vault_items",
+                extra={
+                    "ctx_dest": dest,
+                    "ctx_released": released_count,
+                    "ctx_grace_minutes": grace_minutes,
+                },
+            )
+
         cursor = vault.find({
             "moderation_destination": dest,
             "status": {"$in": eligible_statuses},
@@ -103,6 +174,8 @@ async def fetch_distribution_content() -> List[Dict]:
                 "ctx_dest": dest,
                 "ctx_total_queued": total_queued,
                 "ctx_locked_or_removed": total_locked,
+                "ctx_pending_delivery": total_pending_delivery,
+                "ctx_future_cooldown": total_future_cooldown,
                 "ctx_eligible": len(content),
             },
         )
@@ -127,6 +200,8 @@ async def fetch_distribution_content() -> List[Dict]:
                         "ctx_dest": dest,
                         "ctx_total_queued": total_queued,
                         "ctx_locked": total_locked,
+                        "ctx_pending_delivery": total_pending_delivery,
+                        "ctx_future_cooldown": total_future_cooldown,
                     },
                 )
 

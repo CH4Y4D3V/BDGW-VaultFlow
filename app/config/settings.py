@@ -200,6 +200,13 @@ class Settings(BaseSettings):
     # other edge case producing a persistent "not in group" false positive.
     RECONCILE_REINVITE_COOLDOWN_HOURS: int = 24
 
+    # Minutes a vault item may sit at distribution_state="pending_delivery"
+    # with no matching active-status queue job before provider.py's
+    # self-heal pass (fetch_distribution_content) releases it automatically.
+    # Must be long enough that a job's brief window between being enqueued
+    # and appearing in a query can never be mistaken for an orphan.
+    ORPHAN_GRACE_PERIOD_MINUTES: int = 15
+
     # ── Invite security ───────────────────────────────────────────────────────
     INVITE_EXPIRY_MINUTES: int = 30
 
