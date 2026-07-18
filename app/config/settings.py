@@ -109,7 +109,19 @@ class Settings(BaseSettings):
     SCHEDULER_INTERVAL_SECONDS: int = 60
     MAX_JOBS_PER_CYCLE: int = 100
     RANDOMIZE_POSTING_WINDOW: int = 300
-    REPOST_PREVENTION_HOURS: int = 168
+    # FIX: was 168 (7 days). With a small vault pool (a handful of items per
+    # destination in early operation), a full week before ANY item becomes
+    # repostable meant the entire distribution pool could go silent for days
+    # once the initial batch was exhausted — logged every cycle as "All
+    # content was recently posted; nothing to schedule" — which is
+    # indistinguishable from a broken pipeline to anyone watching the logs,
+    # even though fairness.py itself was working exactly as designed.
+    # Reduced to 24h: still prevents the same item appearing twice in one
+    # day, but lets the vault-fill/backfill mechanism cycle through a small
+    # pool responsively instead of freezing for a week at a time. Increase
+    # this once the vault has enough content that daily repeats would look
+    # spammy to subscribers.
+    REPOST_PREVENTION_HOURS: int = 24
 
     # ── Queue deadline for moderator-queued content ───────────────────────────
     QUEUE_DEADLINE_HOURS: int = 24

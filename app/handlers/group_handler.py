@@ -221,9 +221,36 @@ async def handle_group_media_submission(client: Client, message: Message) -> Non
 
     # Block managed internal chats — loop prevention
     if _is_managed_chat(message.chat.id):
-        logger.debug(
+        # Identify exactly which managed chat this is, so logs unambiguously
+        # show whether test/admin activity is landing in the hub, vault, or
+        # a destination group — rather than just a bare chat_id that
+        # requires cross-referencing env vars to interpret.
+        chat_id = message.chat.id
+        if chat_id == settings.VERIFICATION_GROUP_ID:
+            matched = "VERIFICATION_GROUP_ID (hub)"
+        elif chat_id == settings.VAULT_CHANNEL_ID:
+            matched = "VAULT_CHANNEL_ID"
+        elif chat_id == settings.NSFW_GROUP_ID:
+            matched = "NSFW_GROUP_ID"
+        elif chat_id == settings.PREMIUM_GROUP_ID:
+            matched = "PREMIUM_GROUP_ID"
+        elif chat_id == settings.LOG_CHANNEL_ID:
+            matched = "LOG_CHANNEL_ID"
+        else:
+            matched = "unknown managed entry"
+        # FIX: was logger.debug(). This deployment's root logger defaults to
+        # INFO level (app/core/logger.py), so DEBUG-level calls are silently
+        # suppressed and never reach the log stream at all — this is exactly
+        # why this confirming message has never appeared in any production
+        # log despite the managed-chat check firing correctly every single
+        # time. Upgraded to INFO so operators can see directly, without
+        # cross-referencing env vars, that repeated test/admin activity in a
+        # given chat is being correctly identified and ignored as loop
+        # prevention — rather than mistaking silence here for the submission
+        # pipeline being broken.
+        logger.info(
             "group_handler: ignoring message from managed chat",
-            extra={"ctx_chat_id": message.chat.id},
+            extra={"ctx_chat_id": chat_id, "ctx_matched": matched},
         )
         return
 
