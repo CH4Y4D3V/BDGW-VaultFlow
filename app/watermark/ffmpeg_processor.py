@@ -67,6 +67,17 @@ class FFmpegProcessor:
 
         logo_path = config.get("watermark_image_path")
         if not logo_path or not Path(logo_path).exists():
+            logger.error(
+                "WATERMARK LOGO MISSING — uploading UNWATERMARKED original. "
+                "Fix WATERMARK_LOGO_PATH_NSFW/WATERMARK_LOGO_PATH_PREMIUM or "
+                "restore the missing asset file.",
+                extra={
+                    "ctx_configured_logo_path": logo_path,
+                    "ctx_resolved_absolute": str(Path(logo_path).resolve()) if logo_path else None,
+                    "ctx_path_exists": Path(logo_path).exists() if logo_path else False,
+                    "ctx_input_path": input_path,
+                },
+            )
             shutil.copy(input_path, output_path)
             return output_path
 
@@ -125,7 +136,12 @@ class FFmpegProcessor:
                 
             return output_path
         except Exception as e:
-            logger.error("Photo watermarking failed", extra={"ctx_error": str(e)})
+            logger.error(
+                "WATERMARK COMPOSITING FAILED — uploading UNWATERMARKED "
+                "original.",
+                extra={"ctx_error": str(e), "ctx_input_path": input_path},
+                exc_info=True,
+            )
             shutil.copy(input_path, output_path)
             return output_path
 
@@ -223,7 +239,8 @@ class FFmpegProcessor:
             if process.returncode != 0:
                 error_msg = stderr.decode(errors="replace")
                 logger.error(
-                    "Video watermarking failed",
+                    "WATERMARK COMPOSITING FAILED (ffmpeg non-zero exit) — "
+                    "uploading UNWATERMARKED original.",
                     extra={
                         "ctx_returncode": process.returncode,
                         "ctx_stderr_tail": error_msg[-800:],
@@ -234,11 +251,19 @@ class FFmpegProcessor:
 
             return output_path
         except asyncio.TimeoutError:
-            logger.error("FFmpeg process timed out")
+            logger.error(
+                "WATERMARK COMPOSITING TIMED OUT (5 min limit) — uploading "
+                "UNWATERMARKED original."
+            )
             shutil.copy(input_path, output_path)
             return output_path
         except Exception as e:
-            logger.error("FFmpeg execution error", extra={"ctx_error": str(e)})
+            logger.error(
+                "WATERMARK COMPOSITING FAILED (ffmpeg execution error) — "
+                "uploading UNWATERMARKED original.",
+                extra={"ctx_error": str(e)},
+                exc_info=True,
+            )
             shutil.copy(input_path, output_path)
             return output_path
 

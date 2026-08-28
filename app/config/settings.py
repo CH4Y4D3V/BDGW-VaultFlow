@@ -25,7 +25,8 @@ WATERMARK_OPACITY note (spec §13):
 """
 
 import json
-from typing import List
+from pathlib import Path
+from typing import ClassVar, List
 
 from pydantic import Field, field_validator, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -160,13 +161,21 @@ class Settings(BaseSettings):
     WATERMARK_ENABLED: bool = True  # Set True only when logo assets exist
 
     # ── Watermark assets — per-destination logos ──────────────────────────────
-    WATERMARK_LOGO_PATH_NSFW: str = "./assets/watermarks/nsfw_logo.png"
-    WATERMARK_LOGO_PATH_PREMIUM: str = "./assets/watermarks/premium_logo.png"
-    WATERMARK_LOGO_PATH: str = "./assets/watermarks/nsfw_logo.png"
+    # FIX: paths are absolute, resolved from settings.py's own file location
+    # (not the process's working directory at launch), since relative paths
+    # only resolve correctly if the running process's cwd happens to match
+    # where they were authored. Confirmed via visual inspection of delivered
+    # vault content that this silently caused every watermark attempt to
+    # fall back to an unmodified original.
+    _PROJECT_ROOT: ClassVar[Path] = Path(__file__).resolve().parent.parent.parent
+
+    WATERMARK_LOGO_PATH_NSFW: str = str(_PROJECT_ROOT / "assets" / "watermarks" / "nsfw_logo.png")
+    WATERMARK_LOGO_PATH_PREMIUM: str = str(_PROJECT_ROOT / "assets" / "watermarks" / "premium_logo.png")
+    WATERMARK_LOGO_PATH: str = str(_PROJECT_ROOT / "assets" / "watermarks" / "nsfw_logo.png")
 
     WATERMARK_TEXT_NSFW: str = "BD GONE WILD"
     WATERMARK_TEXT_PREMIUM: str = "BD GONE WILD ✦ PREMIUM"
-    WATERMARK_FONT_PATH: str = "./assets/fonts/Montserrat-SemiBold.ttf"
+    WATERMARK_FONT_PATH: str = str(_PROJECT_ROOT / "assets" / "fonts" / "Montserrat-SemiBold.ttf")
 
     # Accepted values: BOTTOM_RIGHT, BOTTOM_LEFT, TOP_RIGHT, TOP_LEFT, CENTER
     WATERMARK_POSITION: str = "BOTTOM_RIGHT"
