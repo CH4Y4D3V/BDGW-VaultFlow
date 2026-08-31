@@ -534,6 +534,104 @@ class DataMigrationManager:
                 exc_info=True,
             )
 
+    @classmethod
+    async def reprocess_broken_watermarks(cls, db: AsyncIOMotorDatabase) -> None:
+        """
+        ONE-TIME repair: re-queue every watermark job that COMPLETED before
+        the watermark logo path-resolution fix, so the affected content gets
+        correctly re-watermarked automatically. Guarded by a marker in
+        hub_config so it runs exactly once.
+        """
+        hub_config = db[getattr(settings, "HUB_CONFIG_COLLECTION", "hub_config")]
+        marker_key = "migration_watermark_path_fix_reprocessed_v1"
+
+        try:
+            existing_marker = await hub_config.find_one({"key": marker_key})
+            if existing_marker:
+                logger.debug(
+                    "MIGRATION: watermark path-fix reprocess already completed — skipping",
+                    extra={"ctx_completed_at": existing_marker.get("completed_at")},
+                )
+                return
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: watermark reprocess marker check failed — "
+                "skipping repair this run to avoid re-triggering on every "
+                "restart if the marker check itself is broken",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+            return
+
+        logger.info("MIGRATION: Starting one-time watermark path-fix reprocess...")
+
+        try:
+            queue = db[settings.QUEUE_COLLECTION]
+            now = datetime.now(timezone.utc)
+
+            target_query = {
+                "watermark_required": True,
+                "watermark_state": "completed",
+                "status": "completed",
+            }
+
+            affected_count = await queue.count_documents(target_query)
+
+            if affected_count > 0:
+                result = await queue.update_many(
+                    target_query,
+                    {
+                        "$set": {
+                            "status": "watermarking",
+                            "watermark_state": "pending",
+                            "locked_by": None,
+                            "locked_at": None,
+                            "retry_count": 0,
+                            "updated_at": now,
+                        }
+                    },
+                )
+                logger.warning(
+                    "MIGRATION: Re-queued %d previously-completed watermark "
+                    "job(s) for correct reprocessing (watermark logo path "
+                    "fix). These will be automatically re-downloaded, "
+                    "re-watermarked, and re-uploaded to the vault by the "
+                    "watermark worker within the next few minutes — no "
+                    "manual action needed.",
+                    result.modified_count,
+                    extra={
+                        "ctx_matched": affected_count,
+                        "ctx_modified": result.modified_count,
+                    },
+                )
+            else:
+                logger.info(
+                    "MIGRATION: No completed watermark jobs found needing reprocess."
+                )
+
+            await hub_config.update_one(
+                {"key": marker_key},
+                {
+                    "$set": {
+                        "key": marker_key,
+                        "value": "completed",
+                        "completed_at": now,
+                        "jobs_reprocessed": affected_count,
+                    }
+                },
+                upsert=True,
+            )
+            logger.info("MIGRATION: Watermark path-fix reprocess complete.")
+
+        except Exception as exc:
+            logger.error(
+                "MIGRATION: watermark path-fix reprocess failed (non-fatal) — "
+                "will retry on next restart since the completion marker was "
+                "not written",
+                extra={"ctx_error": str(exc)},
+                exc_info=True,
+            )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  DatabaseManager
@@ -610,6 +708,7 @@ class DatabaseManager:
         try:
             await DataMigrationManager.stabilize_queue(cls._db)
             await DataMigrationManager.stabilize_vault(cls._db)
+            await DataMigrationManager.reprocess_broken_watermarks(cls._db)
         except Exception as e:
             logger.error(
                 "MIGRATION: Data stabilization audit failed — attempting to proceed",
