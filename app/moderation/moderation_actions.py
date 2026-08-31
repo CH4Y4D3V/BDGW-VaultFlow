@@ -584,81 +584,94 @@ async def archive_to_vault(
 
     # Upsert MongoDB documents for each message
     for i, msg in enumerate(messages):
-        media = getattr(msg, str(msg.media.value), None) if msg.media else None
-        file_unique_id = getattr(media, "file_unique_id", None) if media else None
-        file_id = getattr(media, "file_id", None) if media else None
-        file_size = getattr(media, "file_size", 0) if media else 0
-        media_type_str = msg.media.value if msg.media else "text"
-
-        content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
-        checksum = _compute_checksum(file_unique_id, file_size or 0)
-
-        # ── Flow I: Hashing Deduplication ──
-        content_hash = None
-        if media_type_str in (MediaType.PHOTO.value, "photo"):
-            try:
-                photo_bytes = await client.download_media(msg, in_memory=True)
-                from app.utils.media_hashing import calculate_image_hash
-                content_hash = calculate_image_hash(photo_bytes)
-
-                duplicate = await vault_col.find_one({"content_hash": content_hash})
-                if duplicate:
-                    logger.warning(
-                        "duplicate_content_hash_detected",
-                        extra={
-                            "ctx_content_id": content_id,
-                            "ctx_existing": duplicate["content_id"],
-                        },
-                    )
-                    # Still archived, tagged implicitly via duplicate hash match
-            except Exception as e:
-                logger.warning(
-                    "image_hashing_failed",
-                    extra={"ctx_media_type": media_type_str, "ctx_error": str(e)},
-                )
-
-        vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
-
-        update_doc = {
-            "$setOnInsert": {
-                "content_id": content_id,
-                "created_at": now,
-                "usage_count": 0,
-            },
-            "$set": {
-                "source_chat_id": str(msg.chat.id),
-                "source_message_id": msg.id,
-                "vault_message_id": vault_msg_id if vault_msg_id else None,
-                "vault_channel_id": str(target_vault_channel_id) if vault_msg_id else None,
-                "media_group_id": msg.media_group_id,
-                "album_sequence_index": i if msg.media_group_id else None,
-                "media_type": media_type_str,
-                "file_id": file_id,
-                "file_unique_id": file_unique_id,
-                "file_size": file_size,
-                "caption": msg.caption or msg.text or "",
-                "moderation_destination": dest,
-                "status": initial_status,
-                "distribution_state": ModerationState.PENDING.value,
-                "submitter_user_id": submitter_user_id,
-                "consent_record_id": resolved_consent_id,
-                "checksum": checksum,
-                "content_hash": content_hash,
-                "updated_at": now,
-                "metadata": {
-                    "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
-                    "date": msg.date.isoformat() if msg.date else None,
-                },
-            },
-        }
-
         try:
-            await vault_col.update_one({"content_id": content_id}, update_doc, upsert=True)
+            media = getattr(msg, str(msg.media.value), None) if msg.media else None
+            file_unique_id = getattr(media, "file_unique_id", None) if media else None
+            file_id = getattr(media, "file_id", None) if media else None
+            file_size = getattr(media, "file_size", 0) if media else 0
+            media_type_str = msg.media.value if msg.media else "text"
+
+            content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
+            checksum = _compute_checksum(file_unique_id, file_size or 0)
+
+            # ── Flow I: Hashing Deduplication ──
+            content_hash = None
+            if media_type_str in (MediaType.PHOTO.value, "photo"):
+                try:
+                    photo_bytes = await client.download_media(msg, in_memory=True)
+                    from app.utils.media_hashing import calculate_image_hash
+                    content_hash = calculate_image_hash(photo_bytes)
+
+                    duplicate = await vault_col.find_one({"content_hash": content_hash})
+                    if duplicate:
+                        logger.warning(
+                            "duplicate_content_hash_detected",
+                            extra={
+                                "ctx_content_id": content_id,
+                                "ctx_existing": duplicate["content_id"],
+                            },
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "image_hashing_failed",
+                        extra={"ctx_media_type": media_type_str, "ctx_error": str(e)},
+                    )
+
+            vault_msg_id = vault_message_ids[i] if i < len(vault_message_ids) else 0
+
+            update_doc = {
+                "$setOnInsert": {
+                    "content_id": content_id,
+                    "created_at": now,
+                    "usage_count": 0,
+                },
+                "$set": {
+                    "source_chat_id": str(msg.chat.id),
+                    "source_message_id": msg.id,
+                    "vault_message_id": vault_msg_id if vault_msg_id else None,
+                    "vault_channel_id": str(target_vault_channel_id) if vault_msg_id else None,
+                    "media_group_id": msg.media_group_id,
+                    "album_sequence_index": i if msg.media_group_id else None,
+                    "media_type": media_type_str,
+                    "file_id": file_id,
+                    "file_unique_id": file_unique_id,
+                    "file_size": file_size,
+                    "caption": msg.caption or msg.text or "",
+                    "moderation_destination": dest,
+                    "status": initial_status,
+                    "distribution_state": ModerationState.PENDING.value,
+                    "submitter_user_id": submitter_user_id,
+                    "consent_record_id": resolved_consent_id,
+                    "checksum": checksum,
+                    "content_hash": content_hash,
+                    "updated_at": now,
+                    "metadata": {
+                        "has_spoiler": getattr(media, "has_spoiler", False) if media else False,
+                        "date": msg.date.isoformat() if msg.date else None,
+                    },
+                },
+            }
+
+            try:
+                await vault_col.update_one({"content_id": content_id}, update_doc, upsert=True)
+            except Exception as e:
+                logger.error(
+                    "Failed to upsert vault document",
+                    extra={"ctx_content_id": content_id, "ctx_error": str(e)},
+                )
         except Exception as e:
-            logger.error(
-                "Failed to upsert vault document",
-                extra={"ctx_content_id": content_id, "ctx_error": str(e)},
+            logger.exception(
+                "archive_to_vault: per-message processing failed unexpectedly "
+                "— skipping this message, continuing with the rest of the "
+                "submission",
+                extra={
+                    "ctx_msg_index": i,
+                    "ctx_msg_id": getattr(msg, "id", None),
+                    "ctx_media_type": str(getattr(msg, "media", None)),
+                    "ctx_error": str(e),
+                },
             )
+            continue
 
     logger.info(
         "vault_insert_completed",
@@ -759,47 +772,60 @@ async def enqueue_for_distribution(
     source_channel_id = f"submission_{dest}"
 
     for i, msg in enumerate(messages):
-        media = getattr(msg, str(msg.media.value), None) if msg.media else None
-        file_unique_id = getattr(media, "file_unique_id", None) if media else None
-
-        content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
-        vault_msg_id = vault_message_ids[i]
-
-        media_type_str = msg.media.value if msg.media else "text"
         try:
-            media_type = MediaType(media_type_str)
-        except ValueError:
-            media_type = MediaType.TEXT
+            media = getattr(msg, str(msg.media.value), None) if msg.media else None
+            file_unique_id = getattr(media, "file_unique_id", None) if media else None
 
-        initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
+            content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
+            vault_msg_id = vault_message_ids[i]
 
-        job = QueueJob(
-            schema_version=1,
-            content_id=content_id,
-            source_channel_id=source_channel_id,
-            source_message_id=msg.id,
-            vault_chat_id=resolved_vault_chat_id,
-            vault_message_id=vault_msg_id,
-            media_group_id=group_id,
-            target_channel_ids=[str(target_group_id)],
-            media_type=media_type,
-            media_file_id=getattr(media, "file_id", None) if media else None,
-            caption=msg.caption or msg.text or "",
-            priority=DistributionPriority.MODERATED,
-            status=initial_status,
-            max_retries=settings.MAX_RETRY_ATTEMPTS,
-            execute_after=effective_execute_after,
-            queue_deadline=deadline,
-            watermark_required=watermark_required,
-            watermark_config=watermark_config,
-            album_sequence_index=i if group_id else None,
-            metadata={
-                "submitter_user_id": submitter_user_id,
-                "destination": dest,
-                "moderated_at": now.isoformat(),
-                "source_chat_id": msg.chat.id,
-            },
-        )
+            media_type_str = msg.media.value if msg.media else "text"
+            try:
+                media_type = MediaType(media_type_str)
+            except ValueError:
+                media_type = MediaType.TEXT
+
+            initial_status = JobStatus.WATERMARKING if watermark_required else JobStatus.PENDING
+
+            job = QueueJob(
+                schema_version=1,
+                content_id=content_id,
+                source_channel_id=source_channel_id,
+                source_message_id=msg.id,
+                vault_chat_id=resolved_vault_chat_id,
+                vault_message_id=vault_msg_id,
+                media_group_id=group_id,
+                target_channel_ids=[str(target_group_id)],
+                media_type=media_type,
+                media_file_id=getattr(media, "file_id", None) if media else None,
+                caption=msg.caption or msg.text or "",
+                priority=DistributionPriority.MODERATED,
+                status=initial_status,
+                max_retries=settings.MAX_RETRY_ATTEMPTS,
+                execute_after=effective_execute_after,
+                queue_deadline=deadline,
+                watermark_required=watermark_required,
+                watermark_config=watermark_config,
+                album_sequence_index=i if group_id else None,
+                metadata={
+                    "submitter_user_id": submitter_user_id,
+                    "destination": dest,
+                    "moderated_at": now.isoformat(),
+                    "source_chat_id": msg.chat.id,
+                },
+            )
+        except Exception as e:
+            logger.exception(
+                "enqueue_for_distribution: QueueJob construction failed for "
+                "one message — skipping it, continuing with the rest of "
+                "the submission",
+                extra={
+                    "ctx_msg_index": i,
+                    "ctx_msg_id": getattr(msg, "id", None),
+                    "ctx_error": str(e),
+                },
+            )
+            continue
 
         try:
             await queue_repo.enqueue(job)
@@ -815,7 +841,7 @@ async def enqueue_for_distribution(
                 extra={"ctx_content_id": content_id, "ctx_dest": dest, "ctx_error": str(e)},
                 exc_info=True,
             )
-            return False
+            continue
 
     return True
 
@@ -1324,12 +1350,12 @@ async def execute_reject(
     # Step 1 — Update vault status to REJECTED
     last_content_id = "unknown"
     if messages:
-        try:
-            db = DatabaseManager.get_db()
-            vault_col = db[settings.VAULT_COLLECTION]
-            now = datetime.now(timezone.utc)
+        db = DatabaseManager.get_db()
+        vault_col = db[settings.VAULT_COLLECTION]
+        now = datetime.now(timezone.utc)
 
-            for msg in messages:
+        for msg in messages:
+            try:
                 media = getattr(msg, str(msg.media.value), None) if msg.media else None
                 file_unique_id = getattr(media, "file_unique_id", None) if media else None
                 content_id = _generate_content_id(msg.chat.id, msg.id, file_unique_id)
@@ -1339,11 +1365,12 @@ async def execute_reject(
                     {"content_id": content_id},
                     {"$set": {"status": ModerationState.REJECTED.value, "updated_at": now}},
                 )
-        except Exception as e:
-            logger.warning(
-                "execute_reject: failed to update vault status to REJECTED",
-                extra={"ctx_submitter": submitter_user_id, "ctx_error": str(e)},
-            )
+            except Exception as e:
+                logger.warning(
+                    "execute_reject: failed to update vault status to REJECTED "
+                    "for one message — continuing with the rest of the batch",
+                    extra={"ctx_submitter": submitter_user_id, "ctx_error": str(e)},
+                )
 
     # Step 2 — Log to user's hub topic and re-flag as pending
     try:
