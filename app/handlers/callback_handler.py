@@ -248,7 +248,10 @@ async def handle_moderation_callback(client: Client, callback: CallbackQuery) ->
             extra={"ctx_error": str(e)},
         )
         try:
-            await callback.answer("⚠️ Error occurred.", show_alert=True)
+            error_summary = f"{type(e).__name__}: {str(e)}"[:180]
+            await callback.answer(
+                f"⚠️ Error: {error_summary}", show_alert=True
+            )
         except Exception:
             pass
 
