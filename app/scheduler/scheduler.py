@@ -720,27 +720,36 @@ class DistributionScheduler:
             else:
                 resolved_vault_chat_id = settings.VAULT_CHANNEL_ID
 
-        job = QueueJob(
-            schema_version=1,
-            content_id=content_item["content_id"],
-            source_channel_id=source_channel_id,
-            source_message_id=content_item.get("message_id"),
-            vault_chat_id=resolved_vault_chat_id,
-            vault_message_id=vault_message_id,
-            target_channel_ids=target_channel_ids,
-            media_group_id=content_item.get("media_group_id"),
-            media_type=media_type,
-            media_file_id=content_item.get("file_id"),
-            caption=content_item.get("caption"),
-            priority=content_item.get("priority", DistributionPriority.NORMAL),
-            status=initial_status,
-            max_retries=settings.MAX_RETRY_ATTEMPTS,
-            execute_after=execute_after,
-            watermark_required=watermark_required,
-            watermark_config=watermark_config,
-            album_sequence_index=content_item.get("album_sequence_index"),
-            metadata={**content_item.get("metadata", {})},
-        )
+        try:
+            job = QueueJob(
+                schema_version=1,
+                content_id=content_item["content_id"],
+                source_channel_id=source_channel_id,
+                source_message_id=content_item.get("message_id"),
+                vault_chat_id=resolved_vault_chat_id,
+                vault_message_id=vault_message_id,
+                target_channel_ids=target_channel_ids,
+                media_group_id=content_item.get("media_group_id"),
+                media_type=media_type,
+                media_file_id=content_item.get("file_id"),
+                caption=content_item.get("caption"),
+                priority=content_item.get("priority", DistributionPriority.NORMAL),
+                status=initial_status,
+                max_retries=settings.MAX_RETRY_ATTEMPTS,
+                execute_after=execute_after,
+                watermark_required=watermark_required,
+                watermark_config=watermark_config,
+                album_sequence_index=content_item.get("album_sequence_index"),
+                metadata={**content_item.get("metadata", {})},
+            )
+        except Exception as e:
+            logger.error(
+                f"_enqueue_content: QueueJob construction failed for "
+                f"content_id={content_item.get('content_id')!r} — skipping "
+                f"this item, remaining items in the batch are unaffected: {e}",
+                exc_info=True,
+            )
+            return False
 
         try:
             await self._queue_repo.enqueue(job)
